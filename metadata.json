@@ -1,0 +1,6 @@
+{
+  "name": "3D Dog Companion Game",
+  "description": "An interactive 3D dog simulator game featuring realistic animations, treat feeding, playful mini-games, an unlockable canine skill tree, and a Gemini Live conversational voice and chat companion.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
