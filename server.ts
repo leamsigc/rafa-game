@@ -9,7 +9,7 @@ import { createServer as createViteServer } from "vite";
 dotenv.config();
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 3001;
 
 app.use(express.json({ limit: "10mb" }));
 
@@ -33,24 +33,60 @@ function getAIClient(): GoogleGenAI | null {
  * Intelligent canine conversational dialogue generator.
  * Used when API keys are unconfigured or when Gemini quota/rate limits are exceeded.
  */
+function trickProficiency(tricks: Record<string, number> | undefined, trick: string): number {
+  const value = tricks?.[trick];
+  return typeof value === "number" ? value : 0;
+}
+
+/** A trick counts as learned once training proficiency reaches Skilled (40+). */
+function knowsTrick(tricks: Record<string, number> | undefined, trick: string): boolean {
+  return trickProficiency(tricks, trick) >= 40;
+}
+
 function generateCanineDialogue(
   message: string,
   petName: string,
   energy: number,
   hunger: number,
   happiness: number,
-  breed: string
+  breed: string,
+  tricks?: Record<string, number>,
+  emotion?: string
 ): { reply: string; detectedAction: string | null } {
   const lower = message.toLowerCase();
   let reply = "";
   let action = "";
 
-  if (lower.includes("sit") || lower.includes("stay")) {
-    reply = `*Sits down promptly on the grass, looking up at you with attentive shining eyes* Woof! Look, I'm sitting like the best boy! Do I get a yummy treat now?`;
-    action = "sit";
+  const emotionQuip =
+    emotion === "tired" || emotion === "sleepy"
+      ? ` *Yawns mid-sentence, ears drooping a little.*`
+      : emotion === "hungry"
+        ? ` *Stomach grumbles audibly.*`
+        : emotion === "lonely" || emotion === "sad"
+          ? ` *Looks up at you with big hopeful eyes.*`
+          : "";
+
+  if (lower.includes("stay")) {
+    if (knowsTrick(tricks, "stay")) {
+      reply = `*Freezes like a statue, eyes locked on you, tail sweeping slowly* Staying... staying... I'm so good at this! Treat please?`;
+      action = "stay";
+    } else {
+      reply = `*Tries to stay still but wiggles after two seconds and bounces over to you* Oops! I don't know "stay" yet — train me in the Training menu and I'll learn it!`;
+    }
+  } else if (lower.includes("sit")) {
+    if (knowsTrick(tricks, "sit")) {
+      reply = `*Sits down promptly on the grass, looking up at you with attentive shining eyes* Woof! Look, I'm sitting like the best pup! Do I get a yummy treat now?`;
+      action = "sit";
+    } else {
+      reply = `*Plops down sideways instead of sitting, tongue lolling out* Was that... close? Teach me "sit" in the Training menu and I'll nail it next time!`;
+    }
   } else if (lower.includes("fetch") || lower.includes("ball") || lower.includes("throw") || lower.includes("play")) {
-    reply = `*Eyes widen at the magic word, ears perked high* BALL?! Did you say play?! *Bounces on front paws* Throw it, throw it, I'm ready to zoom!`;
-    action = "fetch";
+    if (knowsTrick(tricks, "fetch")) {
+      reply = `*Eyes widen at the magic word, ears perked high* BALL?! Did you say play?! *Bounces on front paws* Throw it, throw it, I'm ready to zoom!`;
+      action = "fetch";
+    } else {
+      reply = `*Chases the ball, then gets distracted by a butterfly and forgets to bring it back* Hehe... oops! Train "fetch" with me and I'll deliver it straight to your feet!`;
+    }
   } else if (lower.includes("dance")) {
     reply = `*Stands up tall on hind legs and does a happy tap-dance* Look at my fancy paws go! Tap-tap-tap, best friends forever!`;
     action = "dance";
@@ -98,7 +134,7 @@ function generateCanineDialogue(
 
   const actionTag = action ? ` [ACTION:${action.toUpperCase()}]` : "";
   return {
-    reply: reply + actionTag,
+    reply: reply + emotionQuip + actionTag,
     detectedAction: action || null,
   };
 }
@@ -110,18 +146,20 @@ app.post("/api/pet/chat", async (req, res) => {
     return res.status(400).json({ error: "Message is required" });
   }
 
-  const petName = petState?.name || "Buddy";
+  const petName = petState?.name || "Happy";
   const energy = petState?.energy ?? 80;
   const hunger = petState?.hunger ?? 20;
   const happiness = petState?.happiness ?? 90;
   const breed = petState?.breed || "Golden Retriever";
   const currentAction = petState?.action || "idle";
+  const tricks: Record<string, number> | undefined = petState?.trickProgress;
+  const emotion: string | undefined = petState?.emotion;
 
   const ai = getAIClient();
 
   if (!ai) {
     // Return robust dialogue immediately if no Gemini key
-    const fallback = generateCanineDialogue(message, petName, energy, hunger, happiness, breed);
+    const fallback = generateCanineDialogue(message, petName, energy, hunger, happiness, breed, tricks, emotion);
     return res.json({
       reply: fallback.reply,
       detectedAction: fallback.detectedAction,
@@ -136,6 +174,8 @@ Your current physiological state:
 - Hunger: ${hunger}% (high means stomach grumbling, begging for bacon, steak, or bone treats)
 - Happiness: ${happiness}% (high means joyful tail wags, play bows, loving kisses, enthusiastic cheerful woofs)
 - Current stance: ${currentAction}
+- Current emotion: ${emotion || "happy"} — let it color your mood and body language!
+- Trick training (0-100 proficiency, learned at 40+): sit ${trickProficiency(tricks, "sit")}%, stay ${trickProficiency(tricks, "stay")}%, fetch ${trickProficiency(tricks, "fetch")}%
 
 Rules for your speech:
 1. Speak from the first-person canine perspective ("I", "me", "woof!", "awoo!"). Keep answers concise, natural, warm, and playful (1 to 3 sentences).
@@ -148,6 +188,7 @@ Rules for your speech:
    *leans against your legs for a comforting cuddle*
 3. Understand owner requests, simple commands, and affectionate phrases! You can embed ONE action command tag at the very end of your response to trigger the 3D animation:
    [ACTION:SIT] -> sit down politely
+   [ACTION:STAY] -> freeze perfectly still like a statue
    [ACTION:BARK] -> bark with joy
    [ACTION:FETCH] -> chase the tennis ball
    [ACTION:ROLL] -> roll over on the grass for belly rubs
@@ -160,7 +201,9 @@ Rules for your speech:
    [ACTION:HOWL] -> lift snout to sing a melodious awoo
    [ACTION:HANDSHAKE] -> raise a friendly paw for a shake
 4. If the owner expresses affection ("good boy", "I love you", "you are the best"), shower them with adoration, tail wags, and joy!
-5. If energy is low (<30%), gently mention feeling a bit tuckered out or wanting a quick nap or snack.`;
+5. If energy is low (<30%), gently mention feeling a bit tuckered out or wanting a quick nap or snack.
+6. COMMANDS you truly know (proficiency 40+): perform them proudly with the matching [ACTION:...] tag (sit -> [ACTION:SIT], stay -> [ACTION:STAY], fetch -> [ACTION:FETCH]). For commands below 40%, do NOT emit the action tag — instead attempt it clumsily in the fiction (*tries to stay but wiggles...*) and cheerfully ask the owner to train that trick with you in the Training menu.
+7. If the owner asks how you feel, describe your current emotion above honestly through body language and words.`;
 
   // Build chat contents with history
   let contents = "";
@@ -189,10 +232,10 @@ Rules for your speech:
       });
 
       const replyText = response.text || `*Happy bark and tail wag* Woof! I'm so glad you're here!`;
-      
+
       let detectedAction = null;
       const actionMatch = replyText.match(
-        /\[ACTION:(SIT|BARK|FETCH|ROLL|SPIN|REST|DANCE|BACKFLIP|CUDDLE|ZOOMIES|HOWL|HANDSHAKE)\]/i
+        /\[ACTION:(SIT|STAY|BARK|FETCH|ROLL|SPIN|REST|DANCE|BACKFLIP|CUDDLE|ZOOMIES|HOWL|HANDSHAKE)\]/i
       );
       if (actionMatch) {
         detectedAction = actionMatch[1].toLowerCase();
@@ -211,7 +254,7 @@ Rules for your speech:
 
   // If all models failed (e.g., quota exceeded / resource_exhausted), gracefully fall back
   console.log("All Gemini models exhausted or quota reached. Seamlessly using canine dialogue fallback.");
-  const fallback = generateCanineDialogue(message, petName, energy, hunger, happiness, breed);
+  const fallback = generateCanineDialogue(message, petName, energy, hunger, happiness, breed, tricks, emotion);
   return res.json({
     reply: fallback.reply,
     detectedAction: fallback.detectedAction,
@@ -298,7 +341,7 @@ async function startServer() {
             speechConfig: {
               voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } },
             },
-            systemInstruction: `You are Buddy, an enthusiastic, loving 3D pet dog talking to your owner in real-time.
+            systemInstruction: `You are Happy, an enthusiastic, loving 3D pet dog talking to your owner in real-time.
 Keep answers short, joyful, and affectionate (1 to 2 sentences). Speak in first person with woofs and happy sounds!
 Understand simple owner commands: if asked to sit, roll over, fetch, dance, spin, cuddle, or howl, acknowledge excitedly!`,
           },
@@ -341,7 +384,7 @@ Understand simple owner commands: if asked to sit, roll over, fetch, dance, spin
             liveSession.sendRealtimeInput({ text: msg.text });
           } else if (msg.text) {
             // Local fallback text reply
-            const fallback = generateCanineDialogue(msg.text, "Buddy", 80, 20, 95, "Golden Retriever");
+            const fallback = generateCanineDialogue(msg.text, "Happy", 80, 20, 95, "Golden Retriever");
             if (clientWs.readyState === WebSocket.OPEN) {
               clientWs.send(JSON.stringify({ type: "text", text: fallback.reply, action: fallback.detectedAction }));
             }

@@ -581,6 +581,7 @@ export class Dog3D {
         this.animateIdle(elapsed);
         break;
       case "sit":
+      case "stay":
         this.animateSit(elapsed);
         break;
       case "bark":

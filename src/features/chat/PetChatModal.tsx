@@ -13,6 +13,7 @@ import {
   Play,
 } from "lucide-react";
 import { ChatMessage, DogAction, PetStats } from "../../types/pet";
+import { deriveEmotion, getEmotionMeta } from "../emotions/emotion";
 import { sound } from "../../utils/audio";
 import dogAvatar from "../../assets/images/dog_avatar_1788547305164.jpg";
 import {
@@ -66,6 +67,16 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
 
   const liveSessionRef = useRef<GeminiLiveSession | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  const emotionMeta = getEmotionMeta(
+    deriveEmotion({
+      energy: petStats.energy,
+      happiness: petStats.happiness,
+      hunger: petStats.hunger,
+      lastInteractionAt: petStats.lastInteractionAt ?? Date.now(),
+      isSleeping: false,
+    })
+  );
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -157,6 +168,8 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
             happiness: petStats.happiness,
             hunger: petStats.hunger,
             breed: petStats.breed,
+            trickProgress: petStats.trickProgress || {},
+            emotion: emotionMeta.emotion,
           },
           history: messages.slice(-6).map((m) => ({
             role: m.sender,
@@ -214,13 +227,15 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
       setLiveStatusText("Live conversation paused");
       setIsDogSpeaking(false);
     } else {
-      setLiveStatusText("Connecting to Gemini Live API...");
+      setLiveStatusText("Connecting to live voice...");
       const session = new GeminiLiveSession();
 
       session.onStatusChange = (active) => {
         setIsLiveActive(active);
         if (active) {
-          setLiveStatusText(`Listening... Say "Buddy sit", "Who's a good boy", or "Dance!"`);
+          setLiveStatusText(
+            `Listening... Say "${petStats.name} sit", "Who's a good boy", or "Dance!"`
+          );
         }
       };
 
@@ -234,6 +249,7 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
         // Detect action in live speech
         const lower = text.toLowerCase();
         if (lower.includes("sit")) onTriggerDogAction("sit");
+        else if (lower.includes("stay") || lower.includes("statue") || lower.includes("freeze")) onTriggerDogAction("stay");
         else if (lower.includes("roll")) onTriggerDogAction("roll");
         else if (lower.includes("dance")) onTriggerDogAction("dance");
         else if (lower.includes("backflip")) onTriggerDogAction("backflip");
@@ -275,13 +291,15 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-base font-black text-white leading-none">{petStats.name}</h3>
+                <h3 className="text-base font-black text-white leading-none">
+                  {petStats.name} Chat
+                </h3>
                 <span className="text-[10px] uppercase font-black tracking-wider px-2 py-0.5 rounded-full bg-[#A7C957] text-[#386641]">
-                  Gemini Live
+                  {petStats.name}
                 </span>
               </div>
               <p className="text-xs text-[#F2E8CF]/80 mt-0.5">
-                Energy {petStats.energy}% • {petStats.happiness}% Joy • {petStats.hunger}% Hunger
+                {emotionMeta.emoji} Feeling {emotionMeta.label} • Energy {petStats.energy}% • {petStats.happiness}% Joy
               </p>
             </div>
           </div>
@@ -332,7 +350,7 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
               }`}
             >
               <Radio className="w-3 h-3 animate-pulse" />
-              <span>Gemini Live Voice</span>
+              <span>{petStats.name} Voice</span>
             </button>
           </div>
 
@@ -368,7 +386,7 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
                 />
               </div>
 
-              <h3 className="text-base font-black text-[#386641]">{petStats.name} Live Voice</h3>
+              <h3 className="text-base font-black text-[#386641]">Talk with {petStats.name}</h3>
               <p className="text-xs font-medium text-[#386641]/80 leading-relaxed">
                 {liveStatusText}
               </p>

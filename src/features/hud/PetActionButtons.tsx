@@ -24,19 +24,25 @@ import {
   Lightbulb,
   Bed,
   Trees,
+  Pencil,
 } from "lucide-react";
-import { DogAction, PetStats, HouseViewMode } from "../../types/pet";
+import { DogAction, PetStats, HouseRoom, HouseViewMode } from "../../types/pet";
+import { DogEmotion, getEmotionMeta } from "../emotions/emotion";
 import { TimeOfDay } from "../dog3d/ParkScene";
 import dogAvatar from "../../assets/images/dog_avatar_1788547305164.jpg";
 import { SKILL_NODES } from "../skills/skillTreeData";
 
 interface PetActionButtonsProps {
   stats: PetStats;
+  emotion: DogEmotion;
   currentAction: DogAction;
   timeOfDay: TimeOfDay;
   soundEnabled: boolean;
   followCamera: boolean;
   viewMode?: HouseViewMode;
+  houseRoom?: HouseRoom;
+  editMode?: boolean;
+  onToggleEditMode?: () => void;
   onActionClick: (action: DogAction) => void;
   onFeedClick: () => void;
   onPlayFetch: () => void;
@@ -44,6 +50,8 @@ interface PetActionButtonsProps {
   onTrainClick: () => void;
   onOpenChat: () => void;
   onOpenMiniGames: () => void;
+  onOpenCooking?: () => void;
+  onSwitchRoom?: (room: HouseRoom) => void;
   onOpenCustomizer: () => void;
   onToggleTimeOfDay: () => void;
   onToggleSound: () => void;
@@ -80,11 +88,15 @@ const ALL_TRICKS: TrickItem[] = [
 
 export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   stats,
+  emotion,
   currentAction,
   timeOfDay,
   soundEnabled,
   followCamera,
   viewMode = "park",
+  houseRoom = "living",
+  editMode = false,
+  onToggleEditMode,
   onActionClick,
   onFeedClick,
   onPlayFetch,
@@ -92,6 +104,8 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   onTrainClick,
   onOpenChat,
   onOpenMiniGames,
+  onOpenCooking,
+  onSwitchRoom,
   onOpenCustomizer,
   onToggleTimeOfDay,
   onToggleSound,
@@ -105,6 +119,17 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
 }) => {
   const unlockedSet = new Set(stats.unlockedSkills || []);
   const isHouse = viewMode === "house";
+  const isKitchen = isHouse && houseRoom === "kitchen";
+  const isHallway = isHouse && houseRoom === "hallway";
+  const roomLabel = !isHouse
+    ? "🌳 Park"
+    : houseRoom === "kitchen"
+      ? "🍳 Kitchen"
+      : houseRoom === "hallway"
+        ? "🚪 Hallway"
+        : houseRoom === "upstairs"
+          ? "🛏️ Upstairs"
+          : "🛋️ Living Room";
 
   return (
     <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-3 sm:p-4 select-none">
@@ -138,7 +163,15 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
                   Lvl {stats.level}
                 </span>
                 <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300">
-                  {isHouse ? "🏠 House" : "🌳 Park"}
+                  {roomLabel}
+                </span>
+              </div>
+              <div className="mt-1 flex items-center gap-1.5">
+                <span
+                  title={getEmotionMeta(emotion).blurb}
+                  className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${getEmotionMeta(emotion).badge}`}
+                >
+                  {getEmotionMeta(emotion).emoji} {stats.name} feels {getEmotionMeta(emotion).label}
                 </span>
               </div>
 
@@ -332,8 +365,63 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
           >
             <Camera className="w-4 h-4" />
           </button>
+
+          {/* Furniture edit mode toggle */}
+          {onToggleEditMode && (
+            <button
+              onClick={onToggleEditMode}
+              title={editMode ? "Exit furniture edit mode" : "Edit mode: move & rotate furniture"}
+              className={`p-2.5 rounded-2xl transition-colors cursor-pointer ${
+                editMode ? "bg-amber-500 text-white" : "hover:bg-white active:bg-[#F2E8CF] text-[#386641]"
+              }`}
+            >
+              <Pencil className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Multi-room House switcher: Living <-> Hallway <-> Kitchen */}
+      {isHouse && onSwitchRoom && (
+        <div className="pointer-events-auto self-start flex items-center gap-1.5 bg-[#1f2937]/85 backdrop-blur-md border border-white/15 rounded-full p-1.5 shadow-xl">
+          <button
+            onClick={() => onSwitchRoom("living")}
+            title="Go to Living Room (toys, lamp)"
+            className={`px-3.5 py-1.5 rounded-full text-xs font-black transition-all cursor-pointer ${
+              houseRoom === "living" ? "bg-[#F2E8CF] text-[#386641] shadow" : "text-white/80 hover:text-white hover:bg-white/10"
+            }`}
+          >
+            🛋️ Living
+          </button>
+          <button
+            onClick={() => onSwitchRoom("hallway")}
+            title="Go to Hallway (doors + stairs up)"
+            className={`px-3.5 py-1.5 rounded-full text-xs font-black transition-all cursor-pointer ${
+              isHallway ? "bg-violet-500 text-white shadow" : "text-white/80 hover:text-white hover:bg-white/10"
+            }`}
+          >
+            🚪 Hall
+          </button>
+          <button
+            onClick={() => onSwitchRoom("kitchen")}
+            title="Go to Kitchen (cooking pot)"
+            className={`px-3.5 py-1.5 rounded-full text-xs font-black transition-all cursor-pointer ${
+              isKitchen ? "bg-orange-500 text-white shadow" : "text-white/80 hover:text-white hover:bg-white/10"
+            }`}
+          >
+            🍳 Kitchen
+          </button>
+          {onOpenCooking && (
+            <button
+              onClick={onOpenCooking}
+              title={`Open cooking pot to cook for ${stats.name}`}
+              className="px-3.5 py-1.5 rounded-full text-xs font-black bg-amber-400 hover:bg-amber-300 text-amber-950 transition-all cursor-pointer shadow"
+            >
+              🍲 Cook!
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Floating Canine Tricks Panel (Right Side) */}
       <div className="self-end pointer-events-auto flex flex-col gap-1.5 max-h-[46vh] overflow-y-auto no-scrollbar py-1">
@@ -410,7 +498,7 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
         })}
       </div>
 
-      {/* Primary Action Buttons Bar (Feed, Play Fetch, Pet, Train, Talk, Mini-Games) */}
+      {/* Primary Action Buttons Bar (Feed, Play/Cook, Pet, Train, Dog Chat, Games/Sleep) */}
       <div className="pointer-events-auto w-full max-w-4xl mx-auto">
         <div className="bg-[#F2E8CF]/95 backdrop-blur-md border border-[#386641]/20 rounded-3xl p-2 sm:p-2.5 shadow-2xl shadow-[#386641]/20 grid grid-cols-3 sm:grid-cols-6 gap-2">
           {/* 1. Feed */}
@@ -426,8 +514,33 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             <span className="text-[9px] font-bold text-[#6A994E] -mt-0.5">+Energy</span>
           </button>
 
-          {/* 2. Play Fetch (Park) or Play with House Toy (House) */}
-          {isHouse ? (
+          {/* 2. Play Fetch (Park) / Toy (Living) / Cook (Kitchen pot) */}
+          {!isHouse ? (
+            <button
+              onClick={onPlayFetch}
+              title="Throw tennis ball across the 3D park for dog to retrieve"
+              className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-white hover:bg-[#A7C957]/20 active:bg-white border border-[#386641]/15 rounded-2xl shadow-xs transition-all active:scale-95 group cursor-pointer"
+            >
+              <div className="w-8 h-8 rounded-xl bg-[#A7C957]/30 group-hover:bg-[#386641] text-[#386641] group-hover:text-[#F2E8CF] flex items-center justify-center transition-colors text-base">
+                🎾
+              </div>
+              <span className="text-xs font-black text-[#386641]">Play Fetch</span>
+              <span className="text-[9px] font-bold text-[#386641]/70 -mt-0.5">+Fun & Coins</span>
+            </button>
+          ) : isKitchen ? (
+            <button
+              id="kitchen-cook-button"
+              onClick={() => onOpenCooking?.()}
+              title={`Cook in the central pot for ${stats.name}`}
+              className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-gradient-to-tr from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 text-white border border-orange-400 rounded-2xl shadow-md transition-all active:scale-95 group cursor-pointer"
+            >
+              <div className="w-8 h-8 rounded-xl bg-white/25 text-white flex items-center justify-center transition-colors text-base">
+                🍲
+              </div>
+              <span className="text-xs font-black text-white">Cook</span>
+              <span className="text-[9px] font-bold text-amber-100 -mt-0.5">Pot Meal</span>
+            </button>
+          ) : (
             <button
               id="house-toy-button"
               onClick={() => onActionClick("eat")}
@@ -439,18 +552,6 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
               </div>
               <span className="text-xs font-black text-[#386641]">Toy</span>
               <span className="text-[9px] font-bold text-amber-700 -mt-0.5">Squeak!</span>
-            </button>
-          ) : (
-            <button
-              onClick={onPlayFetch}
-              title="Throw tennis ball across the 3D park for dog to retrieve"
-              className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-white hover:bg-[#A7C957]/20 active:bg-white border border-[#386641]/15 rounded-2xl shadow-xs transition-all active:scale-95 group cursor-pointer"
-            >
-              <div className="w-8 h-8 rounded-xl bg-[#A7C957]/30 group-hover:bg-[#386641] text-[#386641] group-hover:text-[#F2E8CF] flex items-center justify-center transition-colors text-base">
-                🎾
-              </div>
-              <span className="text-xs font-black text-[#386641]">Play Fetch</span>
-              <span className="text-[9px] font-bold text-[#386641]/70 -mt-0.5">+Fun & Coins</span>
             </button>
           )}
 
@@ -480,36 +581,21 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             <span className="text-[9px] font-bold text-[#A7C957] -mt-0.5">Skill Tree</span>
           </button>
 
-          {/* 5. House Shop (in House) or Talk (in Park) */}
-          {isHouse ? (
-            <button
-              id="house-bottom-shop-button"
-              onClick={onOpenShop}
-              title="Open House Shop: Bed Colors, Hats, Bowties, Toys"
-              className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-gradient-to-tr from-amber-500 to-yellow-500 hover:from-amber-600 hover:to-yellow-600 text-white border border-amber-400 rounded-2xl shadow-md transition-all active:scale-95 group cursor-pointer relative overflow-hidden"
-            >
-              <div className="w-8 h-8 rounded-xl bg-white/25 text-white flex items-center justify-center transition-colors">
-                <ShoppingBag className="w-4 h-4 fill-current" />
-              </div>
-              <span className="text-xs font-black text-white">Shop</span>
-              <span className="text-[9px] font-bold text-amber-100 -mt-0.5">Bed & Hats</span>
-            </button>
-          ) : (
-            <button
-              onClick={onOpenChat}
-              title="Conversational Gemini Chatbot & Live Voice API"
-              className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-[#386641] hover:bg-[#2c5234] active:bg-[#224028] text-[#F2E8CF] border border-[#386641] rounded-2xl shadow-md transition-all active:scale-95 group cursor-pointer relative overflow-hidden"
-            >
-              <div className="w-8 h-8 rounded-xl bg-[#A7C957]/30 text-[#F2E8CF] flex items-center justify-center transition-colors">
-                <MessageCircle className="w-4 h-4 fill-current text-[#A7C957]" />
-              </div>
-              <span className="text-xs font-black text-[#F2E8CF] flex items-center gap-1">
-                <span>Talk</span>
-                <Mic className="w-3 h-3 text-[#A7C957]" />
-              </span>
-              <span className="text-[9px] font-bold text-[#A7C957] -mt-0.5">Gemini Live</span>
-            </button>
-          )}
+          {/* 5. Dog Chat — named after YOUR dog (always visible) */}
+          <button
+            onClick={onOpenChat}
+            title={`Chat with ${stats.name} — Conversational Gemini Chatbot & Live Voice`}
+            className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-[#386641] hover:bg-[#2c5234] active:bg-[#224028] text-[#F2E8CF] border border-[#386641] rounded-2xl shadow-md transition-all active:scale-95 group cursor-pointer relative overflow-hidden"
+          >
+            <div className="w-8 h-8 rounded-xl bg-[#A7C957]/30 text-[#F2E8CF] flex items-center justify-center transition-colors">
+              <MessageCircle className="w-4 h-4 fill-current text-[#A7C957]" />
+            </div>
+            <span className="text-xs font-black text-[#F2E8CF] flex items-center gap-1 max-w-full">
+              <span className="truncate max-w-[64px]">{stats.name}</span>
+              <Mic className="w-3 h-3 text-[#A7C957] shrink-0" />
+            </span>
+            <span className="text-[9px] font-bold text-[#A7C957] -mt-0.5">Chat 💬</span>
+          </button>
 
           {/* 6. Bed Sleep (in House) or Mini-Games (in Park) */}
           {isHouse ? (

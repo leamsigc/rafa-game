@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { Dog3D } from "./DogModel";
-import { DogAction, DogBreed, BedColors, HouseViewMode } from "../../types/pet";
+import { DogAction, DogBreed, BedColors, HouseViewMode, HouseRoom } from "../../types/pet";
 import { sound } from "../../utils/audio";
 
 export type TimeOfDay = "day" | "sunset" | "night";
@@ -13,6 +13,14 @@ export interface BallPhysics {
   inDogMouth: boolean;
 }
 
+/** Saved furniture layout from edit mode (persisted by the app). */
+export interface RoomLayout {
+  [objectId: string]: {
+    p: [number, number, number];
+    r: [number, number, number];
+  };
+}
+
 export class ParkScene {
   private container: HTMLElement;
   private scene: THREE.Scene;
@@ -20,10 +28,14 @@ export class ParkScene {
   private renderer: THREE.WebGLRenderer;
   public dog: Dog3D;
 
-  // View Mode: Outdoor Park vs Cozy House Interior
+  // View Mode: Outdoor Park vs Cozy House Interior (multi-room)
   public viewMode: HouseViewMode = "park";
+  public houseRoom: HouseRoom = "living";
   private parkGroup: THREE.Group = new THREE.Group();
   private houseGroup: THREE.Group = new THREE.Group();
+  private kitchenGroup: THREE.Group = new THREE.Group();
+  private hallwayGroup: THREE.Group = new THREE.Group();
+  private upstairsGroup: THREE.Group = new THREE.Group();
 
   // Lights
   private ambientLight!: THREE.AmbientLight;
@@ -40,9 +52,43 @@ export class ParkScene {
   private obstaclesGroup: THREE.Group = new THREE.Group();
   private particlesGroup: THREE.Group = new THREE.Group();
 
-  // House Room Interior elements
+  // House Room Interior elements (Living Room)
   private roomFloorMesh!: THREE.Mesh;
   private houseDoorMesh!: THREE.Mesh;
+  private hallwayDoorMesh!: THREE.Mesh;
+
+  // Kitchen Room elements (second house room)
+  private kitchenFloorMesh!: THREE.Mesh;
+  private kitchenHallDoorMesh!: THREE.Mesh;
+  private potGroup: THREE.Group = new THREE.Group();
+  private potSteamGroup: THREE.Group = new THREE.Group();
+
+  // Hallway elements (connects living <-> kitchen, stairs to upstairs)
+  private hallwayFloorMesh!: THREE.Mesh;
+  private hallwayLivingMesh!: THREE.Mesh;
+  private hallwayKitchenMesh!: THREE.Mesh;
+  private stairsGroup: THREE.Group = new THREE.Group();
+  private stairsMatMesh!: THREE.Mesh;
+  private readonly STAIR_BASE = new THREE.Vector3(1.55, 0, 2.9);
+  private readonly STAIR_TOP = new THREE.Vector3(1.55, 2.8, -1.1);
+
+  // Upstairs bedroom elements (wider than deep)
+  private upstairsFloorMesh!: THREE.Mesh;
+  private descendMesh!: THREE.Mesh;
+
+  // Living-room toy corner (multiple toys + toy box)
+  private toyCornerGroup: THREE.Group = new THREE.Group();
+
+  // Stair-climb animation state
+  private climbAnim: { t: number; active: boolean } | null = null;
+
+  // Edit mode (move / rotate furniture)
+  public editMode: boolean = false;
+  private editables: Map<string, THREE.Object3D> = new Map();
+  private selectedEditId: string | null = null;
+  private selectionBox: THREE.BoxHelper | null = null;
+  private lastTap: { id: string; time: number } | null = null;
+  private editDrag: { id: string; moved: boolean } | null = null;
 
   // Dog Bed & Color Customization
   private bedGroup: THREE.Group = new THREE.Group();
@@ -106,7 +152,12 @@ export class ParkScene {
   public onHouseExited?: () => void;
   public onBedClicked?: () => void;
   public onToyClicked?: () => void;
+  public onPotClicked?: () => void;
+  public onRoomChanged?: (room: HouseRoom) => void;
   public onDogMoved?: (target: THREE.Vector3) => void;
+  public onStairsClimbed?: () => void;
+  public onDescendClicked?: () => void;
+  public onEditChanged?: (selectedId: string | null) => void;
 
   constructor(
     container: HTMLElement,
@@ -114,7 +165,8 @@ export class ParkScene {
     collarColor: string = "#e11d48",
     initialBedColors?: BedColors,
     initialToy: "bone" | "duck" | "bear" | "ball" = "bone",
-    initialAccessory?: string
+    initialAccessory?: string,
+    initialLayout?: RoomLayout | null
   ) {
     this.container = container;
 
@@ -147,7 +199,7 @@ export class ParkScene {
     // 5. Park Environment (Lawn, Fences, Dog House, Agility Obstacles)
     this.setupParkEnvironment();
 
-    // 6. House Room Interior (Walls, ceiling, lamp, bed, toy)
+    // 6. House Rooms Interior (Living Room + Kitchen)
     if (initialBedColors) {
       this.bedColors = { ...initialBedColors };
     }
@@ -155,6 +207,17 @@ export class ParkScene {
       this.currentToy = initialToy;
     }
     this.setupHouseRoom();
+    this.setupKitchenRoom();
+    this.setupHallway();
+    this.setupUpstairs();
+    this.setupToyCorner();
+    this.registerEditable("bed", this.bedGroup);
+    this.registerEditable("toy", this.houseToyGroup);
+    this.registerEditable("toycorner", this.toyCornerGroup);
+    this.registerEditable("lamp", this.ceilingLampGroup);
+    if (initialLayout) {
+      this.applyLayout(initialLayout);
+    }
 
     // 7. Click-to-Walk Ripple Indicator
     this.setupWalkMarker();
@@ -162,7 +225,13 @@ export class ParkScene {
     // 8. Add Groups to Scene
     this.scene.add(this.parkGroup);
     this.scene.add(this.houseGroup);
+    this.scene.add(this.kitchenGroup);
+    this.scene.add(this.hallwayGroup);
+    this.scene.add(this.upstairsGroup);
     this.houseGroup.visible = false; // Initially outdoors
+    this.kitchenGroup.visible = false;
+    this.hallwayGroup.visible = false;
+    this.upstairsGroup.visible = false;
 
     // 9. Dog model
     this.dog = new Dog3D(breed, collarColor);
@@ -799,6 +868,34 @@ export class ParkScene {
     this.houseDoorMesh.userData = { type: "exit_door" };
     this.houseGroup.add(this.houseDoorMesh);
 
+    // Kitchen doorway mat (click to enter Kitchen room)
+    const kitchenMatGeom = new THREE.PlaneGeometry(1.8, 0.9);
+    kitchenMatGeom.rotateX(-Math.PI / 2);
+    const kCanvas = document.createElement("canvas");
+    kCanvas.width = 256;
+    kCanvas.height = 128;
+    const kCtx = kCanvas.getContext("2d")!;
+    kCtx.fillStyle = "#b45309";
+    kCtx.fillRect(0, 0, 256, 128);
+    kCtx.strokeStyle = "#fde68a";
+    kCtx.lineWidth = 6;
+    kCtx.strokeRect(4, 4, 248, 120);
+    kCtx.fillStyle = "#ffffff";
+    kCtx.font = "bold 26px sans-serif";
+    kCtx.textAlign = "center";
+    kCtx.fillText("🚪 HALLWAY 🚪", 128, 72);
+    this.hallwayDoorMesh = new THREE.Mesh(
+      kitchenMatGeom,
+      new THREE.MeshStandardMaterial({
+        map: new THREE.CanvasTexture(kCanvas),
+        roughness: 0.9,
+      })
+    );
+    this.hallwayDoorMesh.position.set(2.6, 0.02, 1.2);
+    this.hallwayDoorMesh.rotation.y = -0.35;
+    this.hallwayDoorMesh.userData = { type: "hallway_door" };
+    this.houseGroup.add(this.hallwayDoorMesh);
+
     // 4. Ceiling with Wooden Beams
     const ceilingGeom = new THREE.PlaneGeometry(roomWidth, roomDepth);
     ceilingGeom.rotateX(Math.PI / 2);
@@ -822,10 +919,7 @@ export class ParkScene {
     // 5. Ceiling Lamp
     this.setupCeilingLamp(wallHeight);
 
-    // 6. Dog Bed (3 customizable parts: frame, cushion, blanket)
-    this.setupDogBed();
-
-    // 7. House Toy (bone, duck, bear, ball)
+    // 6. House Toy (bone, duck, bear, ball)
     this.setupHouseToy();
   }
 
@@ -890,7 +984,7 @@ export class ParkScene {
 
   private setupDogBed() {
     this.bedGroup = new THREE.Group();
-    this.bedGroup.position.set(-1.8, 0, -1.2);
+    this.bedGroup.position.set(-3.8, 0, -1.2);
     this.bedGroup.rotation.y = 0.25;
 
     // 1. Bed Frame / Outer Rim
@@ -950,7 +1044,7 @@ export class ParkScene {
     this.bedGroup.add(pillow);
 
     this.bedGroup.userData = { type: "bed" };
-    this.houseGroup.add(this.bedGroup);
+    this.upstairsGroup.add(this.bedGroup);
   }
 
   private setupHouseToy() {
@@ -1018,6 +1112,669 @@ export class ParkScene {
     });
   }
 
+  private setupKitchenRoom() {
+    this.kitchenGroup.clear();
+    const roomWidth = 8.4;
+    const roomDepth = 8.4;
+    const wallHeight = 3.6;
+
+    // 1. Tile flooring (checkerboard cream + terracotta)
+    const floorGeom = new THREE.PlaneGeometry(roomWidth, roomDepth);
+    floorGeom.rotateX(-Math.PI / 2);
+    const tileCanvas = document.createElement("canvas");
+    tileCanvas.width = 256;
+    tileCanvas.height = 256;
+    const tCtx = tileCanvas.getContext("2d")!;
+    const tileSize = 64;
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < 4; x++) {
+        tCtx.fillStyle = (x + y) % 2 === 0 ? "#fef3c7" : "#ea580c";
+        tCtx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
+        tCtx.strokeStyle = "#78350f";
+        tCtx.lineWidth = 3;
+        tCtx.strokeRect(x * tileSize, y * tileSize, tileSize, tileSize);
+      }
+    }
+    const tileTex = new THREE.CanvasTexture(tileCanvas);
+    tileTex.wrapS = THREE.RepeatWrapping;
+    tileTex.wrapT = THREE.RepeatWrapping;
+    tileTex.repeat.set(3, 3);
+    this.kitchenFloorMesh = new THREE.Mesh(
+      floorGeom,
+      new THREE.MeshStandardMaterial({ map: tileTex, roughness: 0.5 })
+    );
+    this.kitchenFloorMesh.receiveShadow = true;
+    this.kitchenFloorMesh.userData = { type: "kitchen_floor" };
+    this.kitchenGroup.add(this.kitchenFloorMesh);
+
+    // 2. Walls (warm kitchen yellow + white tile backsplash look)
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xffedd5, roughness: 0.85 });
+    const backsplashMat = new THREE.MeshStandardMaterial({ color: 0xfdba74, roughness: 0.6 });
+    const mkWall = (x: number, z: number, rotY: number) => {
+      const g = new THREE.Group();
+      g.position.set(x, 0, z);
+      g.rotation.y = rotY;
+      const upper = new THREE.Mesh(new THREE.BoxGeometry(roomWidth, wallHeight - 1.2, 0.15), wallMat);
+      upper.position.set(0, 1.2 + (wallHeight - 1.2) / 2, 0);
+      upper.receiveShadow = true;
+      g.add(upper);
+      const lower = new THREE.Mesh(new THREE.BoxGeometry(roomWidth, 1.2, 0.18), backsplashMat);
+      lower.position.set(0, 0.6, 0);
+      g.add(lower);
+      return g;
+    };
+    this.kitchenGroup.add(mkWall(0, -roomDepth / 2, 0));
+    this.kitchenGroup.add(mkWall(-roomWidth / 2, 0, Math.PI / 2));
+    this.kitchenGroup.add(mkWall(roomWidth / 2, 0, -Math.PI / 2));
+    // Front wall with opening (same as living room)
+    const frontWall = new THREE.Group();
+    frontWall.position.set(0, 0, roomDepth / 2);
+    const fl = new THREE.Mesh(new THREE.BoxGeometry(roomWidth / 2 - 1.1, wallHeight, 0.15), wallMat);
+    fl.position.set(-(roomWidth / 4 + 0.55), wallHeight / 2, 0);
+    frontWall.add(fl);
+    const fr = new THREE.Mesh(new THREE.BoxGeometry(roomWidth / 2 - 1.1, wallHeight, 0.15), wallMat);
+    fr.position.set(roomWidth / 4 + 0.55, wallHeight / 2, 0);
+    frontWall.add(fr);
+    const ft = new THREE.Mesh(new THREE.BoxGeometry(2.2, wallHeight - 2.4, 0.15), wallMat);
+    ft.position.set(0, 2.4 + (wallHeight - 2.4) / 2, 0);
+    frontWall.add(ft);
+    this.kitchenGroup.add(frontWall);
+
+    // Ceiling
+    const ceilGeom = new THREE.PlaneGeometry(roomWidth, roomDepth);
+    ceilGeom.rotateX(Math.PI / 2);
+    const ceil = new THREE.Mesh(
+      ceilGeom,
+      new THREE.MeshStandardMaterial({ color: 0xfff7ed, roughness: 0.9 })
+    );
+    ceil.position.y = wallHeight;
+    this.kitchenGroup.add(ceil);
+    const ceilLight = new THREE.PointLight(0xfff7ed, 1.6, 14);
+    ceilLight.position.set(0, wallHeight - 0.4, 0);
+    this.kitchenGroup.add(ceilLight);
+
+    // 3. Counters around back + sides (L-shape kitchen)
+    const counterMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.6 });
+    const counterTopMat = new THREE.MeshStandardMaterial({ color: 0xfefce8, roughness: 0.3 });
+    const mkCounter = (x: number, z: number, w: number, d: number) => {
+      const base = new THREE.Mesh(new THREE.BoxGeometry(w, 0.9, d), counterMat);
+      base.position.set(x, 0.45, z);
+      base.castShadow = true;
+      base.receiveShadow = true;
+      this.kitchenGroup.add(base);
+      const top = new THREE.Mesh(new THREE.BoxGeometry(w + 0.1, 0.08, d + 0.1), counterTopMat);
+      top.position.set(x, 0.94, z);
+      top.castShadow = true;
+      this.kitchenGroup.add(top);
+    };
+    mkCounter(-1.6, -3.55, 4.6, 1.0);
+    mkCounter(-3.55, -1.2, 1.0, 4.4);
+    mkCounter(3.55, -1.2, 1.0, 4.4);
+
+    // Upper shelves + jars for coziness
+    const shelfMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6 });
+    [-2.2, -1.2, -0.2].forEach((sx) => {
+      const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.07, 0.35), shelfMat);
+      shelf.position.set(sx, 2.3, -4.0);
+      this.kitchenGroup.add(shelf);
+      const jarColors = [0xfacc15, 0x86efac, 0xfda4af];
+      const jar = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.11, 0.11, 0.28, 10),
+        new THREE.MeshStandardMaterial({ color: jarColors[Math.abs(Math.floor(sx * 10)) % 3], roughness: 0.4 })
+      );
+      jar.position.set(sx, 2.48, -4.0);
+      jar.castShadow = true;
+      this.kitchenGroup.add(jar);
+    });
+
+    // Fridge (tall white box) in corner
+    const fridge = new THREE.Mesh(
+      new THREE.BoxGeometry(1.1, 2.2, 1.0),
+      new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.35, metalness: 0.15 })
+    );
+    fridge.position.set(3.4, 1.1, -3.3);
+    fridge.castShadow = true;
+    this.kitchenGroup.add(fridge);
+    const fridgeHandle = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08, 0.7, 0.08),
+      new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7, roughness: 0.3 })
+    );
+    fridgeHandle.position.set(3.0, 1.3, -2.75);
+    this.kitchenGroup.add(fridgeHandle);
+
+    // 4. CENTRAL STOVE + COOKING POT (middle of room, clickable!)
+    const stoveBase = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.85, 0.95, 0.5, 20),
+      new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.5, metalness: 0.3 })
+    );
+    stoveBase.position.set(0, 0.25, 0.4);
+    stoveBase.castShadow = true;
+    stoveBase.receiveShadow = true;
+    stoveBase.userData = { type: "pot" };
+    this.kitchenGroup.add(stoveBase);
+
+    // Fire glow ring under pot
+    const fireRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.5, 0.07, 8, 24),
+      new THREE.MeshStandardMaterial({
+        color: 0xf97316,
+        emissive: 0xea580c,
+        emissiveIntensity: 1.2,
+        roughness: 0.4,
+      })
+    );
+    fireRing.rotation.x = Math.PI / 2;
+    fireRing.position.set(0, 0.52, 0.4);
+    fireRing.userData = { type: "pot" };
+    this.kitchenGroup.add(fireRing);
+
+    this.potGroup = new THREE.Group();
+    this.potGroup.position.set(0, 0.62, 0.4);
+    this.potGroup.userData = { type: "pot" };
+
+    const potBody = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.62, 0.5, 0.5, 20),
+      new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.75, roughness: 0.3 })
+    );
+    potBody.position.y = 0.25;
+    potBody.castShadow = true;
+    potBody.userData = { type: "pot" };
+    this.potGroup.add(potBody);
+
+    const potRim = new THREE.Mesh(
+      new THREE.TorusGeometry(0.62, 0.05, 8, 24),
+      new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.8, roughness: 0.25 })
+    );
+    potRim.rotation.x = Math.PI / 2;
+    potRim.position.y = 0.5;
+    potRim.userData = { type: "pot" };
+    this.potGroup.add(potRim);
+
+    // Soup surface (bubbling orange stew)
+    const soup = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.55, 0.55, 0.06, 20),
+      new THREE.MeshStandardMaterial({
+        color: 0xf59e0b,
+        emissive: 0xb45309,
+        emissiveIntensity: 0.35,
+        roughness: 0.25,
+      })
+    );
+    soup.position.y = 0.47;
+    soup.userData = { type: "pot" };
+    soup.name = "soupSurface";
+    this.potGroup.add(soup);
+
+    // Veggie chunks floating on soup
+    const chunkMatA = new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.7 });
+    const chunkMatB = new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.7 });
+    for (let i = 0; i < 6; i++) {
+      const chunk = new THREE.Mesh(new THREE.SphereGeometry(0.07, 8, 8), i % 2 === 0 ? chunkMatA : chunkMatB);
+      const a = (i / 6) * Math.PI * 2;
+      chunk.position.set(Math.cos(a) * 0.3, 0.51, Math.sin(a) * 0.3);
+      chunk.userData = { type: "pot" };
+      this.potGroup.add(chunk);
+    }
+
+    // Side handles
+    [-0.68, 0.68].forEach((hx) => {
+      const handle = new THREE.Mesh(
+        new THREE.TorusGeometry(0.1, 0.03, 6, 12, Math.PI),
+        new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.6 })
+      );
+      handle.position.set(hx, 0.35, 0);
+      handle.rotation.z = hx > 0 ? -Math.PI / 2 : Math.PI / 2;
+      handle.userData = { type: "pot" };
+      this.potGroup.add(handle);
+    });
+
+    this.potGroup.traverse((c) => {
+      c.userData = { type: "pot" };
+    });
+    this.kitchenGroup.add(this.potGroup);
+
+    // Steam puffs above pot (animated in render loop)
+    this.potSteamGroup = new THREE.Group();
+    this.potSteamGroup.position.set(0, 1.3, 0.4);
+    for (let i = 0; i < 4; i++) {
+      const puff = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12 - i * 0.015, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 - i * 0.1 })
+      );
+      puff.position.set((Math.random() - 0.5) * 0.3, i * 0.28, (Math.random() - 0.5) * 0.3);
+      puff.userData = { steamIndex: i };
+      this.potSteamGroup.add(puff);
+    }
+    this.kitchenGroup.add(this.potSteamGroup);
+
+    // Big floating "COOK!" label sprite above pot (canvas texture)
+    const labelCanvas = document.createElement("canvas");
+    labelCanvas.width = 256;
+    labelCanvas.height = 96;
+    const lCtx = labelCanvas.getContext("2d")!;
+    lCtx.fillStyle = "rgba(180, 83, 9, 0.92)";
+    lCtx.beginPath();
+    lCtx.roundRect(8, 8, 240, 80, 24);
+    lCtx.fill();
+    lCtx.fillStyle = "#fff";
+    lCtx.font = "bold 40px sans-serif";
+    lCtx.textAlign = "center";
+    lCtx.fillText("🍲 COOK!", 128, 62);
+    const labelTex = new THREE.CanvasTexture(labelCanvas);
+    const label = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: labelTex, transparent: true, depthTest: false })
+    );
+    label.scale.set(1.6, 0.6, 1);
+    label.position.set(0, 2.35, 0.4);
+    label.userData = { type: "pot" };
+    this.kitchenGroup.add(label);
+
+    // 5. Back-to-Living door mat (click to return to living room)
+    const liveMatGeom = new THREE.PlaneGeometry(1.8, 0.9);
+    liveMatGeom.rotateX(-Math.PI / 2);
+    const lvCanvas = document.createElement("canvas");
+    lvCanvas.width = 256;
+    lvCanvas.height = 128;
+    const lvCtx = lvCanvas.getContext("2d")!;
+    lvCtx.fillStyle = "#386641";
+    lvCtx.fillRect(0, 0, 256, 128);
+    lvCtx.strokeStyle = "#A7C957";
+    lvCtx.lineWidth = 6;
+    lvCtx.strokeRect(4, 4, 248, 120);
+    lvCtx.fillStyle = "#fff";
+    lvCtx.font = "bold 24px sans-serif";
+    lvCtx.textAlign = "center";
+    lvCtx.fillText("🚪 HALLWAY", 128, 70);
+    this.kitchenHallDoorMesh = new THREE.Mesh(
+      liveMatGeom,
+      new THREE.MeshStandardMaterial({ map: new THREE.CanvasTexture(lvCanvas), roughness: 0.9 })
+    );
+    this.kitchenHallDoorMesh.position.set(0, 0.02, roomDepth / 2 - 0.75);
+    this.kitchenHallDoorMesh.userData = { type: "hallway_door" };
+    this.kitchenGroup.add(this.kitchenHallDoorMesh);
+  }
+
+  private makeWoodFloorTexture(repeatX: number, repeatY: number): THREE.CanvasTexture {
+    const c = document.createElement("canvas");
+    c.width = 512;
+    c.height = 512;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = "#854d0e";
+    ctx.fillRect(0, 0, 512, 512);
+    ctx.strokeStyle = "#5a3206";
+    ctx.lineWidth = 4;
+    for (let y = 0; y < 512; y += 64) {
+      ctx.strokeRect(0, y, 512, 64);
+      for (let x = y % 128 === 0 ? 0 : 64; x < 512; x += 128) {
+        ctx.strokeRect(x, y, 128, 64);
+      }
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(repeatX, repeatY);
+    return tex;
+  }
+
+  private makeDoorMatTexture(text: string, bg: string, border: string): THREE.CanvasTexture {
+    const c = document.createElement("canvas");
+    c.width = 256;
+    c.height = 128;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, 256, 128);
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 6;
+    ctx.strokeRect(4, 4, 248, 120);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 25px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(text, 128, 72);
+    return new THREE.CanvasTexture(c);
+  }
+
+  private makeDoorMat(
+    text: string,
+    bg: string,
+    border: string,
+    type: string,
+    x: number,
+    z: number,
+    rotY: number = 0
+  ): THREE.Mesh {
+    const geom = new THREE.PlaneGeometry(1.8, 0.9);
+    geom.rotateX(-Math.PI / 2);
+    const mesh = new THREE.Mesh(
+      geom,
+      new THREE.MeshStandardMaterial({
+        map: this.makeDoorMatTexture(text, bg, border),
+        roughness: 0.9,
+      })
+    );
+    mesh.position.set(x, 0.02, z);
+    mesh.rotation.y = rotY;
+    mesh.userData = { type };
+    return mesh;
+  }
+
+  private setupHallway() {
+    this.hallwayGroup.clear();
+    const roomW = 5;
+    const roomD = 9;
+    const wallH = 3.4;
+
+    // Wood flooring hallway runner
+    const floorGeom = new THREE.PlaneGeometry(roomW, roomD);
+    floorGeom.rotateX(-Math.PI / 2);
+    this.hallwayFloorMesh = new THREE.Mesh(
+      floorGeom,
+      new THREE.MeshStandardMaterial({ map: this.makeWoodFloorTexture(1.5, 2.5), roughness: 0.6 })
+    );
+    this.hallwayFloorMesh.receiveShadow = true;
+    this.hallwayFloorMesh.userData = { type: "floor" };
+    this.hallwayGroup.add(this.hallwayFloorMesh);
+
+    // Cozy runner rug down the middle
+    const runner = new THREE.Mesh(
+      new THREE.BoxGeometry(1.6, 0.03, 7.2),
+      new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.95 })
+    );
+    runner.position.set(-0.6, 0.015, 0);
+    runner.receiveShadow = true;
+    runner.userData = { type: "floor" };
+    this.hallwayGroup.add(runner);
+
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.85 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6 });
+    const mkWall = (w: number, x: number, z: number, rotY: number) => {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, 0.15), wallMat);
+      wall.position.set(x, wallH / 2, z);
+      wall.rotation.y = rotY;
+      wall.receiveShadow = true;
+      this.hallwayGroup.add(wall);
+      const base = new THREE.Mesh(new THREE.BoxGeometry(w, 0.16, 0.2), trimMat);
+      base.position.set(x, 0.08, z);
+      base.rotation.y = rotY;
+      this.hallwayGroup.add(base);
+    };
+    mkWall(roomW, 0, -roomD / 2, 0);
+    mkWall(roomW, 0, roomD / 2, 0);
+    mkWall(roomD, -roomW / 2, 0, Math.PI / 2);
+    mkWall(roomD, roomW / 2, 0, Math.PI / 2);
+
+    // Ceiling + warm light
+    const ceil = new THREE.Mesh(
+      new THREE.PlaneGeometry(roomW, roomD),
+      new THREE.MeshStandardMaterial({ color: 0xfff7ed, roughness: 0.9 })
+    );
+    ceil.geometry.rotateX(Math.PI / 2);
+    ceil.position.y = wallH;
+    this.hallwayGroup.add(ceil);
+    const lamp = new THREE.PointLight(0xffe9b8, 1.8, 12);
+    lamp.position.set(0, wallH - 0.5, 0);
+    this.hallwayGroup.add(lamp);
+
+    // Framed paw pictures along the left wall
+    [-2, 0, 2].forEach((z, i) => {
+      const frame = new THREE.Mesh(
+        new THREE.BoxGeometry(0.08, 0.7, 0.9),
+        new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.5 })
+      );
+      frame.position.set(-roomW / 2 + 0.1, 1.9, z);
+      this.hallwayGroup.add(frame);
+      const pic = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.7, 0.5),
+        new THREE.MeshBasicMaterial({ color: [0xfbcfe8, 0xbfdbfe, 0xfde68a][i % 3] })
+      );
+      pic.position.set(-roomW / 2 + 0.15, 1.9, z);
+      pic.rotation.y = Math.PI / 2;
+      this.hallwayGroup.add(pic);
+    });
+
+    // Staircase along the right wall (8 steps climbing toward -z)
+    this.stairsGroup = new THREE.Group();
+    const stepMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.6 });
+    const stepTopMat = new THREE.MeshStandardMaterial({ color: 0xd6a35c, roughness: 0.55 });
+    for (let i = 0; i < 8; i++) {
+      const step = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.35, 0.58), stepMat);
+      step.position.set(1.55, 0.175 + i * 0.35, 3.0 - i * 0.55);
+      step.castShadow = true;
+      step.receiveShadow = true;
+      this.stairsGroup.add(step);
+      const tread = new THREE.Mesh(new THREE.BoxGeometry(1.44, 0.05, 0.6), stepTopMat);
+      tread.position.set(1.55, 0.35 + i * 0.35, 3.0 - i * 0.55);
+      tread.receiveShadow = true;
+      this.stairsGroup.add(tread);
+    }
+    // Wooden handrail
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 4.6), stepMat);
+    rail.position.set(0.78, 1.9, 1.0);
+    rail.rotation.x = -0.55;
+    this.stairsGroup.add(rail);
+    for (let i = 0; i < 4; i++) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.07, 1.1, 0.07), stepMat);
+      post.position.set(0.78, 0.9 + i * 0.55, 2.6 - i * 1.05);
+      this.stairsGroup.add(post);
+    }
+    // Dark opening at the top of the stairs (mystery above!)
+    const darkOpening = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.8, 1.4),
+      new THREE.MeshBasicMaterial({ color: 0x000000 })
+    );
+    darkOpening.position.set(1.55, 3.3, -1.75);
+    this.stairsGroup.add(darkOpening);
+    this.stairsGroup.userData = { type: "stairs" };
+    this.stairsGroup.traverse((c) => {
+      c.userData = { type: "stairs" };
+    });
+    this.hallwayGroup.add(this.stairsGroup);
+
+    // "UPSTAIRS" mat at the stair base (click to climb!)
+    this.stairsMatMesh = this.makeDoorMat("⬆ UPSTAIRS 🐾", "#6d28d9", "#ddd6fe", "stairs", 0, 3.4);
+    this.stairsMatMesh.userData = { type: "stairs" };
+    this.hallwayGroup.add(this.stairsMatMesh);
+
+    // Door mats to living room + kitchen
+    this.hallwayLivingMesh = this.makeDoorMat("🛋️ LIVING", "#386641", "#A7C957", "living_door", -1.3, 3.5);
+    this.hallwayGroup.add(this.hallwayLivingMesh);
+    this.hallwayKitchenMesh = this.makeDoorMat("🍳 KITCHEN", "#b45309", "#fde68a", "kitchen_door", -1.3, -3.5);
+    this.hallwayGroup.add(this.hallwayKitchenMesh);
+  }
+
+  private setupUpstairs() {
+    this.upstairsGroup.clear();
+    // Bedroom is WIDER than deep
+    const roomW = 12;
+    const roomD = 7;
+    const wallH = 3.4;
+
+    const floorGeom = new THREE.PlaneGeometry(roomW, roomD);
+    floorGeom.rotateX(-Math.PI / 2);
+    this.upstairsFloorMesh = new THREE.Mesh(
+      floorGeom,
+      new THREE.MeshStandardMaterial({ map: this.makeWoodFloorTexture(3, 2), roughness: 0.6 })
+    );
+    this.upstairsFloorMesh.receiveShadow = true;
+    this.upstairsFloorMesh.userData = { type: "floor" };
+    this.upstairsGroup.add(this.upstairsFloorMesh);
+
+    // Big round rug in the middle
+    const rug = new THREE.Mesh(
+      new THREE.CylinderGeometry(2.2, 2.25, 0.03, 32),
+      new THREE.MeshStandardMaterial({ color: 0xc4b5fd, roughness: 0.95 })
+    );
+    rug.position.set(0.5, 0.015, 0.3);
+    rug.receiveShadow = true;
+    rug.userData = { type: "floor" };
+    this.upstairsGroup.add(rug);
+
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xe0e7ff, roughness: 0.85 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x4c1d95, roughness: 0.6 });
+    const mkWall = (w: number, x: number, z: number, rotY: number, withWindow: boolean = false) => {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, 0.15), wallMat);
+      wall.position.set(x, wallH / 2, z);
+      wall.rotation.y = rotY;
+      wall.receiveShadow = true;
+      this.upstairsGroup.add(wall);
+      if (withWindow) {
+        const frame = new THREE.Mesh(
+          new THREE.BoxGeometry(2.2, 1.7, 0.2),
+          new THREE.MeshStandardMaterial({ color: 0x4c1d95, roughness: 0.5 })
+        );
+        frame.position.set(x, 2.1, z);
+        frame.rotation.y = rotY;
+        this.upstairsGroup.add(frame);
+        const glass = new THREE.Mesh(
+          new THREE.PlaneGeometry(1.9, 1.4),
+          new THREE.MeshBasicMaterial({ color: 0x0f172a })
+        );
+        // Starry night sky outside
+        const starCanvas = document.createElement("canvas");
+        starCanvas.width = 128;
+        starCanvas.height = 96;
+        const sCtx = starCanvas.getContext("2d")!;
+        sCtx.fillStyle = "#0f172a";
+        sCtx.fillRect(0, 0, 128, 96);
+        sCtx.fillStyle = "#fef9c3";
+        for (let i = 0; i < 28; i++) {
+          sCtx.fillRect(Math.random() * 128, Math.random() * 96, 2, 2);
+        }
+        sCtx.fillStyle = "#fefce8";
+        sCtx.beginPath();
+        sCtx.arc(100, 22, 10, 0, Math.PI * 2);
+        sCtx.fill();
+        glass.material.map = new THREE.CanvasTexture(starCanvas);
+        glass.material.needsUpdate = true;
+        const off = new THREE.Vector3(0, 0, 0.12).applyEuler(new THREE.Euler(0, rotY, 0));
+        glass.position.set(x + off.x, 2.1, z + off.z);
+        glass.rotation.y = rotY;
+        this.upstairsGroup.add(glass);
+      }
+    };
+    mkWall(roomW, 0, -roomD / 2, 0, true);
+    mkWall(roomW, 0, roomD / 2, 0);
+    mkWall(roomD, -roomW / 2, 0, Math.PI / 2);
+    mkWall(roomD, roomW / 2, 0, Math.PI / 2);
+
+    // Ceiling + moon-night lamp glow
+    const ceil = new THREE.Mesh(
+      new THREE.PlaneGeometry(roomW, roomD),
+      new THREE.MeshStandardMaterial({ color: 0x1e1b4b, roughness: 0.9 })
+    );
+    ceil.geometry.rotateX(Math.PI / 2);
+    ceil.position.y = wallH;
+    this.upstairsGroup.add(ceil);
+    const moonLamp = new THREE.PointLight(0xc4b5fd, 1.6, 16);
+    moonLamp.position.set(0, wallH - 0.5, 0);
+    this.upstairsGroup.add(moonLamp);
+
+    // The dog bed lives upstairs now
+    this.setupDogBed();
+
+    // Little dresser with drawers
+    const dresserMat = new THREE.MeshStandardMaterial({ color: 0x7c3aed, roughness: 0.6 });
+    const dresser = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.0, 0.6), dresserMat);
+    dresser.position.set(4.6, 0.5, -2.9);
+    dresser.castShadow = true;
+    this.upstairsGroup.add(dresser);
+    [-0.25, 0.25].forEach((dx) => {
+      const drawer = new THREE.Mesh(
+        new THREE.BoxGeometry(0.6, 0.32, 0.05),
+        new THREE.MeshStandardMaterial({ color: 0xddd6fe, roughness: 0.5 })
+      );
+      drawer.position.set(4.6 + dx, 0.62, -2.58);
+      this.upstairsGroup.add(drawer);
+      const knob = new THREE.Mesh(
+        new THREE.SphereGeometry(0.045, 8, 8),
+        new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.8, roughness: 0.3 })
+      );
+      knob.position.set(4.6 + dx, 0.62, -2.54);
+      this.upstairsGroup.add(knob);
+    });
+
+    // Bookshelf with colorful books
+    const shelfMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6 });
+    const bookColors = [0xef4444, 0x3b82f6, 0x22c55e, 0xeab308, 0xa855f7, 0xec4899];
+    for (let s = 0; s < 2; s++) {
+      const shelf = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.07, 0.4), shelfMat);
+      shelf.position.set(-5.2, 1.1 + s * 0.6, -3.1);
+      this.upstairsGroup.add(shelf);
+      for (let b = 0; b < 6; b++) {
+        const book = new THREE.Mesh(
+          new THREE.BoxGeometry(0.16, 0.42, 0.28),
+          new THREE.MeshStandardMaterial({ color: bookColors[(b + s * 2) % bookColors.length], roughness: 0.7 })
+        );
+        book.position.set(-5.9 + b * 0.28, 1.35 + s * 0.6, -3.1);
+        book.rotation.z = b === 5 ? -0.18 : 0;
+        this.upstairsGroup.add(book);
+      }
+    }
+
+    // Descend mat back to the hallway stairs
+    this.descendMesh = this.makeDoorMat("⬇ DOWNSTAIRS", "#6d28d9", "#ddd6fe", "stairs_down", 1.55, 2.4);
+    this.upstairsGroup.add(this.descendMesh);
+  }
+
+  private setupToyCorner() {
+    this.toyCornerGroup = new THREE.Group();
+    this.toyCornerGroup.position.set(2.3, 0, -1.6);
+    this.toyCornerGroup.userData = { type: "toy" };
+
+    // Toy box (open crate)
+    const boxMat = new THREE.MeshStandardMaterial({ color: 0x0d9488, roughness: 0.7 });
+    const boxBottom = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.12, 0.75), boxMat);
+    boxBottom.position.y = 0.06;
+    boxBottom.castShadow = true;
+    this.toyCornerGroup.add(boxBottom);
+    const wallGeomX = new THREE.BoxGeometry(1.0, 0.45, 0.08);
+    const wallGeomZ = new THREE.BoxGeometry(0.08, 0.45, 0.75);
+    [[0, 0.28, 0.335, wallGeomX], [0, 0.28, -0.335, wallGeomX]].forEach(([x, y, z, g]) => {
+      const wall = new THREE.Mesh(g as THREE.BufferGeometry, boxMat);
+      wall.position.set(x as number, y as number, z as number);
+      wall.castShadow = true;
+      this.toyCornerGroup.add(wall);
+    });
+    [[-0.46, 0], [0.46, 0]].forEach(([x]) => {
+      const wall = new THREE.Mesh(wallGeomZ, boxMat);
+      wall.position.set(x as number, 0.28, 0);
+      wall.castShadow = true;
+      this.toyCornerGroup.add(wall);
+    });
+
+    // Ball peeking out of the box
+    const cornerBall = new THREE.Mesh(
+      new THREE.SphereGeometry(0.17, 16, 16),
+      new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.5 })
+    );
+    cornerBall.position.set(-0.2, 0.42, 0.05);
+    cornerBall.castShadow = true;
+    this.toyCornerGroup.add(cornerBall);
+
+    // Rope bone leaning on the box
+    const ropeMat = new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.9 });
+    const rope = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.5, 8), ropeMat);
+    rope.rotation.z = 1.1;
+    rope.position.set(0.35, 0.4, -0.1);
+    rope.castShadow = true;
+    this.toyCornerGroup.add(rope);
+
+    // Squeaky duck beside the box
+    const duckMat = new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.4 });
+    const duckBody = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 12), duckMat);
+    duckBody.scale.set(1.2, 0.85, 1.0);
+    duckBody.position.set(0.75, 0.13, 0.35);
+    duckBody.castShadow = true;
+    this.toyCornerGroup.add(duckBody);
+    const duckHead = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 12), duckMat);
+    duckHead.position.set(0.88, 0.28, 0.35);
+    this.toyCornerGroup.add(duckHead);
+
+    this.toyCornerGroup.traverse((c) => {
+      c.userData = { type: "toy" };
+    });
+    this.houseGroup.add(this.toyCornerGroup);
+  }
+
   private setupWalkMarker() {
     this.walkTargetMarker = new THREE.Group();
     const ringGeom = new THREE.RingGeometry(0.22, 0.32, 24);
@@ -1045,10 +1802,29 @@ export class ParkScene {
     this.scene.add(this.walkTargetMarker);
   }
 
+  private toNDC(clientX: number, clientY: number): THREE.Vector2 {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    return new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+  }
+
   private setupInputEvents() {
     const dom = this.renderer.domElement;
 
     dom.addEventListener("pointerdown", (e) => {
+      // Edit mode: grabbing furniture starts a potential drag (no camera orbit)
+      if (this.editMode && this.viewMode === "house") {
+        const picked = this.pickEditable(this.toNDC(e.clientX, e.clientY));
+        if (picked) {
+          this.selectEditable(picked);
+          this.editDrag = { id: picked, moved: false };
+          this.startPointerX = e.clientX;
+          this.startPointerY = e.clientY;
+          return;
+        }
+      }
       this.isDragging = true;
       this.prevMouseX = e.clientX;
       this.prevMouseY = e.clientY;
@@ -1057,6 +1833,29 @@ export class ParkScene {
     });
 
     window.addEventListener("pointermove", (e) => {
+      // Edit mode furniture drag: slide the grabbed object along the floor
+      if (this.editDrag && !this.isDragging) {
+        const dist = Math.hypot(e.clientX - this.startPointerX, e.clientY - this.startPointerY);
+        if (!this.editDrag.moved && dist > 10) {
+          this.editDrag.moved = true;
+        }
+        if (this.editDrag.moved) {
+          const raycaster = new THREE.Raycaster();
+          raycaster.setFromCamera(this.toNDC(e.clientX, e.clientY), this.camera);
+          const floorPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+          const hit = new THREE.Vector3();
+          if (raycaster.ray.intersectPlane(floorPlane, hit)) {
+            const obj = this.editables.get(this.editDrag.id);
+            if (obj) {
+              const c = this.clampForRoom(hit.x, hit.z);
+              obj.position.x = c.x;
+              obj.position.z = c.z;
+              this.selectionBox?.update();
+            }
+          }
+        }
+        return;
+      }
       if (!this.isDragging) return;
       const dx = e.clientX - this.prevMouseX;
       const dy = e.clientY - this.prevMouseY;
@@ -1074,6 +1873,23 @@ export class ParkScene {
     });
 
     window.addEventListener("pointerup", (e) => {
+      // Edit mode tap vs drag: tap selects (double-tap spins), drag saves layout
+      if (this.editDrag) {
+        const drag = this.editDrag;
+        this.editDrag = null;
+        if (drag.moved) {
+          if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
+        } else {
+          const now = performance.now();
+          if (this.lastTap && this.lastTap.id === drag.id && now - this.lastTap.time < 350) {
+            this.rotateSelected("y", 45);
+            this.lastTap = null;
+          } else {
+            this.lastTap = { id: drag.id, time: now };
+          }
+        }
+        return;
+      }
       if (!this.isDragging) return;
       this.isDragging = false;
 
@@ -1119,7 +1935,125 @@ export class ParkScene {
     }
 
     if (this.viewMode === "house") {
-      // 2. House Mode Interactivity
+      // Edit mode intercepts taps for object selection (double-tap spins)
+      if (this.editMode) {
+        const picked = this.pickEditable(mouse);
+        if (picked) {
+          const now = performance.now();
+          if (this.lastTap && this.lastTap.id === picked && now - this.lastTap.time < 350) {
+            this.rotateSelected("y", Math.PI / 4);
+            this.lastTap = null;
+            if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
+          } else {
+            this.selectEditable(picked);
+            this.lastTap = { id: picked, time: now };
+          }
+          return;
+        }
+        this.selectEditable(null);
+        return;
+      }
+
+      if (this.houseRoom === "hallway") {
+        // HALLWAY interactivity — stairs up, doors to living + kitchen
+        const stairHits = raycaster.intersectObjects([this.stairsGroup, this.stairsMatMesh], true);
+        if (stairHits.length > 0) {
+          this.climbStairs();
+          return;
+        }
+        if (this.hallwayLivingMesh) {
+          const hits = raycaster.intersectObject(this.hallwayLivingMesh, false);
+          if (hits.length > 0) {
+            this.enterLivingRoom();
+            return;
+          }
+        }
+        if (this.hallwayKitchenMesh) {
+          const hits = raycaster.intersectObject(this.hallwayKitchenMesh, false);
+          if (hits.length > 0) {
+            this.enterKitchen();
+            return;
+          }
+        }
+        if (this.hallwayFloorMesh) {
+          const floorHits = raycaster.intersectObject(this.hallwayFloorMesh, false);
+          if (floorHits.length > 0) {
+            this.walkTo(floorHits[0].point);
+            return;
+          }
+        }
+        return;
+      }
+
+      if (this.houseRoom === "upstairs") {
+        // UPSTAIRS interactivity — bed, descend mat, floor walk
+        const bedHits = raycaster.intersectObject(this.bedGroup, true);
+        if (bedHits.length > 0) {
+          if (this.onBedClicked) {
+            this.onBedClicked();
+          } else {
+            this.goToBed();
+          }
+          return;
+        }
+        if (this.descendMesh) {
+          const hits = raycaster.intersectObject(this.descendMesh, false);
+          if (hits.length > 0) {
+            if (this.onDescendClicked) this.onDescendClicked();
+            return;
+          }
+        }
+        if (this.upstairsFloorMesh) {
+          const floorHits = raycaster.intersectObject(this.upstairsFloorMesh, false);
+          if (floorHits.length > 0) {
+            this.walkTo(floorHits[0].point);
+            return;
+          }
+        }
+        return;
+      }
+
+      if (this.houseRoom === "kitchen") {
+        // KITCHEN ROOM interactivity — pot in the middle opens cooking!
+        const potHits = raycaster.intersectObjects([this.potGroup, this.potSteamGroup], true);
+        // Also test stove base via kitchenGroup scan fallback
+        const stoveHits =
+          potHits.length > 0
+            ? potHits
+            : raycaster.intersectObject(this.kitchenGroup, true).filter((h) => {
+                let o: THREE.Object3D | null = h.object;
+                while (o) {
+                  if (o.userData?.type === "pot") return true;
+                  o = o.parent;
+                }
+                return false;
+              });
+        if (stoveHits.length > 0) {
+          this.walkToPotAndCook();
+          return;
+        }
+
+        // Back to hallway (hallway sits between kitchen and living room)
+        if (this.kitchenHallDoorMesh) {
+          const backHits = raycaster.intersectObject(this.kitchenHallDoorMesh, false);
+          if (backHits.length > 0) {
+            this.enterHallway();
+            return;
+          }
+        }
+
+        // Kitchen floor walk
+        if (this.kitchenFloorMesh) {
+          const floorHits = raycaster.intersectObject(this.kitchenFloorMesh, false);
+          if (floorHits.length > 0) {
+            this.walkTo(floorHits[0].point);
+            return;
+          }
+        }
+        return;
+      }
+
+      // LIVING ROOM interactivity
       // A. Check Bed Click -> Dog walks onto bed and goes to sleep!
       const bedHits = raycaster.intersectObject(this.bedGroup, true);
       if (bedHits.length > 0) {
@@ -1138,6 +2072,13 @@ export class ParkScene {
         return;
       }
 
+      // B2. Check Toy Corner Click -> Dog plays with corner toys!
+      const cornerHits = raycaster.intersectObject(this.toyCornerGroup, true);
+      if (cornerHits.length > 0) {
+        this.playWithToy(new THREE.Vector3(1.9, 0, -1.2));
+        return;
+      }
+
       // C. Check Ceiling Lamp Click -> Toggle lamp!
       const lampHits = raycaster.intersectObject(this.ceilingLampGroup, true);
       if (lampHits.length > 0) {
@@ -1150,6 +2091,15 @@ export class ParkScene {
         const doorHits = raycaster.intersectObject(this.houseDoorMesh, false);
         if (doorHits.length > 0) {
           this.exitToPark();
+          return;
+        }
+      }
+
+      // D2. Check Hallway Doorway Click -> Enter hallway!
+      if (this.hallwayDoorMesh) {
+        const kHits = raycaster.intersectObject(this.hallwayDoorMesh, false);
+        if (kHits.length > 0) {
+          this.enterHallway();
           return;
         }
       }
@@ -1488,18 +2438,9 @@ export class ParkScene {
    * Click-to-Walk: Instructs the dog to navigate to a specific (x, z) point
    */
   public walkTo(target: THREE.Vector3, onArrived?: () => void) {
-    let clampedX = target.x;
-    let clampedZ = target.z;
-
-    if (this.viewMode === "house") {
-      // Clamp within house interior bounds
-      clampedX = THREE.MathUtils.clamp(target.x, -3.2, 3.2);
-      clampedZ = THREE.MathUtils.clamp(target.z, -3.2, 3.2);
-    } else {
-      // Clamp within outdoor park fence bounds
-      clampedX = THREE.MathUtils.clamp(target.x, -12.0, 12.0);
-      clampedZ = THREE.MathUtils.clamp(target.z, -12.0, 12.0);
-    }
+    const c = this.clampForRoom(target.x, target.z);
+    const clampedX = c.x;
+    const clampedZ = c.z;
 
     this.walkTarget = new THREE.Vector3(clampedX, 0, clampedZ);
     this.walkCallback = onArrived || null;
@@ -1515,13 +2456,14 @@ export class ParkScene {
   }
 
   /**
-   * Enter Dog House (Transitions from Park to Room Interior with Ceiling & Lamp)
+   * Enter Dog House (Transitions from Park to Living Room Interior)
    */
   public enterHouse() {
-    if (this.viewMode === "house") return;
+    if (this.viewMode === "house" && this.houseRoom === "living") return;
     this.viewMode = "house";
+    this.houseRoom = "living";
 
-    this.parkGroup.visible = false;
+    this.hideAllRooms();
     this.houseGroup.visible = true;
 
     // Reset dog position inside room
@@ -1538,9 +2480,293 @@ export class ParkScene {
     this.updateCameraPosition();
 
     sound.playSoftWoof();
+    if (this.onRoomChanged) this.onRoomChanged("living");
     if (this.onHouseEntered) {
       this.onHouseEntered();
     }
+  }
+
+  /**
+   * Enter Kitchen (second house room with central cooking pot)
+   */
+  public enterKitchen() {
+    if (this.viewMode !== "house") {
+      this.viewMode = "house";
+      this.parkGroup.visible = false;
+      if (this.onHouseEntered) this.onHouseEntered();
+    }
+    this.houseRoom = "kitchen";
+    this.hideAllRooms();
+    this.kitchenGroup.visible = true;
+
+    this.dog.group.position.set(0, 0, 1.8);
+    this.dog.group.rotation.y = Math.PI;
+    this.dog.setAction("idle");
+
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+
+    this.spherical.set(4.6, Math.PI / 3.0, 0);
+    this.cameraTarget.set(0, 0.9, 0.3);
+    this.updateCameraPosition();
+
+    sound.playSoftWoof();
+    if (this.onRoomChanged) this.onRoomChanged("kitchen");
+  }
+
+  /**
+   * Enter Living Room (first house room with bed + toy)
+   */
+  public enterLivingRoom() {
+    if (this.viewMode !== "house") {
+      this.enterHouse();
+      return;
+    }
+    this.houseRoom = "living";
+    this.hideAllRooms();
+    this.houseGroup.visible = true;
+
+    this.dog.group.position.set(0, 0, 0.6);
+    this.dog.group.rotation.y = 0;
+    this.dog.setAction("idle");
+
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+
+    this.spherical.set(4.6, Math.PI / 3.0, 0);
+    this.cameraTarget.set(0, 0.9, 0);
+    this.updateCameraPosition();
+
+    sound.playButtonTap();
+    if (this.onRoomChanged) this.onRoomChanged("living");
+  }
+
+  private hideAllRooms() {
+    this.parkGroup.visible = false;
+    this.houseGroup.visible = false;
+    this.kitchenGroup.visible = false;
+    this.hallwayGroup.visible = false;
+    this.upstairsGroup.visible = false;
+  }
+
+  /**
+   * Enter Hallway (wood-floor corridor between living room and kitchen, stairs up)
+   */
+  public enterHallway() {
+    if (this.viewMode !== "house") {
+      this.viewMode = "house";
+      if (this.onHouseEntered) this.onHouseEntered();
+    }
+    this.houseRoom = "hallway";
+    this.hideAllRooms();
+    this.hallwayGroup.visible = true;
+
+    this.dog.group.position.set(0, 0, 2.6);
+    this.dog.group.rotation.y = Math.PI;
+    this.dog.setAction("idle");
+
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+
+    this.spherical.set(4.8, Math.PI / 3.0, 0);
+    this.cameraTarget.set(0, 0.9, 0);
+    this.updateCameraPosition();
+
+    sound.playSoftWoof();
+    if (this.onRoomChanged) this.onRoomChanged("hallway");
+  }
+
+  /**
+   * Enter Upstairs bedroom (wider than deep, bed + night sky window)
+   */
+  public enterUpstairs() {
+    if (this.viewMode !== "house") {
+      this.viewMode = "house";
+      if (this.onHouseEntered) this.onHouseEntered();
+    }
+    this.houseRoom = "upstairs";
+    this.hideAllRooms();
+    this.upstairsGroup.visible = true;
+
+    this.dog.group.position.set(1.55, 0, 1.8);
+    this.dog.group.rotation.y = Math.PI * 0.9;
+    this.dog.setAction("idle");
+
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+
+    this.spherical.set(7.0, Math.PI / 3.1, 0);
+    this.cameraTarget.set(0, 0.9, 0);
+    this.updateCameraPosition();
+
+    sound.playSoftWoof();
+    if (this.onRoomChanged) this.onRoomChanged("upstairs");
+  }
+
+  /**
+   * Climb the hallway stairs: dog walks to the base, hops up step by step,
+   * then fires onStairsClimbed (the app plays the iris transition).
+   */
+  public climbStairs() {
+    if (this.viewMode !== "house" || this.houseRoom !== "hallway") return;
+    if (this.climbAnim?.active) return;
+    this.walkTo(new THREE.Vector3(this.STAIR_BASE.x, 0, this.STAIR_BASE.z + 0.6), () => {
+      this.climbAnim = { t: 0, active: true };
+      this.dog.setAction("run");
+      sound.playWhistle();
+    });
+  }
+
+  private updateClimb(delta: number) {
+    if (!this.climbAnim?.active) return;
+    this.climbAnim.t += delta / 2.4;
+    const t = Math.min(1, this.climbAnim.t);
+    const pos = this.dog.group.position;
+    pos.x = THREE.MathUtils.lerp(this.STAIR_BASE.x, this.STAIR_TOP.x, t);
+    pos.z = THREE.MathUtils.lerp(this.STAIR_BASE.z + 0.6, this.STAIR_TOP.z, t);
+    // Hop up the steps with a little bounce
+    pos.y = THREE.MathUtils.lerp(0, this.STAIR_TOP.y, t) + Math.abs(Math.sin(t * Math.PI * 8)) * 0.12;
+    this.dog.group.rotation.y = Math.PI;
+    if (t >= 1) {
+      this.climbAnim.active = false;
+      pos.y = 0;
+      this.dog.setAction("idle");
+      sound.playRewardFanfare();
+      if (this.onStairsClimbed) this.onStairsClimbed();
+    }
+  }
+
+  // ---------- Edit mode: move & rotate furniture ----------
+
+  public setEditMode(on: boolean) {
+    this.editMode = on;
+    this.editDrag = null;
+    if (!on) this.selectEditable(null);
+  }
+
+  private registerEditable(id: string, obj: THREE.Object3D) {
+    this.editables.set(id, obj);
+    obj.traverse((c) => {
+      c.userData.editId = id;
+    });
+  }
+
+  private pickEditable(mouse: THREE.Vector2): string | null {
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, this.camera);
+    const hits = raycaster.intersectObjects([...this.editables.values()], true);
+    for (const h of hits) {
+      let o: THREE.Object3D | null = h.object;
+      while (o) {
+        const id = (o.userData as { editId?: string }).editId;
+        if (id && this.editables.has(id)) return id;
+        o = o.parent;
+      }
+    }
+    return null;
+  }
+
+  public selectEditable(id: string | null) {
+    this.selectedEditId = id;
+    if (this.selectionBox) {
+      this.scene.remove(this.selectionBox);
+      this.selectionBox.geometry.dispose();
+      (this.selectionBox.material as THREE.Material).dispose();
+      this.selectionBox = null;
+    }
+    if (id) {
+      const obj = this.editables.get(id);
+      if (obj) {
+        this.selectionBox = new THREE.BoxHelper(obj, 0xfacc15);
+        this.scene.add(this.selectionBox);
+      }
+    }
+    if (this.onEditChanged) this.onEditChanged(id);
+  }
+
+  public getSelectedEditId(): string | null {
+    return this.selectedEditId;
+  }
+
+  public moveSelected(dx: number, dz: number) {
+    const obj = this.selectedEditId ? this.editables.get(this.selectedEditId) : undefined;
+    if (!obj) return;
+    const c = this.clampForRoom(obj.position.x + dx, obj.position.z + dz);
+    obj.position.x = c.x;
+    obj.position.z = c.z;
+    this.selectionBox?.update();
+    if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
+  }
+
+  public rotateSelected(axis: "x" | "y" | "z", deg: number) {
+    const obj = this.selectedEditId ? this.editables.get(this.selectedEditId) : undefined;
+    if (!obj) return;
+    const rad = (deg * Math.PI) / 180;
+    if (axis === "x") obj.rotation.x += rad;
+    else if (axis === "y") obj.rotation.y += rad;
+    else obj.rotation.z += rad;
+    this.selectionBox?.update();
+    if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
+  }
+
+  public getLayout(): RoomLayout {
+    const out: RoomLayout = {};
+    this.editables.forEach((obj, id) => {
+      out[id] = {
+        p: [obj.position.x, obj.position.y, obj.position.z],
+        r: [obj.rotation.x, obj.rotation.y, obj.rotation.z],
+      };
+    });
+    return out;
+  }
+
+  public applyLayout(layout: RoomLayout | null | undefined) {
+    if (!layout) return;
+    for (const [id, t] of Object.entries(layout)) {
+      const obj = this.editables.get(id);
+      if (!obj || !t) continue;
+      if (Array.isArray(t.p) && t.p.length === 3) obj.position.set(t.p[0], t.p[1], t.p[2]);
+      if (Array.isArray(t.r) && t.r.length === 3) obj.rotation.set(t.r[0], t.r[1], t.r[2]);
+    }
+  }
+
+  private clampForRoom(x: number, z: number): { x: number; z: number } {
+    if (this.houseRoom === "hallway") {
+      return {
+        x: THREE.MathUtils.clamp(x, -1.9, 1.9),
+        z: THREE.MathUtils.clamp(z, -3.9, 3.9),
+      };
+    }
+    if (this.houseRoom === "upstairs") {
+      return {
+        x: THREE.MathUtils.clamp(x, -5.2, 5.2),
+        z: THREE.MathUtils.clamp(z, -2.7, 2.7),
+      };
+    }
+    if (this.viewMode === "house") {
+      return {
+        x: THREE.MathUtils.clamp(x, -3.2, 3.2),
+        z: THREE.MathUtils.clamp(z, -3.2, 3.2),
+      };
+    }
+    return {
+      x: THREE.MathUtils.clamp(x, -12.0, 12.0),
+      z: THREE.MathUtils.clamp(z, -12.0, 12.0),
+    };
+  }
+
+  /**
+   * Walk dog to the central pot, then open cooking UI
+   */
+  public walkToPotAndCook() {
+    const potSide = new THREE.Vector3(0, 0, 1.6);
+    this.walkTo(potSide, () => {
+      this.dog.group.rotation.y = Math.PI;
+      this.dog.setAction("sit", 2.0);
+      sound.playCrunch();
+      this.spawnHeartParticles(this.dog.group.position.clone().add(new THREE.Vector3(0, 1.2, 0)));
+      if (this.onPotClicked) this.onPotClicked();
+    });
   }
 
   /**
@@ -1550,7 +2776,7 @@ export class ParkScene {
     if (this.viewMode === "park") return;
     this.viewMode = "park";
 
-    this.houseGroup.visible = false;
+    this.hideAllRooms();
     this.parkGroup.visible = true;
 
     // Position dog in front of doghouse doorway
@@ -1576,11 +2802,12 @@ export class ParkScene {
    * Go to Dog Bed: Walks dog onto the bed, curls up, and initiates sleep sequence
    */
   public goToBed(onAsleep?: () => void) {
-    if (this.viewMode !== "house") {
-      this.enterHouse();
+    // The bed lives in the upstairs bedroom
+    if (this.viewMode !== "house" || this.houseRoom !== "upstairs") {
+      this.enterUpstairs();
     }
 
-    const bedTarget = new THREE.Vector3(-1.8, 0, -1.2);
+    const bedTarget = new THREE.Vector3(this.bedGroup.position.x, 0, this.bedGroup.position.z);
     const dogPos = this.dog.group.position;
     const distToBed = new THREE.Vector2(bedTarget.x - dogPos.x, bedTarget.z - dogPos.z).length();
 
@@ -1609,7 +2836,11 @@ export class ParkScene {
     this.dog.setAction("idle");
     if (this.viewMode === "house") {
       // Step slightly forward from the bed onto the rug facing the camera
-      this.dog.group.position.set(-0.8, 0, -0.6);
+      this.dog.group.position.set(
+        this.bedGroup.position.x + 1.0,
+        0,
+        this.bedGroup.position.z + 0.6
+      );
       this.dog.group.rotation.y = Math.PI * 0.75;
     }
   }
@@ -1617,7 +2848,7 @@ export class ParkScene {
   /**
    * Play with House Toy: Dog walks to toy and plays
    */
-  public playWithToy() {
+  public playWithToy(near?: THREE.Vector3) {
     sound.playToyBounce();
     this.isToyAnimating = true;
 
@@ -1634,7 +2865,7 @@ export class ParkScene {
       }
     }, 25);
 
-    this.walkTo(new THREE.Vector3(1.0, 0, 0.4), () => {
+    this.walkTo(near ?? new THREE.Vector3(1.0, 0, 0.4), () => {
       this.dog.setAction("eat", 1.5);
       this.spawnHeartParticles(this.dog.group.position.clone().add(new THREE.Vector3(0, 1.2, 0)));
       if (this.onToyClicked) this.onToyClicked();
@@ -1691,11 +2922,30 @@ export class ParkScene {
       // Update Dog skeletal animations
       this.dog.update(delta, elapsed);
 
+      // Stair-climb animation
+      this.updateClimb(delta);
+
       // Physics & Fetch AI
       this.updatePhysics(delta);
 
       // Particle system
       this.updateParticles(delta);
+
+      // Kitchen pot steam + soup bubble animation
+      if (this.kitchenGroup.visible) {
+        const t = elapsed;
+        this.potSteamGroup.children.forEach((puff, i) => {
+          puff.position.y = 0.1 + ((t * 0.45 + i * 0.3) % 1.2);
+          const s = 0.7 + ((t * 0.45 + i * 0.3) % 1.2) * 0.6;
+          puff.scale.set(s, s, s);
+          (puff as THREE.Mesh).position.x = Math.sin(t * 1.4 + i * 1.7) * 0.14;
+        });
+        const soup = this.potGroup.getObjectByName("soupSurface");
+        if (soup) {
+          soup.position.y = 0.47 + Math.sin(t * 5.0) * 0.008;
+          soup.scale.set(1 + Math.sin(t * 3.2) * 0.015, 1, 1 + Math.cos(t * 3.2) * 0.015);
+        }
+      }
 
       // Camera follow
       if (this.followDog) {

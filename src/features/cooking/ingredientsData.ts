@@ -1,0 +1,381 @@
+import { IngredientItem, Recipe } from "../../types/pet";
+
+export const BASIC_INGREDIENTS: IngredientItem[] = [
+  {
+    id: "meat",
+    name: "Fresh Meat",
+    icon: "🥩",
+    cost: 8,
+    description: "Juicy protein base for hearty meals.",
+  },
+  {
+    id: "carrot",
+    name: "Garden Carrot",
+    icon: "🥕",
+    cost: 4,
+    description: "Sweet crunchy veggie for shiny coat.",
+  },
+  {
+    id: "potato",
+    name: "Golden Potato",
+    icon: "🥔",
+    cost: 4,
+    description: "Filling starchy comfort food.",
+  },
+  {
+    id: "egg",
+    name: "Farm Egg",
+    icon: "🥚",
+    cost: 5,
+    description: "Protein-rich breakfast classic.",
+  },
+  {
+    id: "fish",
+    name: "River Fish",
+    icon: "🐟",
+    cost: 10,
+    description: "Omega-rich tasty catch.",
+  },
+  {
+    id: "cheese",
+    name: "Cheddar Chunk",
+    icon: "🧀",
+    cost: 7,
+    description: "Creamy irresistible treat.",
+  },
+];
+
+export const COOKING_RECIPES: Recipe[] = [
+  {
+    id: "hearty_stew",
+    name: "Hearty Meat Stew",
+    icon: "🍲",
+    ingredients: ["meat", "carrot"],
+    energyBoost: 30,
+    happinessBoost: 24,
+    hungerReduction: 44,
+    xp: 24,
+    description: "Slow-cooked meat with carrots. A full warm belly!",
+  },
+  {
+    id: "cheesy_omelette",
+    name: "Cheesy Omelette",
+    icon: "🍳",
+    ingredients: ["egg", "cheese"],
+    energyBoost: 22,
+    happinessBoost: 18,
+    hungerReduction: 30,
+    xp: 18,
+    description: "Fluffy eggs melted with cheddar. Quick & tasty!",
+  },
+  {
+    id: "fish_feast",
+    name: "Fisherman's Feast",
+    icon: "🍛",
+    ingredients: ["fish", "carrot"],
+    energyBoost: 28,
+    happinessBoost: 26,
+    hungerReduction: 42,
+    xp: 24,
+    description: "Grilled fish with garden carrots. Fancy dinner!",
+  },
+  {
+    id: "meat_cheese_bowl",
+    name: "Meat & Cheese Bowl",
+    icon: "🥘",
+    ingredients: ["meat", "cheese"],
+    energyBoost: 28,
+    happinessBoost: 22,
+    hungerReduction: 38,
+    xp: 20,
+    description: "Savory meat topped with melted cheese. Pup favorite!",
+  },
+  {
+    id: "veggie_mix",
+    name: "Garden Veggie Mix",
+    icon: "🥗",
+    ingredients: ["carrot", "potato"],
+    energyBoost: 14,
+    happinessBoost: 12,
+    hungerReduction: 20,
+    xp: 12,
+    description: "Light crunchy veggie snack. Healthy & fresh!",
+  },
+  {
+    id: "surf_turf",
+    name: "Surf & Turf Deluxe",
+    icon: "🍽️",
+    ingredients: ["meat", "fish"],
+    energyBoost: 38,
+    happinessBoost: 34,
+    hungerReduction: 50,
+    xp: 32,
+    description: "The ultimate deluxe feast! Meat & fish.",
+  },
+];
+
+/** Forest finds: pick two bases for the pot's top squares. */
+export const FOREST_INGREDIENTS: IngredientItem[] = [
+  {
+    id: "red_mushroom",
+    name: "Red Mushroom",
+    icon: "🍄",
+    cost: 6,
+    description: "Plump spotted cap from the deep woods.",
+  },
+  {
+    id: "blueberry",
+    name: "Blueberries",
+    icon: "🫐",
+    cost: 5,
+    description: "A handful of sweet midnight berries.",
+  },
+  {
+    id: "yellow_acorn",
+    name: "Yellow Acorn",
+    icon: "🌰",
+    cost: 5,
+    description: "Golden nutty crunch squirrels envy.",
+  },
+];
+
+/** Seasonings: up to two for the pot's bottom squares. */
+export const SEASONINGS: IngredientItem[] = [
+  {
+    id: "honey",
+    name: "Honey Bottle",
+    icon: "🍯",
+    cost: 6,
+    description: "A sticky-sweet drizzle of joy.",
+  },
+  {
+    id: "salt",
+    name: "Salt Can",
+    icon: "🧂",
+    cost: 3,
+    description: "A pinch of campfire savor.",
+  },
+  {
+    id: "pepper",
+    name: "Pepper Can",
+    icon: "🌶️",
+    cost: 3,
+    description: "Cracked fire flakes. Spicy!",
+  },
+];
+
+/**
+ * Surprise forest soups! Each combo of 2 bases (+ optional seasonings)
+ * bubbles into a different magical stew.
+ */
+export const SOUP_RECIPES: Recipe[] = [
+  {
+    id: "enchanted_forest_stew",
+    name: "Enchanted Forest Stew",
+    icon: "✨",
+    ingredients: ["red_mushroom", "blueberry"],
+    energyBoost: 26,
+    happinessBoost: 30,
+    hungerReduction: 38,
+    xp: 26,
+    description: "Mushrooms and midnight berries swirl into a sparkling violet stew!",
+  },
+  {
+    id: "woodland_hearty_stew",
+    name: "Woodland Hearty Stew",
+    icon: "🍲",
+    ingredients: ["red_mushroom", "yellow_acorn"],
+    energyBoost: 32,
+    happinessBoost: 24,
+    hungerReduction: 46,
+    xp: 28,
+    description: "Earthy, nutty and extra filling. Lumberjack approved!",
+  },
+  {
+    id: "berry_nut_porridge",
+    name: "Berry Nut Porridge",
+    icon: "🥣",
+    ingredients: ["blueberry", "yellow_acorn"],
+    energyBoost: 24,
+    happinessBoost: 26,
+    hungerReduction: 36,
+    xp: 24,
+    description: "Sweet berries folded into creamy golden nuts. Cozy!",
+  },
+  {
+    id: "simple_shroom_broth",
+    name: "Simple Shroom Broth",
+    icon: "🍵",
+    ingredients: ["red_mushroom", "salt"],
+    energyBoost: 16,
+    happinessBoost: 14,
+    hungerReduction: 24,
+    xp: 14,
+    description: "Clear savory broth. Light but warming.",
+  },
+  {
+    id: "caramel_acorn_porridge",
+    name: "Caramel Acorn Porridge",
+    icon: "🍮",
+    ingredients: ["yellow_acorn", "honey"],
+    energyBoost: 28,
+    happinessBoost: 30,
+    hungerReduction: 34,
+    xp: 26,
+    description: "Honey melts into golden acorns. Dessert for dinner!",
+  },
+  {
+    id: "fairy_lights_soup",
+    name: "Fairy Lights Soup",
+    icon: "🧚",
+    ingredients: ["red_mushroom", "blueberry", "honey"],
+    energyBoost: 36,
+    happinessBoost: 42,
+    hungerReduction: 44,
+    xp: 38,
+    description: "Glowing honey-berry magic! Rumor says fairies seasoned it.",
+  },
+  {
+    id: "honey_trail_stew",
+    name: "Honey-Glazed Trail Stew",
+    icon: "🍯",
+    ingredients: ["red_mushroom", "yellow_acorn", "honey"],
+    energyBoost: 40,
+    happinessBoost: 34,
+    hungerReduction: 52,
+    xp: 36,
+    description: "Sticky-sweet glaze over a hearty trail mix stew.",
+  },
+  {
+    id: "golden_acorn_nectar",
+    name: "Golden Acorn Nectar",
+    icon: "🌟",
+    ingredients: ["blueberry", "yellow_acorn", "honey"],
+    energyBoost: 34,
+    happinessBoost: 40,
+    hungerReduction: 40,
+    xp: 36,
+    description: "Liquid gold! Shimmers like morning sunshine.",
+  },
+  {
+    id: "campfire_sweet_salty",
+    name: "Campfire Sweet-Salty Stew",
+    icon: "🔥",
+    ingredients: ["red_mushroom", "blueberry", "salt"],
+    energyBoost: 30,
+    happinessBoost: 32,
+    hungerReduction: 44,
+    xp: 32,
+    description: "Sweet meets savory over crackling flames. Chef's kiss!",
+  },
+  {
+    id: "dragon_fire_stew",
+    name: "Dragon Fire Stew",
+    icon: "🐉",
+    ingredients: ["red_mushroom", "yellow_acorn", "pepper"],
+    energyBoost: 44,
+    happinessBoost: 36,
+    hungerReduction: 48,
+    xp: 40,
+    description: "Volcano-hot! Only brave pups finish the bowl. 🌋",
+  },
+  {
+    id: "volcano_shroom_soup",
+    name: "Volcano Mushroom Soup",
+    icon: "🌋",
+    ingredients: ["red_mushroom", "honey", "pepper"],
+    energyBoost: 38,
+    happinessBoost: 34,
+    hungerReduction: 42,
+    xp: 36,
+    description: "Sweet lava with a peppery eruption. Handle with paws!",
+  },
+  {
+    id: "tingly_berry_blaze",
+    name: "Tingly Berry Blaze",
+    icon: "🫐",
+    ingredients: ["blueberry", "honey", "pepper"],
+    energyBoost: 32,
+    happinessBoost: 38,
+    hungerReduction: 38,
+    xp: 34,
+    description: "Berries with a buzzy pepper finish. Tingly tongues!",
+  },
+  {
+    id: "trail_mix_medley",
+    name: "Trail Mix Medley",
+    icon: "🥘",
+    ingredients: ["blueberry", "yellow_acorn", "salt"],
+    energyBoost: 28,
+    happinessBoost: 30,
+    hungerReduction: 42,
+    xp: 30,
+    description: "The hiker's classic, simmered into a chunky medley.",
+  },
+  {
+    id: "royal_forest_feast",
+    name: "Royal Forest Feast",
+    icon: "👑",
+    ingredients: ["red_mushroom", "blueberry", "yellow_acorn", "honey", "salt"],
+    energyBoost: 55,
+    happinessBoost: 55,
+    hungerReduction: 70,
+    xp: 60,
+    description: "The full forest banquet! Fit for the goodest pup royalty.",
+  },
+  {
+    id: "mountain_heart_stew",
+    name: "Mountain Heart Stew",
+    icon: "⛰️",
+    ingredients: ["red_mushroom", "blueberry", "yellow_acorn", "salt", "pepper"],
+    energyBoost: 52,
+    happinessBoost: 50,
+    hungerReduction: 68,
+    xp: 58,
+    description: "Every trail flavor in one legendary pot. Heart-warming!",
+  },
+];
+
+/** Mystery fallback when a combo matches no recipe — still edible! */
+export const MYSTERY_MUSH: Recipe = {
+  id: "mystery_mush",
+  name: "Mystery Mush",
+  icon: "❓",
+  ingredients: [],
+  energyBoost: 10,
+  happinessBoost: 8,
+  hungerReduction: 15,
+  xp: 8,
+  description: "Nobody knows what this is... but the pup loves surprises!",
+};
+
+export const DEFAULT_INGREDIENTS: Record<string, number> = {
+  meat: 3,
+  carrot: 3,
+  potato: 3,
+  egg: 2,
+  fish: 2,
+  cheese: 2,
+  red_mushroom: 2,
+  blueberry: 2,
+  yellow_acorn: 2,
+  honey: 1,
+  salt: 2,
+  pepper: 1,
+};
+
+/** Every buyable ingredient (basics + forest finds + seasonings). */
+export const ALL_INGREDIENTS: IngredientItem[] = [
+  ...BASIC_INGREDIENTS,
+  ...FOREST_INGREDIENTS,
+  ...SEASONINGS,
+];
+
+/** Every cookable dish (classic recipes + forest soups). */
+export const ALL_RECIPES: Recipe[] = [...COOKING_RECIPES, ...SOUP_RECIPES];
+
+const SEASONING_IDS = new Set(SEASONINGS.map((i) => i.id));
+
+export function isSeasoning(id: string): boolean {
+  return SEASONING_IDS.has(id);
+}

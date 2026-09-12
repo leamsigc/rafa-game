@@ -94,12 +94,12 @@ export const MiniGameSelectorModal: React.FC<MiniGameSelectorModalProps> = ({
                 🎾
               </div>
               <div>
-                <h4 className="text-sm font-bold text-[#386641]">3D Tennis Ball Fetch</h4>
+                <h4 className="text-sm font-bold text-[#386641]">3D Fetch Arena</h4>
                 <p className="text-xs text-[#386641]/75 mt-0.5">
-                  Throw the ball anywhere in the 3D park for {dogName} to retrieve!
+                  Aim & throw — {dogName} sprints, grabs and returns the ball!
                 </p>
                 <span className="inline-flex items-center gap-1 text-[10px] font-bold text-[#386641] mt-1">
-                  🎾 Realistic physics & AI tracking
+                  🎾 Ball physics • tired pups run slower!
                 </span>
               </div>
             </div>

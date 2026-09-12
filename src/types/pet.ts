@@ -3,6 +3,7 @@ export type DogBreed = "golden" | "chocolate" | "husky" | "dalmatian" | "corgi";
 export type DogAction =
   | "idle"
   | "sit"
+  | "stay"
   | "bark"
   | "run"
   | "fetch"
@@ -35,6 +36,8 @@ export interface PetAccessory {
 
 export type HouseViewMode = "park" | "house";
 
+export type HouseRoom = "living" | "hallway" | "kitchen" | "upstairs";
+
 export interface PetStats {
   name: string;
   breed: DogBreed;
@@ -47,6 +50,10 @@ export interface PetStats {
   treatsInventory: Record<string, number>;
   coins: number;
   lastFed: number;
+  /** Timestamp of the last meaningful interaction (feed/play/train/pet/chat). */
+  lastInteractionAt: number;
+  /** Trick proficiency 0-100 keyed by trick id (sit/stay/fetch). */
+  trickProgress: Record<string, number>;
   unlockedSkills: string[];
   trainingPoints: number;
   bedColors: BedColors;
@@ -55,6 +62,27 @@ export interface PetStats {
   houseToy: "bone" | "duck" | "bear" | "ball";
   unlockedBedStyles: string[];
   currentBedStyle: string;
+  ingredientsInventory?: Record<string, number>;
+}
+
+export interface IngredientItem {
+  id: string;
+  name: string;
+  icon: string;
+  cost: number;
+  description: string;
+}
+
+export interface Recipe {
+  id: string;
+  name: string;
+  icon: string;
+  ingredients: string[];
+  energyBoost: number;
+  happinessBoost: number;
+  hungerReduction: number;
+  xp: number;
+  description: string;
 }
 
 export type SkillCategory = "tricks" | "affection" | "vitality";
