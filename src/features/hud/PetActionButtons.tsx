@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   Sparkles,
   Volume2,
@@ -25,10 +25,17 @@ import {
   Bed,
   Trees,
   Pencil,
+  ChevronUp,
+  ChevronDown,
+  Axe,
+  Aperture,
+  Images,
+  CloudRain,
+  Snowflake,
 } from "lucide-react";
 import { DogAction, PetStats, HouseRoom, HouseViewMode } from "../../types/pet";
 import { DogEmotion, getEmotionMeta } from "../emotions/emotion";
-import { TimeOfDay } from "../dog3d/ParkScene";
+import { TimeOfDay, WeatherType } from "../dog3d/ParkScene";
 import dogAvatar from "../../assets/images/dog_avatar_1788547305164.jpg";
 import { SKILL_NODES } from "../skills/skillTreeData";
 
@@ -62,6 +69,11 @@ interface PetActionButtonsProps {
   onOpenShop?: () => void;
   onGoToBed?: () => void;
   onToggleLamp?: () => void;
+  onTakeSnapshot?: () => void;
+  onOpenAlbum?: () => void;
+  albumCount?: number;
+  weather?: WeatherType;
+  onCycleWeather?: () => void;
 }
 
 interface TrickItem {
@@ -116,8 +128,14 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   onOpenShop,
   onGoToBed,
   onToggleLamp,
+  onTakeSnapshot,
+  onOpenAlbum,
+  albumCount = 0,
+  weather = "sunny",
+  onCycleWeather,
 }) => {
   const unlockedSet = new Set(stats.unlockedSkills || []);
+  const hasAxe = (stats.ownedTools || []).includes("axe");
   const isHouse = viewMode === "house";
   const isKitchen = isHouse && houseRoom === "kitchen";
   const isHallway = isHouse && houseRoom === "hallway";
@@ -131,10 +149,33 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
           ? "🛏️ Upstairs"
           : "🛋️ Living Room";
 
+  // Mobile-friendly collapsible panels: little arrows hide/show each
+  // control group (top, tricks, bottom). Tap ▼ to slide down, ▲ to bring up.
+  const [topHidden, setTopHidden] = useState(false);
+  const [tricksHidden, setTricksHidden] = useState(false);
+  const [bottomHidden, setBottomHidden] = useState(false);
+
+  const arrowBtn =
+    "pointer-events-auto p-2 rounded-full bg-[#1f2937]/80 hover:bg-[#1f2937] text-white shadow-lg border border-white/20 transition-all active:scale-95 cursor-pointer min-w-[40px] min-h-[40px] flex items-center justify-center";
+
   return (
-    <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-3 sm:p-4 select-none">
+    <div
+      className="absolute inset-0 pointer-events-none flex flex-col justify-between gap-2 p-3 sm:p-4 select-none"
+      style={{ paddingTop: "max(0.75rem, env(safe-area-inset-top))", paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
+    >
       {/* Top HUD: Vitality, Skills Level & Environment Settings */}
-      <div className="flex items-start justify-between gap-3 pointer-events-auto">
+      {topHidden ? (
+        <div className="flex justify-center pointer-events-auto">
+          <button className={arrowBtn} onClick={() => setTopHidden(false)} aria-label="Show top controls" title="Show stats & settings">
+            <ChevronDown className="w-5 h-5" />
+          </button>
+        </div>
+      ) : (
+      <div className="flex items-start justify-between gap-2 pointer-events-auto">
+        <div className="flex flex-col gap-1.5">
+          <button className={`${arrowBtn} self-start !min-w-[32px] !min-h-[32px] !p-1.5`} onClick={() => setTopHidden(true)} aria-label="Hide top controls" title="Hide stats (tap ▼ to bring back)">
+            <ChevronUp className="w-4 h-4" />
+          </button>
         {/* Left: Pet profile & status meters */}
         <div className="bg-[#F2E8CF]/95 backdrop-blur-md border border-[#386641]/20 rounded-3xl p-3 sm:p-3.5 shadow-xl shadow-[#386641]/10 flex items-center gap-3.5 max-w-sm sm:max-w-md text-[#386641]">
           {/* Avatar button */}
@@ -243,9 +284,10 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             </div>
           </div>
         </div>
+        </div>
 
         {/* Right: Environment & Audio Controls */}
-        <div className="flex items-center gap-1.5 bg-[#F2E8CF]/95 backdrop-blur-md border border-[#386641]/20 rounded-3xl p-1.5 shadow-xl shadow-[#386641]/10 text-[#386641]">
+        <div className="flex items-center justify-end flex-wrap gap-1.5 max-w-[46vw] sm:max-w-none bg-[#F2E8CF]/95 backdrop-blur-md border border-[#386641]/20 rounded-3xl p-1.5 shadow-xl shadow-[#386641]/10 text-[#386641]">
           {/* Shop button */}
           <button
             id="hud-shop-button"
@@ -318,6 +360,29 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             <span className="hidden sm:inline">Skills</span>
           </button>
 
+          {/* Weather toggle: sunny / rainy / snowy (auto-rotates every few hours) */}
+          {onCycleWeather && (
+            <button
+              onClick={onCycleWeather}
+              title={
+                weather === "sunny"
+                  ? "Sunny! Outdoor play costs less energy. Click for rain."
+                  : weather === "rainy"
+                    ? "Rainy! Dog feels lethargic. Click for snow."
+                    : "Snowy! Extra happiness. Click for sun."
+              }
+              className="p-2.5 rounded-2xl bg-white/80 hover:bg-white active:bg-[#F2E8CF] transition-colors cursor-pointer"
+            >
+              {weather === "sunny" ? (
+                <Sun className="w-4 h-4 text-amber-500" />
+              ) : weather === "rainy" ? (
+                <CloudRain className="w-4 h-4 text-blue-500" />
+              ) : (
+                <Snowflake className="w-4 h-4 text-sky-400" />
+              )}
+            </button>
+          )}
+
           {/* Time of day toggle */}
           <button
             onClick={onToggleTimeOfDay}
@@ -378,8 +443,36 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
               <Pencil className="w-4 h-4" />
             </button>
           )}
+
+          {/* Memory Album: snap a photo anytime */}
+          {onTakeSnapshot && (
+            <button
+              onClick={onTakeSnapshot}
+              title="Take a snapshot of your dog right now!"
+              className="p-2.5 rounded-2xl bg-rose-50 hover:bg-rose-100 active:bg-rose-200 text-rose-700 transition-colors cursor-pointer"
+            >
+              <Aperture className="w-4 h-4" />
+            </button>
+          )}
+
+          {/* Memory Album gallery */}
+          {onOpenAlbum && (
+            <button
+              onClick={onOpenAlbum}
+              title={`Open Memory Album (${albumCount} photos)`}
+              className="relative p-2.5 rounded-2xl bg-rose-50 hover:bg-rose-100 active:bg-rose-200 text-rose-700 transition-colors cursor-pointer"
+            >
+              <Images className="w-4 h-4" />
+              {albumCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-600 text-white text-[10px] font-black flex items-center justify-center border border-white">
+                  {albumCount > 99 ? "99+" : albumCount}
+                </span>
+              )}
+            </button>
+          )}
         </div>
       </div>
+      )}
 
       {/* Multi-room House switcher: Living <-> Hallway <-> Kitchen */}
       {isHouse && onSwitchRoom && (
@@ -423,9 +516,24 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
         </div>
       )}
 
-      {/* Floating Canine Tricks Panel (Right Side) */}
-      <div className="self-end pointer-events-auto flex flex-col gap-1.5 max-h-[46vh] overflow-y-auto no-scrollbar py-1">
+      {/* Floating Canine Tricks Panel (Right Side) — collapsible via little arrows */}
+      {tricksHidden ? (
+        <div className="self-end pointer-events-auto">
+          <button className={arrowBtn} onClick={() => setTricksHidden(false)} aria-label="Show tricks" title="Show tricks panel">
+            <ChevronUp className="w-5 h-5" />
+          </button>
+        </div>
+      ) : (
+      <div className="self-end pointer-events-auto flex flex-col gap-1.5 max-h-[38vh] sm:max-h-[46vh] overflow-y-auto no-scrollbar py-1">
         <div className="flex items-center justify-between gap-2 px-2.5 py-1 bg-[#386641] text-[#F2E8CF] rounded-full self-end mb-1 shadow-sm">
+          <button
+            onClick={() => setTricksHidden(true)}
+            aria-label="Hide tricks"
+            title="Hide tricks (tap ▲ to bring back)"
+            className="p-1 rounded-full hover:bg-white/15 transition cursor-pointer"
+          >
+            <ChevronDown className="w-3.5 h-3.5" />
+          </button>
           <span className="text-[10px] font-black uppercase tracking-wider">Tricks & Behavior</span>
           <button
             onClick={onOpenSkillTree}
@@ -497,9 +605,35 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
           );
         })}
       </div>
+      )}
+
+      {/* Park axe hint: chop trees when you own the axe */}
+      {!isHouse && hasAxe && !tricksHidden && (
+        <div className="self-end pointer-events-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-900/85 text-emerald-100 text-[11px] font-bold border border-emerald-300/30 shadow-lg">
+          <Axe className="w-3.5 h-3.5" />
+          <span>Tap a 🌲 tree to chop it!</span>
+        </div>
+      )}
 
       {/* Primary Action Buttons Bar (Feed, Play/Cook, Pet, Train, Dog Chat, Games/Sleep) */}
+      {bottomHidden ? (
+        <div className="pointer-events-auto w-full flex justify-center">
+          <button className={arrowBtn} onClick={() => setBottomHidden(false)} aria-label="Show action bar" title="Show action buttons">
+            <ChevronUp className="w-5 h-5" />
+          </button>
+        </div>
+      ) : (
       <div className="pointer-events-auto w-full max-w-4xl mx-auto">
+        <div className="flex justify-center mb-1">
+          <button
+            onClick={() => setBottomHidden(true)}
+            aria-label="Hide action bar"
+            title="Hide actions (tap ▲ to bring back)"
+            className="p-1.5 rounded-full bg-[#1f2937]/80 hover:bg-[#1f2937] text-white border border-white/20 shadow-lg transition-all active:scale-95 cursor-pointer"
+          >
+            <ChevronDown className="w-4 h-4" />
+          </button>
+        </div>
         <div className="bg-[#F2E8CF]/95 backdrop-blur-md border border-[#386641]/20 rounded-3xl p-2 sm:p-2.5 shadow-2xl shadow-[#386641]/20 grid grid-cols-3 sm:grid-cols-6 gap-2">
           {/* 1. Feed */}
           <button
@@ -626,6 +760,7 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
           )}
         </div>
       </div>
+      )}
     </div>
   );
 };

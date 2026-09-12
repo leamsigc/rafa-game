@@ -63,6 +63,34 @@ export interface PetStats {
   unlockedBedStyles: string[];
   currentBedStyle: string;
   ingredientsInventory?: Record<string, number>;
+  /** Owned tools (e.g. "axe" for chopping park trees). */
+  ownedTools?: string[];
+}
+
+/** A saved snapshot from the Memory Album gallery. */
+export interface MemoryPhoto {
+  id: string;
+  dataUrl: string;
+  timestamp: number;
+  dogName: string;
+  level: number;
+  emotionLabel: string;
+  favorite: boolean;
+}
+
+/** A timed cooking job: countdown from 2:00, then the house glows red. */
+export interface CookingJob {
+  recipeId: string;
+  recipeName: string;
+  recipeIcon: string;
+  ingredients: string[];
+  energyBoost: number;
+  happinessBoost: number;
+  hungerReduction: number;
+  xp: number;
+  description: string;
+  endsAt: number;
+  startedAt: number;
 }
 
 export interface IngredientItem {

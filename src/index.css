@@ -1,9 +1,40 @@
 @import "tailwindcss";
 
 @layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    touch-action: manipulation;
+  }
   body {
     background-color: #F2E8CF;
     color: #386641;
     font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+  }
+  canvas {
+    touch-action: none;
+    display: block;
+  }
+}
+
+/* Mobile helpers: roomy touch targets, hidden scrollbars, safe areas */
+@layer utilities {
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .touch-target {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  @media (max-width: 640px) {
+    button {
+      -webkit-tap-highlight-color: transparent;
+    }
   }
 }

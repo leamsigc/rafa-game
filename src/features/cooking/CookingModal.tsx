@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { X, Coins, Flame, ShoppingBasket, ChefHat, Sparkles, Zap, Heart, Leaf, FlaskConical } from "lucide-react";
+import { X, Coins, Flame, ShoppingBasket, ChefHat, Sparkles, Zap, Heart, Leaf, FlaskConical, Timer } from "lucide-react";
 import {
   ALL_INGREDIENTS,
   ALL_RECIPES,
@@ -9,13 +9,23 @@ import {
   SEASONINGS,
   isSeasoning,
 } from "./ingredientsData";
-import { IngredientItem, Recipe } from "../../types/pet";
+import { CookingJob, IngredientItem, Recipe } from "../../types/pet";
 import { sound } from "../../utils/audio";
+import { IngredientIcon } from "./IngredientIcon";
+
+export const COOK_TIME_SECONDS = 120;
+
+export function formatCookCountdown(msLeft: number): string {
+  const s = Math.max(0, Math.ceil(msLeft / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
 
 interface CookingModalProps {
   dogName: string;
   inventory: Record<string, number>;
   coins: number;
+  activeJob: CookingJob | null;
+  jobMsLeft: number;
   onCook: (recipe: Recipe) => void;
   onBuyIngredient: (ingredientId: string) => void;
   onClose: () => void;
@@ -40,6 +50,8 @@ export const CookingModal: React.FC<CookingModalProps> = ({
   dogName,
   inventory,
   coins,
+  activeJob,
+  jobMsLeft,
   onCook,
   onBuyIngredient,
   onClose,
@@ -230,7 +242,7 @@ export const CookingModal: React.FC<CookingModalProps> = ({
   const canCookMystery = !matchedRecipe && haveAllSelected;
 
   const handleCook = () => {
-    if ((!canCookSelected && !canCookMystery) || isCooking) return;
+    if ((!canCookSelected && !canCookMystery) || isCooking || activeJob) return;
     setIsCooking(true);
     sound.playCrunch();
     const dish: Recipe = matchedRecipe ?? { ...MYSTERY_MUSH, ingredients: [...selected] };
@@ -284,7 +296,7 @@ export const CookingModal: React.FC<CookingModalProps> = ({
                 className="text-left cursor-pointer"
               >
                 <div className="flex items-start justify-between">
-                  <span className="text-3xl">{ing.icon}</span>
+                  <IngredientIcon id={ing.id} icon={ing.icon} size={40} />
                   <span
                     className={`text-[11px] font-black px-2 py-0.5 rounded-full ${
                       count > 0 ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-700"
@@ -333,7 +345,11 @@ export const CookingModal: React.FC<CookingModalProps> = ({
           : "border-dashed border-amber-900/25 bg-amber-950/5 text-amber-900/30"
       }`}
     >
-      {filledId ? ingredientMap[filledId]?.icon : <span className="text-lg font-black">+</span>}
+      {filledId ? (
+        <IngredientIcon id={filledId} icon={ingredientMap[filledId]?.icon ?? "❓"} size={38} />
+      ) : (
+        <span className="text-lg font-black">+</span>
+      )}
     </button>
   );
 
@@ -349,7 +365,7 @@ export const CookingModal: React.FC<CookingModalProps> = ({
             <div>
               <h2 className="text-lg font-black leading-tight">🍲 Kitchen Pot — Cook for {dogName}</h2>
               <p className="text-xs text-amber-100 font-medium">
-                Pyramid pot: 2 bases on top + 3 seasonings below — hold & drag!
+                Pyramid pot: 2 squares on top + 3 at the bottom — drag & drop!
               </p>
             </div>
           </div>
@@ -380,21 +396,29 @@ export const CookingModal: React.FC<CookingModalProps> = ({
                 <p className="font-black text-amber-950 text-sm">The Square Pot</p>
               </div>
 
-              {/* Top squares: bases */}
+              {activeJob && (
+                <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-[#F50A26] text-white text-sm font-black shadow">
+                  <Timer className="w-4 h-4 animate-pulse" />
+                  <span>
+                    {activeJob.recipeIcon} {activeJob.recipeName} — {formatCookCountdown(jobMsLeft)}
+                  </span>
+                </div>
+              )}
+              {/* Pyramid top: 2 squares */}
               <div>
                 <p className="text-[10px] font-black uppercase tracking-wider text-amber-800 mb-1.5">
-                  Bases (pick 2)
+                  Top of pyramid (pick 2)
                 </p>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-2 max-w-[180px] mx-auto w-full">
                   {renderPotSlot(selectedBases[0], "Base 1", "base", "base-0")}
                   {renderPotSlot(selectedBases[1], "Base 2", "base", "base-1")}
                 </div>
               </div>
 
-              {/* Bottom squares: seasonings (pyramid base) */}
+              {/* Pyramid bottom: 3 squares */}
               <div>
-                <p className="text-[10px] font-black uppercase tracking-wider text-violet-900 mb-1.5">
-                  Seasonings (up to 3)
+                <p className="text-[10px] font-black uppercase tracking-wider text-violet-900 mb-1.5 text-center">
+                  Bottom of pyramid (up to 3)
                 </p>
                 <div className="grid grid-cols-3 gap-2">
                   {renderPotSlot(selectedSeasonings[0], "Spice 1", "seasoning", "sea-0")}
@@ -404,29 +428,31 @@ export const CookingModal: React.FC<CookingModalProps> = ({
               </div>
 
               <p className="text-xs font-bold text-amber-950 min-h-8 leading-snug">
-                {isCooking
-                  ? "Cooking... stir that stew! 🔥"
-                  : matchedRecipe
-                    ? `Ready: ${matchedRecipe.icon} ${matchedRecipe.name}!`
-                    : canCookMystery
-                      ? "Unknown combo... risky, but exciting! ❓"
-                      : selected.length === 0
-                        ? "Tap ingredients on the right to fill the pot."
-                        : "Keep adding... match a recipe to cook!"}
+                {activeJob
+                  ? `Busy: ${activeJob.recipeIcon} ${activeJob.recipeName} bubbles for ${formatCookCountdown(jobMsLeft)} — watch the park house! 🏠`
+                  : isCooking
+                    ? "Into the pot... starting the 2:00 countdown! 🔥"
+                    : matchedRecipe
+                      ? `Ready: ${matchedRecipe.icon} ${matchedRecipe.name}!`
+                      : canCookMystery
+                        ? "Unknown combo... risky, but exciting! ❓"
+                        : selected.length === 0
+                          ? "Tap or drag ingredients on the right into the squares."
+                          : "Keep adding... match a recipe to cook!"}
               </p>
 
               <div className="flex gap-2">
                 <button
                   onClick={handleCook}
-                  disabled={(!canCookSelected && !canCookMystery) || isCooking}
+                  disabled={(!canCookSelected && !canCookMystery) || isCooking || !!activeJob}
                   className={`flex-1 px-4 py-2.5 rounded-2xl font-black text-sm flex items-center justify-center gap-2 transition-all active:scale-95 ${
-                    (canCookSelected || canCookMystery) && !isCooking
+                    (canCookSelected || canCookMystery) && !isCooking && !activeJob
                       ? "bg-orange-600 hover:bg-orange-700 text-white shadow-lg shadow-orange-600/30 cursor-pointer"
                       : "bg-amber-950/10 text-amber-950/35 cursor-not-allowed"
                   }`}
                 >
                   <Flame className="w-4 h-4" />
-                  {isCooking ? "Cooking..." : canCookMystery ? "Risk it!" : "Cook!"}
+                  {activeJob ? formatCookCountdown(jobMsLeft) : isCooking ? "Starting..." : canCookMystery ? "Risk it! (2:00)" : "Cook! (2:00)"}
                 </button>
                 {selected.length > 0 && !isCooking && (
                   <button
@@ -499,8 +525,13 @@ export const CookingModal: React.FC<CookingModalProps> = ({
                           </div>
                           <p className="text-[11px] text-amber-900/75 mt-0.5">{recipe.description}</p>
                           <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                            <span className="text-[11px] font-bold bg-white border border-amber-200 rounded-full px-2 py-0.5">
-                              {recipe.ingredients.map((id) => ingredientMap[id]?.icon).join(" + ")}
+                            <span className="bg-white border border-amber-200 rounded-full px-2 py-0.5 flex items-center gap-0.5">
+                              {recipe.ingredients.map((id, idx) => (
+                                <span key={`${recipe.id}-${id}`} className="flex items-center gap-0.5">
+                                  {idx > 0 && <span className="text-[10px] font-black text-amber-400">+</span>}
+                                  <IngredientIcon id={id} icon={ingredientMap[id]?.icon ?? "❓"} size={20} />
+                                </span>
+                              ))}
                             </span>
                             <span className="text-[11px] font-bold text-emerald-700 flex items-center gap-0.5">
                               <Zap className="w-3 h-3" /> +{recipe.energyBoost}%
@@ -546,8 +577,8 @@ export const CookingModal: React.FC<CookingModalProps> = ({
           className="fixed z-[60] pointer-events-none -translate-x-1/2 -translate-y-1/2 flex flex-col items-center"
           style={{ left: dragGhost.x, top: dragGhost.y }}
         >
-          <div className="w-16 h-16 rounded-2xl bg-white border-2 border-orange-500 shadow-2xl flex items-center justify-center text-4xl scale-110">
-            {dragGhost.icon}
+          <div className="w-16 h-16 rounded-2xl bg-white border-2 border-orange-500 shadow-2xl flex items-center justify-center scale-110">
+            <IngredientIcon id={dragGhost.id} icon={dragGhost.icon} size={44} />
           </div>
           <div className="mt-1 px-2 py-0.5 rounded-full bg-amber-950 text-white text-[10px] font-black whitespace-nowrap">
             {dragGhost.name}

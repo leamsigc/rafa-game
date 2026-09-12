@@ -288,12 +288,14 @@ app.post("/api/pet/tts", async (req, res) => {
     try {
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
-        contents: [{ parts: [{ text: `Say with happy, playful, energetic puppy enthusiasm: ${cleanSpeech}` }] }],
+        // Friendly male dog trying to speak: warm, slightly gravelly, playful,
+        // happy bark woven in — "barking, nice male dog voice".
+        contents: [{ parts: [{ text: `Say like a friendly male dog trying to speak human words — warm, slightly gravelly and playful, with a happy bark at the start: ${cleanSpeech}` }] }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
             voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: "Puck" },
+              prebuiltVoiceConfig: { voiceName: "Fenrir" },
             },
           },
         },
@@ -339,9 +341,10 @@ async function startServer() {
           config: {
             responseModalities: [Modality.AUDIO],
             speechConfig: {
-              voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } },
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: "Fenrir" } },
             },
             systemInstruction: `You are Happy, an enthusiastic, loving 3D pet dog talking to your owner in real-time.
+Speak like a friendly MALE dog trying to speak human words — warm, slightly gravelly, playful, with happy barks woven in (Woof!).
 Keep answers short, joyful, and affectionate (1 to 2 sentences). Speak in first person with woofs and happy sounds!
 Understand simple owner commands: if asked to sit, roll over, fetch, dance, spin, cuddle, or howl, acknowledge excitedly!`,
           },

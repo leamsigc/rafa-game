@@ -118,21 +118,11 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
       console.warn("Gemini TTS fetch error, fallback to browser synthesis:", e);
     }
 
-    // Fallback: Web SpeechSynthesis
+    // Fallback: friendly male dog voice (low pitch + happy barks)
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       try {
-        const cleanSpeech = text
-          .replace(/\*[^*]*\*/g, "")
-          .replace(/\[ACTION:[^\]]+\]/g, "")
-          .trim();
-        if (cleanSpeech) {
-          window.speechSynthesis.cancel();
-          const utterance = new SpeechSynthesisUtterance(cleanSpeech);
-          utterance.pitch = 1.35;
-          utterance.rate = 1.05;
-          window.speechSynthesis.speak(utterance);
-          return;
-        }
+        sound.speakDogVoice(text);
+        return;
       } catch {
         // ignore
       }

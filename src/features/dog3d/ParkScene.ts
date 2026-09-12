@@ -5,6 +5,8 @@ import { sound } from "../../utils/audio";
 
 export type TimeOfDay = "day" | "sunset" | "night";
 
+export type WeatherType = "sunny" | "rainy" | "snowy";
+
 export interface BallPhysics {
   active: boolean;
   position: THREE.Vector3;
@@ -51,6 +53,23 @@ export class ParkScene {
   private treatMesh!: THREE.Mesh;
   private obstaclesGroup: THREE.Group = new THREE.Group();
   private particlesGroup: THREE.Group = new THREE.Group();
+  // Choppable park trees (axe gameplay) + distant forest treeline
+  private treeGroups: THREE.Group[] = [];
+  private treeData: { id: string; alive: boolean; respawnAt: number; baseScale: number }[] = [];
+  private forestBorderGroup: THREE.Group = new THREE.Group();
+  public onTreeChopped?: (treeId: string) => void;
+  public onTreeClickedNoAxe?: () => void;
+  public hasAxe: boolean = false;
+  // Cooking-ready beacon above the dog house (red highlight + pot icon)
+  private cookBeaconGroup: THREE.Group = new THREE.Group();
+  private cookBeaconVisible: boolean = false;
+  public onCookBeaconClicked?: () => void;
+  // Weather system (sunny / rainy / snowy)
+  public weather: WeatherType = "sunny";
+  public weatherSpeedFactor: number = 1.0;
+  private precipPoints: THREE.Points | null = null;
+  private precipVel: Float32Array | null = null;
+  private precipKind: "none" | "rain" | "snow" = "none";
 
   // House Room Interior elements (Living Room)
   private roomFloorMesh!: THREE.Mesh;
@@ -89,6 +108,16 @@ export class ParkScene {
   private selectionBox: THREE.BoxHelper | null = null;
   private lastTap: { id: string; time: number } | null = null;
   private editDrag: { id: string; moved: boolean } | null = null;
+  // Multi-touch edit gestures (no keyboard needed on phones)
+  private touchPoints: Map<number, { x: number; y: number }> = new Map();
+  private pinchState: { startDist: number; baseY: number; id: string; moved: boolean } | null = null;
+  private longPressTimer: number | null = null;
+  private secondFingerDownAt: number = 0;
+  private suppressTapUntil: number = 0;
+  // Floating marker bobbing over the grabbed object
+  private selectionMarker: THREE.Group = new THREE.Group();
+  private selectionTopOffset: number = 1.0;
+  private markerTmp: THREE.Vector3 = new THREE.Vector3();
 
   // Dog Bed & Color Customization
   private bedGroup: THREE.Group = new THREE.Group();
@@ -105,6 +134,13 @@ export class ParkScene {
   private houseToyGroup: THREE.Group = new THREE.Group();
   private currentToy: "bone" | "duck" | "bear" | "ball" = "bone";
   private isToyAnimating: boolean = false;
+  // Extra editable furniture groups (everything except dog house + pot)
+  private upstairsDresserGroup: THREE.Group = new THREE.Group();
+  private upstairsShelfGroup: THREE.Group = new THREE.Group();
+  private kitchenFridgeGroup: THREE.Group = new THREE.Group();
+  private kitchenCountersGroup: THREE.Group = new THREE.Group();
+  private kitchenShelfGroup: THREE.Group = new THREE.Group();
+  private bowlsGroup: THREE.Group = new THREE.Group();
 
   // Ceiling Lamp
   private ceilingLampGroup: THREE.Group = new THREE.Group();
@@ -211,10 +247,22 @@ export class ParkScene {
     this.setupHallway();
     this.setupUpstairs();
     this.setupToyCorner();
+    this.setupCookBeacon();
+    this.setupSelectionMarker();
+    // Edit mode: everything movable EXCEPT the dog house + cooking pot.
+    // (bed/toy/lamp indoors, dresser/shelves upstairs, counters/fridge in
+    // kitchen, bowls/hurdles/trees outside — the house shell & pot stay put.)
     this.registerEditable("bed", this.bedGroup);
     this.registerEditable("toy", this.houseToyGroup);
     this.registerEditable("toycorner", this.toyCornerGroup);
     this.registerEditable("lamp", this.ceilingLampGroup);
+    this.registerEditable("dresser", this.upstairsDresserGroup);
+    this.registerEditable("bookshelf", this.upstairsShelfGroup);
+    this.registerEditable("fridge", this.kitchenFridgeGroup);
+    this.registerEditable("counters", this.kitchenCountersGroup);
+    this.registerEditable("shelf", this.kitchenShelfGroup);
+    this.registerEditable("bowls", this.bowlsGroup);
+    this.registerEditable("hurdle", this.obstaclesGroup);
     if (initialLayout) {
       this.applyLayout(initialLayout);
     }
@@ -282,14 +330,43 @@ export class ParkScene {
     this.scene.add(this.lanternLight);
   }
 
+  private skyBaseColor = new THREE.Color(0x7ec8f7);
+  private makeSkyGradientTexture(topColor: string, horizonColor: string): THREE.CanvasTexture {
+    const c = document.createElement("canvas");
+    c.width = 4;
+    c.height = 256;
+    const ctx = c.getContext("2d")!;
+    const grad = ctx.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0, topColor);
+    grad.addColorStop(0.55, "#9fd8f5");
+    grad.addColorStop(0.78, horizonColor);
+    grad.addColorStop(1, "#cfecc0");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 4, 256);
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
   private setupSky() {
+    // Green-and-blue forest sky: blue up top melting into soft green at the
+    // horizon so the treeline blends naturally into the sky.
     const skyGeom = new THREE.SphereGeometry(60, 32, 24);
     const skyMat = new THREE.MeshBasicMaterial({
-      color: 0x93c5fd,
+      map: this.makeSkyGradientTexture("#4aa8ec", "#a8e0c8"),
       side: THREE.BackSide,
+      fog: false,
     });
     this.skyDome = new THREE.Mesh(skyGeom, skyMat);
     this.scene.add(this.skyDome);
+  }
+
+  private setSkyGradient(topColor: string, horizonColor: string) {
+    const mat = this.skyDome.material as THREE.MeshBasicMaterial;
+    const old = mat.map;
+    mat.map = this.makeSkyGradientTexture(topColor, horizonColor);
+    mat.needsUpdate = true;
+    if (old) old.dispose();
   }
 
   private setupParkEnvironment() {
@@ -427,7 +504,8 @@ export class ParkScene {
   }
 
   private buildBowls(x: number, y: number, z: number) {
-    const bowlGroup = new THREE.Group();
+    const bowlGroup = this.bowlsGroup;
+    bowlGroup.clear();
     bowlGroup.position.set(x, y, z);
 
     // Wooden mat
@@ -468,7 +546,7 @@ export class ParkScene {
     water.position.set(0.35, 0.18, 0);
     bowlGroup.add(water);
 
-    this.scene.add(bowlGroup);
+    this.parkGroup.add(bowlGroup);
   }
 
   private buildFence() {
@@ -504,43 +582,96 @@ export class ParkScene {
     this.scene.add(fenceGroup);
   }
 
-  private buildFlora() {
+  private makeOneTree(scale: number, tall: boolean): THREE.Group {
     const treeMat = new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 });
-    const leafMat1 = new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.8 });
-    const leafMat2 = new THREE.MeshStandardMaterial({ color: 0x388e3c, roughness: 0.8 });
+    const leafMats = [
+      new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.8 }),
+      new THREE.MeshStandardMaterial({ color: 0x388e3c, roughness: 0.8 }),
+      new THREE.MeshStandardMaterial({ color: 0x43a047, roughness: 0.8 }),
+    ];
+    const tree = new THREE.Group();
+    const trunkH = tall ? 3.6 : 2.9;
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.48, trunkH, 8), treeMat);
+    trunk.position.y = trunkH / 2;
+    trunk.castShadow = true;
+    tree.add(trunk);
+    const canopy1 = new THREE.Mesh(new THREE.SphereGeometry(1.7, 12, 12), leafMats[0]);
+    canopy1.position.set(0, trunkH + 0.5, 0);
+    canopy1.castShadow = true;
+    tree.add(canopy1);
+    const canopy2 = new THREE.Mesh(new THREE.SphereGeometry(1.3, 10, 10), leafMats[1]);
+    canopy2.position.set(0.6, trunkH + 1.1, 0.4);
+    canopy2.castShadow = true;
+    tree.add(canopy2);
+    const canopy3 = new THREE.Mesh(new THREE.SphereGeometry(0.95, 9, 9), leafMats[2]);
+    canopy3.position.set(-0.55, trunkH + 0.9, -0.3);
+    canopy3.castShadow = true;
+    tree.add(canopy3);
+    tree.scale.setScalar(scale);
+    return tree;
+  }
 
-    const treePositions = [
+  private buildFlora() {
+    // ---- Choppable park trees: plenty of them, spread around the lawn ----
+    const treePositions: [number, number, number][] = [
       [-10, 0, -8],
       [11, 0, -8],
       [-12, 0, 4],
       [12, 0, 7],
       [-8, 0, 10],
+      [-4, 0, 9],
+      [4, 0, -9.5],
+      [-13, 0, -3],
+      [13.5, 0, 0.5],
+      [7.5, 0, 9.5],
+      [-6.5, 0, -10.5],
+      [0.5, 0, 10.5],
     ];
 
-    treePositions.forEach(([x, y, z]) => {
-      const tree = new THREE.Group();
+    this.treeGroups = [];
+    this.treeData = [];
+    treePositions.forEach(([x, y, z], i) => {
+      const baseScale = 0.9 + ((i * 37) % 30) / 100;
+      const tree = this.makeOneTree(baseScale, i % 3 === 0);
       tree.position.set(x, y, z);
-
-      // Trunk
-      const trunkGeom = new THREE.CylinderGeometry(0.35, 0.5, 3.2, 8);
-      const trunk = new THREE.Mesh(trunkGeom, treeMat);
-      trunk.position.y = 1.6;
-      trunk.castShadow = true;
-      tree.add(trunk);
-
-      // Clustered canopy
-      const canopy1 = new THREE.Mesh(new THREE.SphereGeometry(1.8, 12, 12), leafMat1);
-      canopy1.position.set(0, 3.8, 0);
-      canopy1.castShadow = true;
-      tree.add(canopy1);
-
-      const canopy2 = new THREE.Mesh(new THREE.SphereGeometry(1.4, 10, 10), leafMat2);
-      canopy2.position.set(0.6, 4.5, 0.4);
-      canopy2.castShadow = true;
-      tree.add(canopy2);
-
-      this.scene.add(tree);
+      const id = `tree${i}`;
+      tree.userData = { type: "tree", treeId: id };
+      tree.traverse((c) => {
+        c.userData = { type: "tree", treeId: id };
+      });
+      this.parkGroup.add(tree);
+      this.treeGroups.push(tree);
+      this.treeData.push({ id, alive: true, respawnAt: 0, baseScale });
+      this.registerEditable(id, tree);
     });
+
+    // ---- Distant forest border: little trees ringing the back + sides ----
+    // They sit behind the fence and melt the blue sky into green forest.
+    this.forestBorderGroup = new THREE.Group();
+    const ringCount = 26;
+    for (let i = 0; i < ringCount; i++) {
+      const a = (i / ringCount) * Math.PI * 2;
+      // Keep the front (south, +z toward camera start) lower so the park stays open,
+      // pack the back (north, -z) dense like a real forest wall.
+      const isBack = Math.sin(a) < -0.15;
+      const radius = isBack ? 17 + ((i * 53) % 5) : 20 + ((i * 29) % 6);
+      const x = Math.cos(a) * radius;
+      const z = Math.sin(a) * radius;
+      if (z > 13 && Math.abs(x) < 9) continue; // leave the entrance path open
+      const little = this.makeOneTree(0.75 + ((i * 41) % 40) / 100, i % 2 === 0);
+      little.position.set(x, 0, z);
+      // Slight color variance for a natural forest wall
+      little.rotation.y = (i * 1.7) % (Math.PI * 2);
+      this.forestBorderGroup.add(little);
+    }
+    // A couple of extra back-row giants for depth
+    [[-14, -16], [0, -18], [14, -16]].forEach(([x, z], k) => {
+      const giant = this.makeOneTree(1.5 + k * 0.12, true);
+      giant.position.set(x, 0, z);
+      this.forestBorderGroup.add(giant);
+    });
+    // Parented to the park so the forest wall hides when you go indoors
+    this.parkGroup.add(this.forestBorderGroup);
 
     // Flowering bushes
     const bushMat = new THREE.MeshStandardMaterial({ color: 0x4caf50 });
@@ -1118,27 +1249,33 @@ export class ParkScene {
     const roomDepth = 8.4;
     const wallHeight = 3.6;
 
-    // 1. Tile flooring (checkerboard cream + terracotta)
+    // 1. Classic checkerboard tile floor (ivory + charcoal) — big bold squares
+    this.kitchenCountersGroup = new THREE.Group();
+    this.kitchenFridgeGroup = new THREE.Group();
+    this.kitchenShelfGroup = new THREE.Group();
     const floorGeom = new THREE.PlaneGeometry(roomWidth, roomDepth);
     floorGeom.rotateX(-Math.PI / 2);
     const tileCanvas = document.createElement("canvas");
     tileCanvas.width = 256;
     tileCanvas.height = 256;
     const tCtx = tileCanvas.getContext("2d")!;
-    const tileSize = 64;
-    for (let y = 0; y < 4; y++) {
-      for (let x = 0; x < 4; x++) {
-        tCtx.fillStyle = (x + y) % 2 === 0 ? "#fef3c7" : "#ea580c";
+    const tileSize = 128;
+    for (let y = 0; y < 2; y++) {
+      for (let x = 0; x < 2; x++) {
+        tCtx.fillStyle = (x + y) % 2 === 0 ? "#faf6ee" : "#22303c";
         tCtx.fillRect(x * tileSize, y * tileSize, tileSize, tileSize);
-        tCtx.strokeStyle = "#78350f";
-        tCtx.lineWidth = 3;
-        tCtx.strokeRect(x * tileSize, y * tileSize, tileSize, tileSize);
+        tCtx.strokeStyle = "#c9b896";
+        tCtx.lineWidth = 4;
+        tCtx.strokeRect(x * tileSize + 2, y * tileSize + 2, tileSize - 4, tileSize - 4);
+        // subtle tile sheen
+        tCtx.fillStyle = "rgba(255,255,255,0.06)";
+        tCtx.fillRect(x * tileSize + 8, y * tileSize + 8, tileSize - 16, 24);
       }
     }
     const tileTex = new THREE.CanvasTexture(tileCanvas);
     tileTex.wrapS = THREE.RepeatWrapping;
     tileTex.wrapT = THREE.RepeatWrapping;
-    tileTex.repeat.set(3, 3);
+    tileTex.repeat.set(4, 4);
     this.kitchenFloorMesh = new THREE.Mesh(
       floorGeom,
       new THREE.MeshStandardMaterial({ map: tileTex, roughness: 0.5 })
@@ -1193,30 +1330,75 @@ export class ParkScene {
     ceilLight.position.set(0, wallHeight - 0.4, 0);
     this.kitchenGroup.add(ceilLight);
 
-    // 3. Counters around back + sides (L-shape kitchen)
-    const counterMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.6 });
-    const counterTopMat = new THREE.MeshStandardMaterial({ color: 0xfefce8, roughness: 0.3 });
+    // 3. Counters around back + sides (L-shape kitchen) — grouped for edit mode
+    const counterMat = new THREE.MeshStandardMaterial({ color: 0x7c4a12, roughness: 0.55 });
+    const counterTopMat = new THREE.MeshStandardMaterial({ color: 0xfdf6e3, roughness: 0.25 });
+    const cabinetMat = new THREE.MeshStandardMaterial({ color: 0x166534, roughness: 0.6 });
     const mkCounter = (x: number, z: number, w: number, d: number) => {
       const base = new THREE.Mesh(new THREE.BoxGeometry(w, 0.9, d), counterMat);
       base.position.set(x, 0.45, z);
       base.castShadow = true;
       base.receiveShadow = true;
-      this.kitchenGroup.add(base);
+      this.kitchenCountersGroup.add(base);
       const top = new THREE.Mesh(new THREE.BoxGeometry(w + 0.1, 0.08, d + 0.1), counterTopMat);
       top.position.set(x, 0.94, z);
       top.castShadow = true;
-      this.kitchenGroup.add(top);
+      this.kitchenCountersGroup.add(top);
+      // cabinet doors + knobs so it reads as a real kitchen
+      const doors = Math.max(1, Math.round(w / 1.1));
+      for (let di = 0; di < doors; di++) {
+        const dx = x - w / 2 + (di + 0.5) * (w / doors);
+        const door = new THREE.Mesh(new THREE.BoxGeometry(w / doors - 0.12, 0.62, 0.04), cabinetMat);
+        door.position.set(dx, 0.45, z + d / 2 + 0.01);
+        if (Math.abs(w) < Math.abs(d)) {
+          door.position.set(x + w / 2 + 0.01, 0.45, dx - x + z);
+          door.rotation.y = Math.PI / 2;
+        }
+        this.kitchenCountersGroup.add(door);
+        const knob = new THREE.Mesh(
+          new THREE.SphereGeometry(0.035, 8, 8),
+          new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.8, roughness: 0.3 })
+        );
+        knob.position.copy(door.position);
+        knob.position.z += 0.05;
+        if (Math.abs(w) < Math.abs(d)) {
+          knob.position.copy(door.position);
+          knob.position.x += 0.05;
+        }
+        this.kitchenCountersGroup.add(knob);
+      }
     };
     mkCounter(-1.6, -3.55, 4.6, 1.0);
     mkCounter(-3.55, -1.2, 1.0, 4.4);
     mkCounter(3.55, -1.2, 1.0, 4.4);
 
-    // Upper shelves + jars for coziness
+    // Kitchen sink with faucet on the back counter
+    const sinkBasin = new THREE.Mesh(
+      new THREE.BoxGeometry(0.9, 0.18, 0.6),
+      new THREE.MeshStandardMaterial({ color: 0xcbd5e1, metalness: 0.7, roughness: 0.3 })
+    );
+    sinkBasin.position.set(-1.6, 1.0, -3.55);
+    this.kitchenCountersGroup.add(sinkBasin);
+    const faucetStem = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.04, 0.04, 0.5, 8),
+      new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.8, roughness: 0.25 })
+    );
+    faucetStem.position.set(-1.6, 1.25, -3.8);
+    this.kitchenCountersGroup.add(faucetStem);
+    const faucetSpout = new THREE.Mesh(
+      new THREE.TorusGeometry(0.14, 0.035, 8, 12, Math.PI),
+      new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.8, roughness: 0.25 })
+    );
+    faucetSpout.position.set(-1.6, 1.45, -3.66);
+    faucetSpout.rotation.y = Math.PI / 2;
+    this.kitchenCountersGroup.add(faucetSpout);
+
+    // Upper shelves + jars + hanging pans for coziness
     const shelfMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6 });
     [-2.2, -1.2, -0.2].forEach((sx) => {
       const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.07, 0.35), shelfMat);
       shelf.position.set(sx, 2.3, -4.0);
-      this.kitchenGroup.add(shelf);
+      this.kitchenShelfGroup.add(shelf);
       const jarColors = [0xfacc15, 0x86efac, 0xfda4af];
       const jar = new THREE.Mesh(
         new THREE.CylinderGeometry(0.11, 0.11, 0.28, 10),
@@ -1224,23 +1406,70 @@ export class ParkScene {
       );
       jar.position.set(sx, 2.48, -4.0);
       jar.castShadow = true;
-      this.kitchenGroup.add(jar);
+      this.kitchenShelfGroup.add(jar);
     });
+    // Hanging rail with pots + utensils on the right wall
+    const railBar = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.03, 0.03, 2.0, 8),
+      new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.8, roughness: 0.3 })
+    );
+    railBar.rotation.z = Math.PI / 2;
+    railBar.position.set(2.2, 2.4, -3.9);
+    this.kitchenShelfGroup.add(railBar);
+    [1.5, 2.2, 2.9].forEach((hx, hi) => {
+      const pan = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.16 - hi * 0.02, 0.16 - hi * 0.02, 0.1, 12),
+        new THREE.MeshStandardMaterial({ color: hi === 1 ? 0xb45309 : 0x334155, metalness: 0.6, roughness: 0.4 })
+      );
+      pan.position.set(hx, 2.1, -3.9);
+      pan.castShadow = true;
+      this.kitchenShelfGroup.add(pan);
+    });
+    // Sunny kitchen window above the sink
+    const winFrame = new THREE.Mesh(
+      new THREE.BoxGeometry(1.8, 1.2, 0.12),
+      new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.5 })
+    );
+    winFrame.position.set(-1.6, 2.5, -4.12);
+    this.kitchenGroup.add(winFrame);
+    const winGlass = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.5, 0.95),
+      new THREE.MeshBasicMaterial({ color: 0xbfe6f5 })
+    );
+    winGlass.position.set(-1.6, 2.5, -4.05);
+    this.kitchenGroup.add(winGlass);
 
-    // Fridge (tall white box) in corner
+    // Fridge (tall white box) in corner — grouped for edit mode
     const fridge = new THREE.Mesh(
       new THREE.BoxGeometry(1.1, 2.2, 1.0),
       new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.35, metalness: 0.15 })
     );
-    fridge.position.set(3.4, 1.1, -3.3);
+    fridge.position.set(0, 0, 0);
     fridge.castShadow = true;
-    this.kitchenGroup.add(fridge);
+    this.kitchenFridgeGroup.add(fridge);
     const fridgeHandle = new THREE.Mesh(
       new THREE.BoxGeometry(0.08, 0.7, 0.08),
       new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7, roughness: 0.3 })
     );
-    fridgeHandle.position.set(3.0, 1.3, -2.75);
-    this.kitchenGroup.add(fridgeHandle);
+    fridgeHandle.position.set(-0.4, 0.2, 0.55);
+    this.kitchenFridgeGroup.add(fridgeHandle);
+    // Fridge magnets (little paw + heart)
+    const magnetA = new THREE.Mesh(
+      new THREE.SphereGeometry(0.07, 8, 8),
+      new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.5 })
+    );
+    magnetA.position.set(0.15, 0.5, 0.52);
+    this.kitchenFridgeGroup.add(magnetA);
+    const magnetB = new THREE.Mesh(
+      new THREE.BoxGeometry(0.16, 0.12, 0.03),
+      new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.5 })
+    );
+    magnetB.position.set(-0.15, 0.7, 0.52);
+    this.kitchenFridgeGroup.add(magnetB);
+    this.kitchenFridgeGroup.position.set(3.4, 1.1, -3.3);
+    this.kitchenGroup.add(this.kitchenCountersGroup);
+    this.kitchenGroup.add(this.kitchenShelfGroup);
+    this.kitchenGroup.add(this.kitchenFridgeGroup);
 
     // 4. CENTRAL STOVE + COOKING POT (middle of room, clickable!)
     const stoveBase = new THREE.Mesh(
@@ -1671,44 +1900,50 @@ export class ParkScene {
     // The dog bed lives upstairs now
     this.setupDogBed();
 
-    // Little dresser with drawers
+    // Little dresser with drawers — grouped so edit mode can move it
+    this.upstairsDresserGroup = new THREE.Group();
+    this.upstairsDresserGroup.position.set(4.6, 0, -2.9);
     const dresserMat = new THREE.MeshStandardMaterial({ color: 0x7c3aed, roughness: 0.6 });
     const dresser = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.0, 0.6), dresserMat);
-    dresser.position.set(4.6, 0.5, -2.9);
+    dresser.position.set(0, 0.5, 0);
     dresser.castShadow = true;
-    this.upstairsGroup.add(dresser);
+    this.upstairsDresserGroup.add(dresser);
     [-0.25, 0.25].forEach((dx) => {
       const drawer = new THREE.Mesh(
         new THREE.BoxGeometry(0.6, 0.32, 0.05),
         new THREE.MeshStandardMaterial({ color: 0xddd6fe, roughness: 0.5 })
       );
-      drawer.position.set(4.6 + dx, 0.62, -2.58);
-      this.upstairsGroup.add(drawer);
+      drawer.position.set(dx, 0.62, 0.32);
+      this.upstairsDresserGroup.add(drawer);
       const knob = new THREE.Mesh(
         new THREE.SphereGeometry(0.045, 8, 8),
         new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.8, roughness: 0.3 })
       );
-      knob.position.set(4.6 + dx, 0.62, -2.54);
-      this.upstairsGroup.add(knob);
+      knob.position.set(dx, 0.62, 0.36);
+      this.upstairsDresserGroup.add(knob);
     });
+    this.upstairsGroup.add(this.upstairsDresserGroup);
 
-    // Bookshelf with colorful books
+    // Bookshelf with colorful books — grouped so edit mode can move it
+    this.upstairsShelfGroup = new THREE.Group();
+    this.upstairsShelfGroup.position.set(-5.2, 0, -3.1);
     const shelfMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6 });
     const bookColors = [0xef4444, 0x3b82f6, 0x22c55e, 0xeab308, 0xa855f7, 0xec4899];
     for (let s = 0; s < 2; s++) {
       const shelf = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.07, 0.4), shelfMat);
-      shelf.position.set(-5.2, 1.1 + s * 0.6, -3.1);
-      this.upstairsGroup.add(shelf);
+      shelf.position.set(0, 1.1 + s * 0.6, 0);
+      this.upstairsShelfGroup.add(shelf);
       for (let b = 0; b < 6; b++) {
         const book = new THREE.Mesh(
           new THREE.BoxGeometry(0.16, 0.42, 0.28),
           new THREE.MeshStandardMaterial({ color: bookColors[(b + s * 2) % bookColors.length], roughness: 0.7 })
         );
-        book.position.set(-5.9 + b * 0.28, 1.35 + s * 0.6, -3.1);
+        book.position.set(-0.7 + b * 0.28, 1.35 + s * 0.6, 0);
         book.rotation.z = b === 5 ? -0.18 : 0;
-        this.upstairsGroup.add(book);
+        this.upstairsShelfGroup.add(book);
       }
     }
+    this.upstairsGroup.add(this.upstairsShelfGroup);
 
     // Descend mat back to the hallway stairs
     this.descendMesh = this.makeDoorMat("⬇ DOWNSTAIRS", "#6d28d9", "#ddd6fe", "stairs_down", 1.55, 2.4);
@@ -1814,14 +2049,40 @@ export class ParkScene {
     const dom = this.renderer.domElement;
 
     dom.addEventListener("pointerdown", (e) => {
-      // Edit mode: grabbing furniture starts a potential drag (no camera orbit)
-      if (this.editMode && this.viewMode === "house") {
+      this.touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      // Second finger down: switch to two-finger gestures, freeze the camera
+      if (this.touchPoints.size === 2) {
+        this.isDragging = false;
+        this.clearLongPress();
+        if (this.editMode) {
+          if (this.editDrag && !this.editDrag.moved) {
+            // Pinch on the grabbed object: pinch out lifts, pinch in lowers
+            const pts = [...this.touchPoints.values()];
+            this.pinchState = {
+              startDist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+              baseY: this.editables.get(this.editDrag.id)?.position.y ?? 0,
+              id: this.editDrag.id,
+              moved: false,
+            };
+            this.editDrag = null;
+          }
+          this.secondFingerDownAt = performance.now();
+        }
+        return;
+      }
+      if (this.touchPoints.size > 2) return;
+      // Edit mode works outside AND inside: grabbing furniture starts a drag
+      if (this.editMode) {
         const picked = this.pickEditable(this.toNDC(e.clientX, e.clientY));
         if (picked) {
+          // Dog house + cooking pot are the only locked objects
+          if (picked === "doghouse" || picked === "pot") return;
           this.selectEditable(picked);
           this.editDrag = { id: picked, moved: false };
           this.startPointerX = e.clientX;
           this.startPointerY = e.clientY;
+          // Long-press (no keyboard needed): hold still to nudge the object up
+          this.startLongPress(e.clientX, e.clientY, picked);
           return;
         }
       }
@@ -1833,11 +2094,41 @@ export class ParkScene {
     });
 
     window.addEventListener("pointermove", (e) => {
+      if (this.touchPoints.has(e.pointerId)) {
+        this.touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      }
+      // Two-finger pinch: lift / lower the grabbed object on the Y axis
+      if (this.pinchState && this.touchPoints.size >= 2) {
+        const pts = [...this.touchPoints.values()];
+        const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        if (Math.abs(dist - this.pinchState.startDist) > 6) {
+          this.pinchState.moved = true;
+        }
+        if (this.pinchState.moved) {
+          const obj = this.editables.get(this.pinchState.id);
+          if (obj) {
+            obj.position.y = THREE.MathUtils.clamp(
+              this.pinchState.baseY + (dist - this.pinchState.startDist) * 0.006,
+              0,
+              3.0
+            );
+            this.selectionBox?.update();
+            this.refreshSelectionMarker();
+          }
+        }
+        return;
+      }
+      // A real move cancels a pending long-press
+      if (this.longPressTimer !== null) {
+        const moved = Math.hypot(e.clientX - this.startPointerX, e.clientY - this.startPointerY);
+        if (moved > 10) this.clearLongPress();
+      }
       // Edit mode furniture drag: slide the grabbed object along the floor
       if (this.editDrag && !this.isDragging) {
         const dist = Math.hypot(e.clientX - this.startPointerX, e.clientY - this.startPointerY);
         if (!this.editDrag.moved && dist > 10) {
           this.editDrag.moved = true;
+          this.clearLongPress();
         }
         if (this.editDrag.moved) {
           const raycaster = new THREE.Raycaster();
@@ -1851,6 +2142,7 @@ export class ParkScene {
               obj.position.x = c.x;
               obj.position.z = c.z;
               this.selectionBox?.update();
+              this.refreshSelectionMarker();
             }
           }
         }
@@ -1872,16 +2164,37 @@ export class ParkScene {
       this.prevMouseY = e.clientY;
     });
 
-    window.addEventListener("pointerup", (e) => {
+    const onPointerEnd = (e: PointerEvent) => {
+      this.touchPoints.delete(e.pointerId);
+      // Two fingers -> one: pinch ended (or a quick two-finger tap = tilt)
+      if (this.pinchState) {
+        const pinch = this.pinchState;
+        this.pinchState = null;
+        if (pinch.moved) {
+          this.buzz(20);
+          if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
+        } else if (this.selectedEditId && performance.now() - this.secondFingerDownAt < 350) {
+          // Quick two-finger tap on the selected object: tilt it forward
+          this.rotateSelected("x", 15);
+          this.buzz(15);
+          // Don't let the leftover finger release count as a double-tap
+          this.lastTap = null;
+          this.suppressTapUntil = performance.now() + 600;
+        }
+        return;
+      }
       // Edit mode tap vs drag: tap selects (double-tap spins), drag saves layout
       if (this.editDrag) {
         const drag = this.editDrag;
         this.editDrag = null;
+        this.clearLongPress();
         if (drag.moved) {
           if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
         } else {
           const now = performance.now();
-          if (this.lastTap && this.lastTap.id === drag.id && now - this.lastTap.time < 350) {
+          if (now < this.suppressTapUntil) {
+            this.lastTap = null;
+          } else if (this.lastTap && this.lastTap.id === drag.id && now - this.lastTap.time < 350) {
             this.rotateSelected("y", 45);
             this.lastTap = null;
           } else {
@@ -1897,7 +2210,9 @@ export class ParkScene {
       if (distMoved < 8) {
         this.handleSceneClick(e.clientX, e.clientY);
       }
-    });
+    };
+    window.addEventListener("pointerup", onPointerEnd);
+    window.addEventListener("pointercancel", onPointerEnd);
 
     dom.addEventListener("wheel", (e) => {
       e.preventDefault();
@@ -1939,9 +2254,13 @@ export class ParkScene {
       if (this.editMode) {
         const picked = this.pickEditable(mouse);
         if (picked) {
+          if (picked === "doghouse" || picked === "pot") {
+            this.selectEditable(null);
+            return;
+          }
           const now = performance.now();
           if (this.lastTap && this.lastTap.id === picked && now - this.lastTap.time < 350) {
-            this.rotateSelected("y", Math.PI / 4);
+            this.rotateSelected("y", 45);
             this.lastTap = null;
             if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
           } else {
@@ -2114,7 +2433,50 @@ export class ParkScene {
       }
     } else {
       // 3. Park Mode Interactivity
-      // A. Check Doghouse Exterior Click -> Enter house!
+      // Edit mode in the park: tap trees / bowls / hurdles to move them
+      if (this.editMode) {
+        const picked = this.pickEditable(mouse);
+        if (picked) {
+          if (picked === "doghouse" || picked === "pot") {
+            this.selectEditable(null);
+            return;
+          }
+          const now = performance.now();
+          if (this.lastTap && this.lastTap.id === picked && now - this.lastTap.time < 350) {
+            this.rotateSelected("y", 45);
+            this.lastTap = null;
+            if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
+          } else {
+            this.selectEditable(picked);
+            this.lastTap = { id: picked, time: now };
+          }
+          return;
+        }
+        this.selectEditable(null);
+        return;
+      }
+      // A. Cooking-ready beacon above the house (red ring + pot icon)
+      if (this.cookBeaconVisible) {
+        const beaconHits = raycaster.intersectObject(this.cookBeaconGroup, true);
+        if (beaconHits.length > 0) {
+          if (this.onCookBeaconClicked) this.onCookBeaconClicked();
+          return;
+        }
+      }
+      // B. Choppable trees (needs the axe from the shop)
+      const treeHits = raycaster.intersectObjects(this.treeGroups.filter((_, i) => this.treeData[i]?.alive), true);
+      if (treeHits.length > 0) {
+        let o: THREE.Object3D | null = treeHits[0].object;
+        while (o) {
+          const tid = (o.userData as { treeId?: string }).treeId;
+          if (tid) {
+            this.chopTree(tid);
+            return;
+          }
+          o = o.parent;
+        }
+      }
+      // C. Check Doghouse Exterior Click -> Enter house!
       if (this.dogHouseExteriorGroup) {
         const houseHits = raycaster.intersectObject(this.dogHouseExteriorGroup, true);
         if (houseHits.length > 0) {
@@ -2123,7 +2485,7 @@ export class ParkScene {
         }
       }
 
-      // B. Check Ground Lawn Click -> Walk to spot!
+      // D. Check Ground Lawn Click -> Walk to spot!
       if (this.groundMesh) {
         const groundHits = raycaster.intersectObject(this.groundMesh, false);
         if (groundHits.length > 0) {
@@ -2162,6 +2524,8 @@ export class ParkScene {
 
   public setTimeOfDay(time: TimeOfDay) {
     this.timeOfDay = time;
+    const skyMat = this.skyDome.material as THREE.MeshBasicMaterial;
+    skyMat.color.setHex(0xffffff);
     if (time === "day") {
       this.ambientLight.intensity = 0.45;
       this.ambientLight.color.setHex(0xffffff);
@@ -2170,8 +2534,9 @@ export class ParkScene {
       this.hemiLight.intensity = 0.6;
       this.sunLight.intensity = 1.3;
       this.sunLight.color.setHex(0xfffaed);
-      (this.skyDome.material as THREE.MeshBasicMaterial).color.setHex(0x93c5fd);
-      this.scene.fog = new THREE.FogExp2(0xd6eaf8, 0.015);
+      // Day: blue top melting into green horizon (forest feel)
+      this.setSkyGradient("#4aa8ec", "#a8e0c8");
+      this.scene.fog = new THREE.FogExp2(0xcfe8d8, 0.014);
       this.lanternLight.intensity = 0;
     } else if (time === "sunset") {
       this.ambientLight.intensity = 0.35;
@@ -2182,8 +2547,8 @@ export class ParkScene {
       this.sunLight.intensity = 1.4;
       this.sunLight.color.setHex(0xf97316);
       this.sunLight.position.set(16, 8, 12);
-      (this.skyDome.material as THREE.MeshBasicMaterial).color.setHex(0xf472b6);
-      this.scene.fog = new THREE.FogExp2(0xfbcfe8, 0.02);
+      this.setSkyGradient("#7c5cc9", "#f7b98a");
+      this.scene.fog = new THREE.FogExp2(0xf3cf9e, 0.018);
       this.lanternLight.intensity = 2.5;
     } else {
       // Night mode
@@ -2194,10 +2559,11 @@ export class ParkScene {
       this.hemiLight.intensity = 0.3;
       this.sunLight.intensity = 0.4;
       this.sunLight.color.setHex(0x93c5fd);
-      (this.skyDome.material as THREE.MeshBasicMaterial).color.setHex(0x0f172a);
+      this.setSkyGradient("#0f172a", "#1e3a5f");
       this.scene.fog = new THREE.FogExp2(0x0f172a, 0.025);
       this.lanternLight.intensity = 4.0;
     }
+    this.applyWeatherOverlay();
   }
 
   /**
@@ -2345,8 +2711,8 @@ export class ParkScene {
         delta * 6
       );
 
-      // Move toward ball
-      const speed = 4.2;
+      // Move toward ball (rain makes the dog lethargic & slower)
+      const speed = 4.2 * this.weatherSpeedFactor;
       dogPos.x += Math.sin(targetAngle) * speed * delta;
       dogPos.z += Math.cos(targetAngle) * speed * delta;
 
@@ -2377,7 +2743,7 @@ export class ParkScene {
         delta * 6
       );
 
-      const speed = 3.6;
+      const speed = 3.6 * this.weatherSpeedFactor;
       dogPos.x += Math.sin(targetAngle) * speed * delta;
       dogPos.z += Math.cos(targetAngle) * speed * delta;
 
@@ -2411,7 +2777,7 @@ export class ParkScene {
           delta * 8
         );
 
-        const walkSpeed = 3.2;
+        const walkSpeed = 3.2 * this.weatherSpeedFactor;
         dogPos.x += Math.sin(targetAngle) * walkSpeed * delta;
         dogPos.z += Math.cos(targetAngle) * walkSpeed * delta;
 
@@ -2641,7 +3007,14 @@ export class ParkScene {
   public setEditMode(on: boolean) {
     this.editMode = on;
     this.editDrag = null;
-    if (!on) this.selectEditable(null);
+    this.pinchState = null;
+    this.clearLongPress();
+    this.touchPoints.clear();
+    if (!on) {
+      this.selectEditable(null);
+    } else {
+      this.selectionMarker.visible = !!this.selectedEditId;
+    }
   }
 
   private registerEditable(id: string, obj: THREE.Object3D) {
@@ -2679,9 +3052,98 @@ export class ParkScene {
       if (obj) {
         this.selectionBox = new THREE.BoxHelper(obj, 0xfacc15);
         this.scene.add(this.selectionBox);
+        this.refreshSelectionMarker();
+        this.selectionMarker.visible = this.editMode;
+        this.buzz(12);
       }
+    } else {
+      this.selectionMarker.visible = false;
     }
     if (this.onEditChanged) this.onEditChanged(id);
+  }
+
+  /** Tiny haptic tick on phones (silent no-op on desktop). */
+  private buzz(ms: number) {
+    try {
+      (navigator as Navigator & { vibrate?: (p: number) => boolean }).vibrate?.(ms);
+    } catch {
+      // ignore
+    }
+  }
+
+  /** Long-press shortcut: hold one finger still to nudge the object upward. */
+  private startLongPress(x: number, y: number, id: string) {
+    this.clearLongPress();
+    this.longPressTimer = window.setTimeout(() => {
+      this.longPressTimer = null;
+      if (this.selectedEditId !== id || this.pinchState) return;
+      this.moveSelectedVertical(0.25);
+      sound.playButtonTap();
+      this.buzz(25);
+      // A hold is not a tap — don't chain it into a double-tap spin
+      this.lastTap = null;
+    }, 600);
+  }
+
+  private clearLongPress() {
+    if (this.longPressTimer !== null) {
+      window.clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
+  }
+
+  private setupSelectionMarker() {
+    this.selectionMarker = new THREE.Group();
+    // Amber cone pointing down at the grabbed object
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.16, 0.3, 12),
+      new THREE.MeshStandardMaterial({
+        color: 0xfacc15,
+        emissive: 0xb45309,
+        emissiveIntensity: 0.7,
+        roughness: 0.4,
+      })
+    );
+    cone.rotation.x = Math.PI;
+    this.selectionMarker.add(cone);
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.24, 0.035, 8, 24),
+      new THREE.MeshBasicMaterial({ color: 0xfde047 })
+    );
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = 0.22;
+    this.selectionMarker.add(ring);
+    this.selectionMarker.visible = false;
+    this.scene.add(this.selectionMarker);
+  }
+
+  /** Recompute how high the marker floats (top of the grabbed object). */
+  private refreshSelectionMarker() {
+    const obj = this.selectedEditId ? this.editables.get(this.selectedEditId) : undefined;
+    if (!obj) return;
+    try {
+      const box = new THREE.Box3().setFromObject(obj);
+      obj.getWorldPosition(this.markerTmp);
+      this.selectionTopOffset = Math.max(0.4, box.max.y - this.markerTmp.y);
+    } catch {
+      this.selectionTopOffset = 1.0;
+    }
+  }
+
+  private updateSelectionMarker(elapsed: number) {
+    if (!this.selectionMarker.visible || !this.selectedEditId) return;
+    const obj = this.editables.get(this.selectedEditId);
+    if (!obj) {
+      this.selectionMarker.visible = false;
+      return;
+    }
+    obj.getWorldPosition(this.markerTmp);
+    this.selectionMarker.position.set(
+      this.markerTmp.x,
+      this.markerTmp.y + this.selectionTopOffset + 0.35 + Math.sin(elapsed * 4) * 0.08,
+      this.markerTmp.z
+    );
+    this.selectionMarker.rotation.y = elapsed * 2;
   }
 
   public getSelectedEditId(): string | null {
@@ -2691,21 +3153,341 @@ export class ParkScene {
   public moveSelected(dx: number, dz: number) {
     const obj = this.selectedEditId ? this.editables.get(this.selectedEditId) : undefined;
     if (!obj) return;
+    // Dog house + cooking pot stay put — everything else can move
+    if (this.selectedEditId === "doghouse" || this.selectedEditId === "pot") return;
     const c = this.clampForRoom(obj.position.x + dx, obj.position.z + dz);
     obj.position.x = c.x;
     obj.position.z = c.z;
     this.selectionBox?.update();
+    this.refreshSelectionMarker();
     if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
+  }
+
+  /** Shift+Up/Down in edit mode: lift / lower the object on the Y axis. */
+  public moveSelectedVertical(dy: number) {
+    const obj = this.selectedEditId ? this.editables.get(this.selectedEditId) : undefined;
+    if (!obj) return;
+    if (this.selectedEditId === "doghouse" || this.selectedEditId === "pot") return;
+    obj.position.y = THREE.MathUtils.clamp(obj.position.y + dy, 0, 3.0);
+    this.selectionBox?.update();
+    this.refreshSelectionMarker();
+    this.buzz(12);
+    if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
+  }
+
+  // ---------- Axe gameplay: chop down park trees ----------
+
+  /** Chop a tree if the player owns an axe. Falls over, hides, respawns later. */
+  public chopTree(treeId: string): boolean {
+    const idx = this.treeData.findIndex((t) => t.id === treeId);
+    if (idx < 0) return false;
+    const data = this.treeData[idx];
+    if (!data.alive) return false;
+    if (!this.hasAxe) {
+      if (this.onTreeClickedNoAxe) this.onTreeClickedNoAxe();
+      return false;
+    }
+    data.alive = false;
+    data.respawnAt = performance.now() + 60000;
+    const tree = this.treeGroups[idx];
+    // Falling timber animation: tip over + sink slightly
+    const startRot = tree.rotation.z;
+    const startY = tree.position.y;
+    const t0 = performance.now();
+    const fall = () => {
+      const k = Math.min(1, (performance.now() - t0) / 700);
+      tree.rotation.z = startRot + k * 1.35;
+      tree.position.y = startY - k * 0.4;
+      if (k < 1) {
+        requestAnimationFrame(fall);
+      } else {
+        tree.visible = false;
+        tree.rotation.z = startRot;
+        tree.position.y = startY;
+      }
+    };
+    requestAnimationFrame(fall);
+    sound.playChop();
+    this.spawnHeartParticles(tree.position.clone().add(new THREE.Vector3(0, 2.2, 0)));
+    // If it was selected in edit mode, deselect
+    if (this.selectedEditId === treeId) this.selectEditable(null);
+    if (this.onTreeChopped) this.onTreeChopped(treeId);
+    return true;
+  }
+
+  private updateTreeRespawns() {
+    const now = performance.now();
+    this.treeData.forEach((data, i) => {
+      if (!data.alive && now >= data.respawnAt) {
+        data.alive = true;
+        const tree = this.treeGroups[i];
+        tree.visible = true;
+        tree.scale.setScalar(0.01);
+        // Grow back to the tree's original size
+        const t0 = performance.now();
+        const target = data.baseScale || 1;
+        const grow = () => {
+          const k = Math.min(1, (performance.now() - t0) / 1200);
+          tree.scale.setScalar(Math.max(0.01, k * target));
+          if (k < 1) requestAnimationFrame(grow);
+          else tree.scale.setScalar(target);
+        };
+        requestAnimationFrame(grow);
+      }
+    });
+    // Gentle badge bob + pulse above the dog house when soup is ready
+    if (this.cookBeaconVisible) {
+      const t = now / 1000;
+      this.cookBeaconGroup.position.y = 3.9 + Math.sin(t * 3) * 0.15;
+      const s = 1 + Math.sin(t * 3) * 0.06;
+      this.cookBeaconGroup.scale.set(s, s, 1);
+    }
+  }
+
+  // ---------- Cooking-ready beacon: red highlight + pot over the house ----------
+
+  /**
+   * Soup-ready badge over the park dog house: a high-contrast cherry-red
+   * circle (fully saturated crimson, visible from anywhere outside) with a
+   * little square Quest-style cooking-pot icon in the middle. A sprite, so it
+   * always faces the camera like a game notification marker.
+   */
+  private makeBeaconTexture(): THREE.CanvasTexture {
+    const c = document.createElement("canvas");
+    c.width = 256;
+    c.height = 256;
+    const ctx = c.getContext("2d")!;
+    // White outer ring for pop against sky + trees
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(128, 128, 120, 0, Math.PI * 2);
+    ctx.fill();
+    // Cherry-red disc: bright crimson, never burgundy or pale pink
+    ctx.fillStyle = "#F50A26";
+    ctx.beginPath();
+    ctx.arc(128, 128, 106, 0, Math.PI * 2);
+    ctx.fill();
+    // Subtle darker-red inner edge for depth
+    ctx.strokeStyle = "#A3001B";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(128, 128, 98, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const ink = "#1F2937";
+    // Steam curls above the pot
+    ctx.strokeStyle = "rgba(255,255,255,0.92)";
+    ctx.lineWidth = 8;
+    ctx.lineCap = "round";
+    const steam = (x: number) => {
+      ctx.beginPath();
+      ctx.moveTo(x, 92);
+      ctx.quadraticCurveTo(x - 10, 76, x, 60);
+      ctx.quadraticCurveTo(x + 10, 46, x, 32);
+      ctx.stroke();
+    };
+    steam(104);
+    steam(128);
+    steam(152);
+
+    // Square Quest-style pot: legs, body, rim, lid, side handles
+    ctx.fillStyle = "#2b3542";
+    ctx.fillRect(90, 196, 14, 18); // left leg
+    ctx.fillRect(152, 196, 14, 18); // right leg
+    // Side handles
+    ctx.fillStyle = "#8B9BB0";
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.roundRect(56, 142, 22, 26, 7);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.roundRect(178, 142, 22, 26, 7);
+    ctx.fill();
+    ctx.stroke();
+    // Pot body (rounded square)
+    ctx.fillStyle = "#546274";
+    ctx.beginPath();
+    ctx.roundRect(74, 128, 108, 74, 16);
+    ctx.fill();
+    ctx.stroke();
+    // Body shine stripe
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.beginPath();
+    ctx.roundRect(86, 140, 14, 50, 7);
+    ctx.fill();
+    // Rim
+    ctx.fillStyle = "#8B9BB0";
+    ctx.beginPath();
+    ctx.roundRect(66, 118, 124, 22, 10);
+    ctx.fill();
+    ctx.stroke();
+    // Lid knob
+    ctx.fillStyle = "#2b3542";
+    ctx.beginPath();
+    ctx.roundRect(118, 100, 20, 16, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
+  }
+
+  private setupCookBeacon() {
+    this.cookBeaconGroup = new THREE.Group();
+    this.cookBeaconGroup.position.set(-5, 3.9, -4);
+    const badge = new THREE.Sprite(
+      new THREE.SpriteMaterial({
+        map: this.makeBeaconTexture(),
+        transparent: true,
+        depthTest: false, // always visible outside — never hidden behind trees
+      })
+    );
+    badge.scale.set(2.4, 2.4, 1);
+    badge.renderOrder = 999;
+    badge.userData = { type: "cookbeacon" };
+    this.cookBeaconGroup.add(badge);
+    this.cookBeaconGroup.visible = false;
+    this.cookBeaconGroup.userData = { type: "cookbeacon" };
+    // Parented to the park so it only ever shows outside over the dog house
+    this.parkGroup.add(this.cookBeaconGroup);
+  }
+
+  public setCookBeaconVisible(visible: boolean) {
+    this.cookBeaconVisible = visible;
+    this.cookBeaconGroup.visible = visible;
+  }
+
+  /**
+   * Memory Album snapshot: renders one fresh frame and captures the canvas
+   * as a JPEG data URL. Render + capture happen in the same tick so it works
+   * without preserveDrawingBuffer.
+   */
+  public captureSnapshot(): string | null {
+    try {
+      this.renderer.render(this.scene, this.camera);
+      return this.renderer.domElement.toDataURL("image/jpeg", 0.85);
+    } catch (e) {
+      console.warn("Snapshot capture failed", e);
+      return null;
+    }
+  }
+
+  // ---------- Weather system ----------
+
+  public setWeather(w: WeatherType) {
+    this.weather = w;
+    this.weatherSpeedFactor = w === "rainy" ? 0.8 : w === "snowy" ? 0.9 : 1.05;
+    this.updatePrecipitation();
+    // Re-apply the time-of-day base, then layer the weather on top
+    this.setTimeOfDay(this.timeOfDay);
+  }
+
+  /** Sky / fog / light overlay for the current weather (base comes from time of day). */
+  private applyWeatherOverlay() {
+    const groundMat = this.groundMesh?.material as THREE.MeshStandardMaterial | undefined;
+    const night = this.timeOfDay === "night";
+    if (this.weather === "rainy") {
+      this.sunLight.intensity *= 0.45;
+      this.hemiLight.intensity *= 0.85;
+      if (night) {
+        this.setSkyGradient("#141e28", "#2c3e50");
+        this.scene.fog = new THREE.FogExp2(0x141e28, 0.03);
+      } else {
+        this.setSkyGradient("#5b7a94", "#a9bfae");
+        this.scene.fog = new THREE.FogExp2(0x9db3bd, 0.028);
+      }
+      groundMat?.color.setHex(0x9fb3a8); // damp, darker grass
+    } else if (this.weather === "snowy") {
+      this.sunLight.intensity *= 0.7;
+      if (night) {
+        this.setSkyGradient("#0f172a", "#334155");
+        this.scene.fog = new THREE.FogExp2(0x1e293b, 0.026);
+      } else {
+        this.setSkyGradient("#6ea8dc", "#dceef5");
+        this.scene.fog = new THREE.FogExp2(0xdce8f2, 0.022);
+      }
+      groundMat?.color.setHex(0xe8eef7); // snow-dusted lawn
+    } else {
+      groundMat?.color.setHex(0xffffff);
+    }
+  }
+
+  private updatePrecipitation() {
+    if (this.precipPoints) {
+      this.scene.remove(this.precipPoints);
+      this.precipPoints.geometry.dispose();
+      (this.precipPoints.material as THREE.Material).dispose();
+      this.precipPoints = null;
+      this.precipVel = null;
+    }
+    const kind = this.weather === "rainy" ? "rain" : this.weather === "snowy" ? "snow" : "none";
+    this.precipKind = kind;
+    if (kind === "none") return;
+    const count = kind === "rain" ? 700 : 500;
+    const positions = new Float32Array(count * 3);
+    this.precipVel = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      positions[i * 3] = (Math.random() - 0.5) * 30;
+      positions[i * 3 + 1] = Math.random() * 15;
+      positions[i * 3 + 2] = (Math.random() - 0.5) * 30;
+      this.precipVel[i] = kind === "rain" ? 16 + Math.random() * 8 : 1.0 + Math.random() * 0.9;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.PointsMaterial({
+      color: kind === "rain" ? 0x9fc5e8 : 0xffffff,
+      size: kind === "rain" ? 0.09 : 0.14,
+      transparent: true,
+      opacity: kind === "rain" ? 0.65 : 0.9,
+      depthWrite: false,
+    });
+    this.precipPoints = new THREE.Points(geom, mat);
+    this.precipPoints.frustumCulled = false;
+    this.scene.add(this.precipPoints);
+  }
+
+  private updatePrecipitationMotion(delta: number, elapsed: number) {
+    if (!this.precipPoints || this.precipKind === "none") return;
+    // Storms stay outside — never rain inside the dog house
+    this.precipPoints.visible = this.viewMode === "park";
+    if (!this.precipPoints.visible) return;
+    // Keep the storm centered on the dog
+    this.precipPoints.position.set(this.dog.group.position.x, 0, this.dog.group.position.z);
+    const pos = this.precipPoints.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const arr = pos.array as Float32Array;
+    const n = this.precipVel?.length ?? 0;
+    for (let i = 0; i < n; i++) {
+      const v = this.precipVel![i];
+      if (this.precipKind === "rain") {
+        arr[i * 3 + 1] -= v * delta;
+        arr[i * 3] -= 2.0 * delta; // wind slant
+      } else {
+        arr[i * 3 + 1] -= v * delta;
+        arr[i * 3] += Math.sin(elapsed * 1.5 + i * 1.7) * delta * 0.6; // drift
+      }
+      if (arr[i * 3 + 1] < 0) {
+        arr[i * 3 + 1] = 15;
+        arr[i * 3] = (Math.random() - 0.5) * 30;
+        arr[i * 3 + 2] = (Math.random() - 0.5) * 30;
+      }
+    }
+    pos.needsUpdate = true;
   }
 
   public rotateSelected(axis: "x" | "y" | "z", deg: number) {
     const obj = this.selectedEditId ? this.editables.get(this.selectedEditId) : undefined;
     if (!obj) return;
+    if (this.selectedEditId === "doghouse" || this.selectedEditId === "pot") return;
     const rad = (deg * Math.PI) / 180;
     if (axis === "x") obj.rotation.x += rad;
     else if (axis === "y") obj.rotation.y += rad;
     else obj.rotation.z += rad;
     this.selectionBox?.update();
+    this.refreshSelectionMarker();
+    this.buzz(15);
     if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
   }
 
@@ -2931,6 +3713,15 @@ export class ParkScene {
       // Particle system
       this.updateParticles(delta);
 
+      // Tree regrowth + soup-ready beacon bob
+      this.updateTreeRespawns();
+
+      // Floating marker over the grabbed edit-mode object
+      this.updateSelectionMarker(elapsed);
+
+      // Rain / snow weather particles
+      this.updatePrecipitationMotion(delta, elapsed);
+
       // Kitchen pot steam + soup bubble animation
       if (this.kitchenGroup.visible) {
         const t = elapsed;
@@ -2963,6 +3754,7 @@ export class ParkScene {
     if (this.animFrameId !== null) {
       cancelAnimationFrame(this.animFrameId);
     }
+    this.clearLongPress();
     window.removeEventListener("resize", this.handleResize);
 
     // Dispose Three.js objects

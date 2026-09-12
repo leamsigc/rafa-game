@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import confetti from "canvas-confetti";
-import { ParkScene, RoomLayout, TimeOfDay } from "./features/dog3d/ParkScene";
+import { ParkScene, RoomLayout, TimeOfDay, WeatherType } from "./features/dog3d/ParkScene";
 import {
   BedColors,
   DogAction,
@@ -13,9 +13,12 @@ import {
   SkillNode,
   TreatItem,
 } from "./types/pet";
-import { CookingModal } from "./features/cooking/CookingModal";
-import { ALL_INGREDIENTS, DEFAULT_INGREDIENTS } from "./features/cooking/ingredientsData";
-import { deriveEmotion } from "./features/emotions/emotion";
+import { CookingModal, COOK_TIME_SECONDS, formatCookCountdown } from "./features/cooking/CookingModal";
+import { SoupReadyModal } from "./features/cooking/SoupReadyModal";
+import { MemoryAlbumModal } from "./features/album/MemoryAlbumModal";
+import { ALL_INGREDIENTS, ALL_RECIPES, DEFAULT_INGREDIENTS } from "./features/cooking/ingredientsData";
+import { CookingJob, MemoryPhoto } from "./types/pet";
+import { deriveEmotion, getEmotionMeta } from "./features/emotions/emotion";
 import { TRAINABLE_TRICKS, TrickId, trainSuccessChance, trainGain, trickTierFor } from "./features/training/trainingData";
 import { TrainingModal, TrainResult } from "./features/training/TrainingModal";
 import { PetActionButtons } from "./features/hud/PetActionButtons";
@@ -35,6 +38,47 @@ import { EditModeBar } from "./features/hud/EditModeBar";
 import { sound } from "./utils/audio";
 
 const LAYOUT_STORAGE_KEY = "doghouse_layout_v1";
+const ALBUM_STORAGE_KEY = "doghouse_memory_album_v1";
+const MAX_ALBUM_PHOTOS = 30;
+const SNAP_MAX_DIM = 480;
+// Weather rotates to a new condition every few hours
+const WEATHER_STORAGE_KEY = "doghouse_weather_v1";
+const WEATHER_ROTATE_MS = 3 * 60 * 60 * 1000;
+const WEATHER_ORDER: WeatherType[] = ["sunny", "rainy", "snowy"];
+
+function pickNewWeather(current: WeatherType): WeatherType {
+  const opts = WEATHER_ORDER.filter((w) => w !== current);
+  return opts[Math.floor(Math.random() * opts.length)];
+}
+
+export function weatherBlurb(w: WeatherType): string {
+  if (w === "rainy") return "Rainy! ☔ The dog feels lethargic — energy drains faster.";
+  if (w === "snowy") return "Snowy! ❄️ Snow joy — extra happiness, everything looks magical!";
+  return "Sunny! ☀️ Outdoor play costs less energy!";
+}
+
+/** Downscale a full-res snapshot so dozens fit comfortably in localStorage. */
+function downscaleSnapshot(dataUrl: string, maxDim: number): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", 0.72));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
 
 function loadSavedLayout(): RoomLayout | null {
   try {
@@ -80,6 +124,7 @@ const DEFAULT_STATS: PetStats = {
   unlockedBedStyles: ["classic"],
   currentBedStyle: "classic",
   ingredientsInventory: { ...DEFAULT_INGREDIENTS },
+  ownedTools: [] as string[],
 };
 
 export default function App() {
@@ -104,6 +149,7 @@ export default function App() {
             houseToy: parsed.houseToy || DEFAULT_STATS.houseToy,
             lastInteractionAt: parsed.lastInteractionAt ?? Date.now(),
             trickProgress: parsed.trickProgress || {},
+            ownedTools: parsed.ownedTools || [],
             ingredientsInventory: {
               ...DEFAULT_INGREDIENTS,
               ...(parsed.ingredientsInventory || {}),
@@ -120,11 +166,70 @@ export default function App() {
   // Action & Environment States
   const [currentAction, setCurrentAction] = useState<DogAction>("idle");
   const [timeOfDay, setTimeOfDay] = useState<TimeOfDay>("day");
+  // Weather: rotates automatically every few hours, persisted across visits
+  const [weatherState, setWeatherState] = useState<{ w: WeatherType; next: number }>(() => {
+    try {
+      const raw = localStorage.getItem(WEATHER_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { w: WeatherType; next: number };
+        if (parsed && WEATHER_ORDER.includes(parsed.w) && typeof parsed.next === "number") {
+          if (parsed.next > Date.now()) return parsed;
+          // Timer expired while away: roll to a fresh condition now
+          const w = pickNewWeather(parsed.w);
+          return { w, next: Date.now() + WEATHER_ROTATE_MS };
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return { w: "sunny" as WeatherType, next: Date.now() + WEATHER_ROTATE_MS };
+  });
+  const weather = weatherState.w;
+  const weatherRef = useRef<WeatherType>(weather);
+  weatherRef.current = weather;
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [followCamera, setFollowCamera] = useState<boolean>(true);
   const [viewMode, setViewMode] = useState<HouseViewMode>("park");
   const [houseRoom, setHouseRoom] = useState<HouseRoom>("living");
   const [showCookingModal, setShowCookingModal] = useState<boolean>(false);
+  // Timed cooking: 2:00 countdown, then the park house glows red with a pot
+  const [activeCookJob, setActiveCookJob] = useState<CookingJob | null>(() => {
+    try {
+      const raw = localStorage.getItem("doghouse_cookjob_v1");
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as CookingJob;
+      if (!parsed || !parsed.endsAt) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  });
+  // Memory Album: snapshots of the dog, persisted in localStorage
+  const [photos, setPhotos] = useState<MemoryPhoto[]>(() => {
+    try {
+      const raw = localStorage.getItem(ALBUM_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as MemoryPhoto[]).slice(0, MAX_ALBUM_PHOTOS) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showAlbum, setShowAlbum] = useState<boolean>(false);
+  const [readyMeal, setReadyMeal] = useState<CookingJob | null>(() => {
+    try {
+      const raw = localStorage.getItem("doghouse_readymeal_v1");
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as CookingJob;
+      if (!parsed || !parsed.recipeId) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  });
+  const [showReadyModal, setShowReadyModal] = useState<boolean>(false);
+  const [beaconClickTick, setBeaconClickTick] = useState<number>(0);
+  const [cookMsLeft, setCookMsLeft] = useState<number>(0);
 
   // Modals, Shop & Sleep States
   const [showTreatsTray, setShowTreatsTray] = useState<boolean>(false);
@@ -186,6 +291,22 @@ export default function App() {
     }
   }, [stats]);
 
+  // Persist the Memory Album (guarded: photos can be big, drop oldest if full)
+  useEffect(() => {
+    try {
+      localStorage.setItem(ALBUM_STORAGE_KEY, JSON.stringify(photos));
+    } catch (e) {
+      console.warn("Album full, dropping oldest non-favorite", e);
+      setPhotos((prev) => {
+        if (prev.length === 0) return prev;
+        const idx = prev.findIndex((p) => !p.favorite);
+        const next = [...prev];
+        next.splice(idx >= 0 ? idx : prev.length - 1, 1);
+        return next;
+      });
+    }
+  }, [photos]);
+
   // Stamp a meaningful interaction (feeds emotion + neglect tracking)
   const stampInteraction = () => {
     setStats((prev) => ({ ...prev, lastInteractionAt: Date.now() }));
@@ -205,11 +326,14 @@ export default function App() {
   );
 
   // Natural slow metabolism over time (+ loneliness when ignored)
+  // Rain makes the dog lethargic: energy drains twice as fast.
   useEffect(() => {
     const timer = setInterval(() => {
+      const rainy = weatherRef.current === "rainy";
       setStats((prev) => {
         const newHunger = Math.min(100, prev.hunger + 1);
-        const newEnergy = Math.max(10, prev.energy - (newHunger > 70 ? 2 : 1));
+        const drain = (newHunger > 70 ? 2 : 1) * (rainy ? 2 : 1);
+        const newEnergy = Math.max(10, prev.energy - drain);
         const neglected = Date.now() - (prev.lastInteractionAt || Date.now()) > 3 * 60 * 1000;
         return {
           ...prev,
@@ -265,8 +389,15 @@ export default function App() {
 
       const coinMultiplier = hasSkill("treasure_hunter") ? 1.5 : 1.0;
       const coinsEarned = Math.round(15 * coinMultiplier);
+      // Weather shapes the fetch payoff: sunshine boosts, rain drags, snow joys
+      const w = weatherRef.current;
+      const fetchEnergyCost = w === "sunny" ? 3 : w === "rainy" ? 12 : 8;
+      const fetchJoy = w === "snowy" ? 15 : 10;
 
-      showToast(`Good dog, ${stats.name}! Caught the ball! (+${points} XP, +${coinsEarned} Coins)`);
+      showToast(
+        `Good dog, ${stats.name}! Caught the ball! (+${points} XP, +${coinsEarned} Coins)` +
+          (w === "sunny" ? " ☀️ Sunshine boost!" : w === "rainy" ? " ☔ Rainy-day drag..." : "")
+      );
 
       setStats((prev) => {
         const nextXp = prev.xp + points;
@@ -281,8 +412,8 @@ export default function App() {
           level: newLevel,
           trainingPoints: leveledUp ? prev.trainingPoints + 1 : prev.trainingPoints,
           coins: prev.coins + coinsEarned,
-          happiness: Math.min(100, prev.happiness + 10),
-          energy: Math.max(0, prev.energy - 8),
+          happiness: Math.min(100, prev.happiness + fetchJoy),
+          energy: Math.max(0, prev.energy - fetchEnergyCost),
         };
       });
     };
@@ -336,6 +467,38 @@ export default function App() {
       saveLayout();
     };
 
+    // Axe state + tree chopping rewards
+    try {
+      const savedStats = localStorage.getItem("pet_game_stats_v3");
+      scene.hasAxe = savedStats ? (JSON.parse(savedStats).ownedTools || []).includes("axe") : false;
+    } catch {
+      scene.hasAxe = false;
+    }
+    scene.onTreeClickedNoAxe = () => {
+      showToast("That tree needs an axe! Buy the 🪓 Lumberjack Axe in the Shop (Tools, 50 coins).");
+      sound.playBark("low");
+    };
+    scene.onTreeChopped = () => {
+      confetti({ particleCount: 40, spread: 55, origin: { y: 0.7 } });
+      setStats((prev) => ({
+        ...prev,
+        coins: prev.coins + 8,
+        ingredientsInventory: {
+          ...(prev.ingredientsInventory || {}),
+          yellow_acorn: ((prev.ingredientsInventory || {}).yellow_acorn || 0) + 1,
+          red_mushroom: ((prev.ingredientsInventory || {}).red_mushroom || 0) + 1,
+        },
+        xp: prev.xp + 6,
+      }));
+      showToast(`TIMBER! 🪓 +8 coins, +1 Golden Acorn, +1 Red Mushroom!`);
+    };
+    scene.onCookBeaconClicked = () => {
+      setShowCookingModal(false);
+      setShowReadyModal(true);
+      showToast("The red pot is steaming! Opening your soup... 🍲");
+      setBeaconClickTick((t) => t + 1);
+    };
+
     scene.onPotClicked = () => {
       setShowCookingModal(true);
       showToast(`The pot is bubbling! Cook something tasty for ${stats.name}! 🍳`);
@@ -384,11 +547,114 @@ export default function App() {
     showSettingsModal ||
     showShopModal ||
     showCookingModal ||
+    showReadyModal ||
+    showAlbum ||
     showTrainingModal ||
     isSleeping;
 
-  // Edit-mode keyboard controls: arrows move, Shift+arrows rotate
-  // (Up/Down = turn on the Y axis, Left = X axis, Right = Z axis)
+  // Keep the 3D scene's axe flag in sync with the shop purchase
+  useEffect(() => {
+    if (parkSceneRef.current) {
+      parkSceneRef.current.hasAxe = (stats.ownedTools || []).includes("axe");
+    }
+  }, [stats.ownedTools]);
+
+  // Cooking countdown: tick from 2:00, then the park house glows red + pot
+  useEffect(() => {
+    if (!activeCookJob) {
+      setCookMsLeft(0);
+      try {
+        localStorage.removeItem("doghouse_cookjob_v1");
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    try {
+      localStorage.setItem("doghouse_cookjob_v1", JSON.stringify(activeCookJob));
+    } catch {
+      // ignore
+    }
+    const tick = () => {
+      const left = activeCookJob.endsAt - Date.now();
+      setCookMsLeft(left);
+      if (left <= 0) {
+        setReadyMeal(activeCookJob);
+        setActiveCookJob(null);
+        setShowReadyModal(true);
+        setShowCookingModal(false);
+        sound.playRewardFanfare();
+        confetti({ particleCount: 90, spread: 80, origin: { y: 0.6 } });
+        showToast(`🍲 ${activeCookJob.recipeName} is ready! Look for the RED pot over the house! 🏠🔴`);
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 500);
+    return () => window.clearInterval(id);
+  }, [activeCookJob]);
+
+  // Weather: push the condition into the 3D scene + rain audio
+  useEffect(() => {
+    parkSceneRef.current?.setWeather(weather);
+    sound.setRainWanted(weather === "rainy");
+    try {
+      localStorage.setItem(WEATHER_STORAGE_KEY, JSON.stringify(weatherState));
+    } catch {
+      // ignore
+    }
+  }, [weather, weatherState]);
+
+  // Weather: automatically roll to a new condition every few hours
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setWeatherState((prev) => {
+        if (Date.now() < prev.next) return prev;
+        return { w: pickNewWeather(prev.w), next: Date.now() + WEATHER_ROTATE_MS };
+      });
+    }, 30000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Announce every weather change (auto rotations + manual cycles)
+  const firstWeatherRender = useRef(true);
+  useEffect(() => {
+    if (firstWeatherRender.current) {
+      firstWeatherRender.current = false;
+      return;
+    }
+    showToast(`🌤️ The weather changed! ${weatherBlurb(weather)}`);
+    sound.playRewardFanfare();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weather]);
+
+  // Manually cycle the weather from the HUD button (restarts the timer)
+  const handleCycleWeather = () => {
+    sound.playButtonTap();
+    setWeatherState((prev) => {
+      const idx = WEATHER_ORDER.indexOf(prev.w);
+      return {
+        w: WEATHER_ORDER[(idx + 1) % WEATHER_ORDER.length],
+        next: Date.now() + WEATHER_ROTATE_MS,
+      };
+    });
+  };
+
+  // Show / hide the red cooking-ready beacon above the park dog house
+  useEffect(() => {
+    parkSceneRef.current?.setCookBeaconVisible(!!readyMeal);
+    try {
+      if (readyMeal) localStorage.setItem("doghouse_readymeal_v1", JSON.stringify(readyMeal));
+      else localStorage.removeItem("doghouse_readymeal_v1");
+    } catch {
+      // ignore
+    }
+  }, [readyMeal, viewMode, beaconClickTick]);
+
+  // Edit-mode keyboard controls:
+  // arrows move the object on the ground, Shift+arrows turn it:
+  // Shift+Up/Down spins on the Y (up) axis, Shift+Left/Right tilt X / Z.
+  // (On touch: drag moves, double-tap spins, two-finger tap tilts,
+  // pinch lifts/lowers, long-press nudges up — plus the on-screen pad.)
   useEffect(() => {
     if (!editMode) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -526,6 +792,22 @@ export default function App() {
         break;
       default:
         duration = 2.0;
+    }
+
+    // Weather effects on effort:
+    // rain = lethargic (all effort costs more), sun = outdoor play costs less
+    if (energyChange < 0) {
+      if (weather === "rainy") {
+        energyChange = Math.round(energyChange * 1.5);
+      } else if (
+        weather === "sunny" &&
+        (action === "zoomies" || action === "spin" || action === "dance" || action === "backflip")
+      ) {
+        energyChange = Math.ceil(energyChange * 0.5);
+      }
+    }
+    if (weather === "snowy") {
+      happinessChange = Math.round(happinessChange * 1.25);
     }
 
     if (energyChange < 0 && stats.energy < Math.abs(energyChange)) {
@@ -814,24 +1096,30 @@ export default function App() {
     setHouseRoom(room);
   };
 
-  // Edit mode: rearrange furniture (keyboard arrows + touch controls)
+  // Edit mode: rearrange ANYTHING outside + inside (only dog house + pot stay put)
   const handleToggleEditMode = () => {
     const scene = parkSceneRef.current;
     if (!scene) return;
-    if (!editMode && viewMode !== "house") {
-      showToast("Enter the dog house first to rearrange furniture! 🏠");
-      return;
-    }
     const next = !editMode;
     if (!next) saveLayout();
     scene.setEditMode(next);
     setEditMode(next);
     setSelectedEditId(null);
-    showToast(next ? "Edit mode: tap furniture, then move it! 🛋️" : "Furniture saved! ✨");
+    showToast(
+      next
+        ? viewMode === "house"
+          ? "Edit mode: tap anything to move it! (Dog house + pot stay put) 🛋️"
+          : "Edit mode in the park: tap trees, bowls & hurdles to move them! 🌲"
+        : "Furniture saved! ✨"
+    );
   };
 
   const handleEditMove = (dx: number, dz: number) => {
     parkSceneRef.current?.moveSelected(dx, dz);
+  };
+
+  const handleEditMoveY = (dy: number) => {
+    parkSceneRef.current?.moveSelectedVertical(dy);
   };
 
   const handleEditRotate = (axis: "x" | "y" | "z") => {
@@ -858,37 +1146,72 @@ export default function App() {
     showToast(`Bought 1x ${ing.icon} ${ing.name}!`);
   };
 
-  // Cooking: combine basic ingredients into a meal that feeds the dog
+  // Cooking: drop ingredients in the pot -> 2:00 countdown -> red house beacon -> serve
   const handleCookRecipe = (recipe: Recipe) => {
+    if (activeCookJob) {
+      showToast("The pot is already bubbling! Wait for the countdown to finish. ⏳");
+      return;
+    }
+    if (readyMeal) {
+      showToast("A soup is already ready! Serve it first! 🍲");
+      return;
+    }
     const inv = stats.ingredientsInventory || {};
     const missing = recipe.ingredients.filter((id) => (inv[id] || 0) <= 0);
     if (missing.length > 0) {
       showToast("Missing ingredients for that recipe!");
       return;
     }
+    // Deduct ingredients now, meal lands when the countdown ends
+    setStats((prev) => {
+      const nextInv = { ...(prev.ingredientsInventory || {}) };
+      recipe.ingredients.forEach((id) => {
+        nextInv[id] = Math.max(0, (nextInv[id] || 1) - 1);
+      });
+      return { ...prev, ingredientsInventory: nextInv };
+    });
+    stampInteraction();
+    sound.playCrunch();
+    const now = Date.now();
+    setActiveCookJob({
+      recipeId: recipe.id,
+      recipeName: recipe.name,
+      recipeIcon: recipe.icon,
+      ingredients: [...recipe.ingredients],
+      energyBoost: recipe.energyBoost,
+      happinessBoost: recipe.happinessBoost,
+      hungerReduction: recipe.hungerReduction,
+      xp: recipe.xp,
+      description: recipe.description,
+      startedAt: now,
+      endsAt: now + COOK_TIME_SECONDS * 1000,
+    });
+    showToast(
+      `${recipe.icon} ${recipe.name} is bubbling! Ready in 2:00 — go play outside and watch the house! 🏠`
+    );
+  };
+
+  // Serve the finished soup (from the red-beacon reveal modal)
+  const handleServeReadyMeal = () => {
+    const meal = readyMeal;
+    if (!meal) return;
     if (parkSceneRef.current) {
       parkSceneRef.current.feedTreat();
     }
     stampInteraction();
     sound.playRewardFanfare();
     confetti({ particleCount: 70, spread: 75, origin: { y: 0.65 } });
-
     setStats((prev) => {
-      const nextInv = { ...(prev.ingredientsInventory || {}) };
-      recipe.ingredients.forEach((id) => {
-        nextInv[id] = Math.max(0, (nextInv[id] || 1) - 1);
-      });
-      const nextXp = prev.xp + recipe.xp;
+      const nextXp = prev.xp + meal.xp;
       const newLevel = Math.floor(nextXp / 100) + 1;
       if (newLevel > prev.level) {
         showToast(`🌟 Level Up! ${prev.name} is now Level ${newLevel}!`);
       }
       return {
         ...prev,
-        ingredientsInventory: nextInv,
-        energy: Math.min(100, prev.energy + recipe.energyBoost),
-        happiness: Math.min(100, prev.happiness + recipe.happinessBoost),
-        hunger: Math.max(0, prev.hunger - recipe.hungerReduction),
+        energy: Math.min(100, prev.energy + meal.energyBoost),
+        happiness: Math.min(100, prev.happiness + meal.happinessBoost),
+        hunger: Math.max(0, prev.hunger - meal.hungerReduction),
         xp: nextXp,
         level: newLevel,
         coins: prev.coins + 5,
@@ -896,8 +1219,79 @@ export default function App() {
       };
     });
     showToast(
-      `${recipe.icon} Cooked ${recipe.name}! ${stats.name} munches happily! (+${recipe.energyBoost}% Energy, +${recipe.xp} XP)`
+      `${meal.recipeIcon} Served ${meal.recipeName}! ${stats.name} munches happily! (+${meal.energyBoost}% Energy, +${meal.xp} XP)`
     );
+    setReadyMeal(null);
+    setShowReadyModal(false);
+    parkSceneRef.current?.setCookBeaconVisible(false);
+  };
+
+  // Shop: buy the lumberjack axe (50 coins) for chopping park trees
+  const handleBuyTool = (toolId: string, cost: number) => {
+    if ((stats.ownedTools || []).includes(toolId)) {
+      showToast("You already own that tool!");
+      return;
+    }
+    if (stats.coins < cost) {
+      showToast("Not enough coins! Play mini-games to earn more.");
+      return;
+    }
+    sound.playRewardFanfare();
+    setStats((prev) => ({
+      ...prev,
+      coins: prev.coins - cost,
+      ownedTools: [...(prev.ownedTools || []), toolId],
+    }));
+    showToast(`🪓 Bought the Lumberjack Axe! Tap any park tree to chop it!`);
+  };
+
+  // Memory Album: snapshot the 3D scene at any time, straight into the gallery
+  const handleTakeSnapshot = async () => {
+    const scene = parkSceneRef.current;
+    if (!scene) {
+      showToast("The camera isn't ready yet — try again in a second! 📷");
+      return;
+    }
+    const raw = scene.captureSnapshot();
+    if (!raw) {
+      showToast("Snapshot failed — try again! 📷");
+      return;
+    }
+    sound.playCameraShutter();
+    const small = await downscaleSnapshot(raw, SNAP_MAX_DIM);
+    const meta = getEmotionMeta(emotion);
+    const photo: MemoryPhoto = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      dataUrl: small,
+      timestamp: Date.now(),
+      dogName: stats.name,
+      level: stats.level,
+      emotionLabel: meta.label,
+      favorite: false,
+    };
+    setPhotos((prev) => {
+      const next = [photo, ...prev];
+      // Album cap: drop the oldest non-favorite first
+      while (next.length > MAX_ALBUM_PHOTOS) {
+        const idx = next.map((p) => !p.favorite).lastIndexOf(true);
+        next.splice(idx >= 0 ? idx : next.length - 1, 1);
+      }
+      return next;
+    });
+    stampInteraction();
+    confetti({ particleCount: 30, spread: 50, origin: { y: 0.7 } });
+    showToast(`📸 Saved to Memory Album! (${photos.length + 1}/${MAX_ALBUM_PHOTOS})`);
+  };
+
+  const handleToggleFavoritePhoto = (id: string) => {
+    sound.playButtonTap();
+    setPhotos((prev) => prev.map((p) => (p.id === id ? { ...p, favorite: !p.favorite } : p)));
+  };
+
+  const handleDeletePhoto = (id: string) => {
+    sound.playButtonTap();
+    setPhotos((prev) => prev.filter((p) => p.id !== id));
+    showToast("Photo deleted from the album. 🗑️");
   };
 
   // Toggle Ceiling Lamp inside House
@@ -1007,9 +1401,34 @@ export default function App() {
         <EditModeBar
           selectedName={selectedEditId}
           onMove={handleEditMove}
+          onMoveY={handleEditMoveY}
           onRotate={handleEditRotate}
           onDone={handleToggleEditMode}
         />
+      )}
+
+      {/* Cooking countdown chip (visible while the pot bubbles, opens the pot) */}
+      {activeCookJob && !showCookingModal && !showReadyModal && (
+        <button
+          onClick={() => setShowCookingModal(true)}
+          className="absolute top-20 sm:top-24 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-4 py-2 rounded-full bg-[#F50A26] hover:bg-[#C2081F] text-white text-xs sm:text-sm font-black shadow-2xl border-2 border-white/40 transition-all active:scale-95 cursor-pointer animate-pulse"
+          title="Soup is cooking — tap to open the pot"
+        >
+          <span className="text-base">🍲</span>
+          <span>{activeCookJob.recipeName} — {formatCookCountdown(cookMsLeft)}</span>
+        </button>
+      )}
+
+      {/* Ready-meal beacon chip (outside the house, tap to reveal) */}
+      {readyMeal && !showReadyModal && (
+        <button
+          onClick={() => setShowReadyModal(true)}
+          className="absolute top-20 sm:top-24 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-4 py-2 rounded-full bg-[#F50A26] hover:bg-[#C2081F] text-white text-xs sm:text-sm font-black shadow-2xl border-2 border-yellow-300 transition-all active:scale-95 cursor-pointer animate-bounce"
+          title="Soup is ready — tap to reveal!"
+        >
+          <span className="text-base">🍲</span>
+          <span>{readyMeal.recipeName} is ready! Tap me!</span>
+        </button>
       )}
 
       {/* Floating Toast Notification */}
@@ -1059,6 +1478,11 @@ export default function App() {
         onOpenShop={() => setShowShopModal(true)}
         onGoToBed={handleTriggerSleep}
         onToggleLamp={handleToggleLamp}
+        onTakeSnapshot={handleTakeSnapshot}
+        onOpenAlbum={() => setShowAlbum(true)}
+        albumCount={photos.length}
+        weather={weather}
+        onCycleWeather={handleCycleWeather}
       />
 
       {/* Canine Skill Tree Modal */}
@@ -1117,12 +1541,19 @@ export default function App() {
           onGameComplete={(score, coinsEarned, energyUsed) => {
             const coinMultiplier = hasSkill("treasure_hunter") ? 1.5 : 1.0;
             const finalCoins = Math.round(coinsEarned * coinMultiplier);
+            // Sunny outdoor play costs less energy, rain costs more
+            const spent =
+              weather === "sunny"
+                ? Math.max(1, Math.ceil(energyUsed * 0.5))
+                : weather === "rainy"
+                  ? Math.round(energyUsed * 1.5)
+                  : energyUsed;
             stampInteraction();
             setStats((prev) => ({
               ...prev,
               coins: prev.coins + finalCoins,
               xp: prev.xp + score,
-              energy: Math.max(5, prev.energy - energyUsed),
+              energy: Math.max(5, prev.energy - spent),
               happiness: Math.min(100, prev.happiness + 15),
             }));
             showToast(`Agility complete! +${finalCoins} Coins, +${score} XP`);
@@ -1139,12 +1570,18 @@ export default function App() {
           onGameComplete={(score, coinsEarned, energyUsed) => {
             const coinMultiplier = hasSkill("treasure_hunter") ? 1.5 : 1.0;
             const finalCoins = Math.round(coinsEarned * coinMultiplier);
+            const spent =
+              weather === "sunny"
+                ? Math.max(1, Math.ceil(energyUsed * 0.5))
+                : weather === "rainy"
+                  ? Math.round(energyUsed * 1.5)
+                  : energyUsed;
             stampInteraction();
             setStats((prev) => ({
               ...prev,
               coins: prev.coins + finalCoins,
               xp: prev.xp + score,
-              energy: Math.max(0, prev.energy - energyUsed),
+              energy: Math.max(0, prev.energy - spent),
               happiness: Math.min(100, prev.happiness + 18),
             }));
             showToast(`Fetch complete! +${finalCoins} Coins, +${score} XP`);
@@ -1244,7 +1681,7 @@ export default function App() {
         />
       )}
 
-      {/* House Shop Modal: 3 Bed Parts (Cushion, Frame, Blanket) Color Customizer, Accessories (Hats, Bowties, Glasses), and House Toys */}
+      {/* House Shop Modal: bed, accessories, toys + lumberjack axe tools */}
       {showShopModal && (
         <HouseShopModal
           stats={stats}
@@ -1253,18 +1690,43 @@ export default function App() {
           onBuyAccessory={handleBuyAccessory}
           onEquipAccessory={handleEquipAccessory}
           onBuyToy={handleBuyToy}
+          onBuyTool={handleBuyTool}
         />
       )}
 
-      {/* Kitchen Cooking Modal: central pot + basic ingredients */}
+      {/* Kitchen Cooking Modal: pyramid pot (2 top + 3 bottom) + 2:00 countdown */}
       {showCookingModal && (
         <CookingModal
           dogName={stats.name}
           inventory={stats.ingredientsInventory || {}}
           coins={stats.coins}
+          activeJob={activeCookJob}
+          jobMsLeft={cookMsLeft}
           onCook={handleCookRecipe}
           onBuyIngredient={handleBuyIngredient}
           onClose={() => setShowCookingModal(false)}
+        />
+      )}
+
+      {/* Memory Album: snapshots gallery with favorites */}
+      {showAlbum && (
+        <MemoryAlbumModal
+          photos={photos}
+          maxPhotos={MAX_ALBUM_PHOTOS}
+          onTakeSnapshot={handleTakeSnapshot}
+          onToggleFavorite={handleToggleFavoritePhoto}
+          onDelete={handleDeletePhoto}
+          onClose={() => setShowAlbum(false)}
+        />
+      )}
+
+      {/* Soup-ready reveal: pot spins, lid slides off, dish info appears */}
+      {showReadyModal && readyMeal && (
+        <SoupReadyModal
+          job={readyMeal}
+          dogName={stats.name}
+          onServe={handleServeReadyMeal}
+          onClose={() => setShowReadyModal(false)}
         />
       )}
 

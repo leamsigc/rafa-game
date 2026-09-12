@@ -23,6 +23,9 @@ class SoundEngine {
   private breezeNode: AudioBufferSourceNode | null = null;
   private breezeGain: GainNode | null = null;
   private isNightMode: boolean = false;
+  // Rainy-weather loop (soft patter over the breeze)
+  private rainWanted: boolean = false;
+  private rainNode: AudioBufferSourceNode | null = null;
 
   // Settings
   private settings: AudioSettings = {
@@ -255,6 +258,10 @@ class SoundEngine {
       this.playBirdChirp();
       scheduleNextChirp();
     }, 1200);
+
+    if (this.rainWanted) {
+      this.startRainLoop();
+    }
   }
 
   public stopAmbient() {
@@ -272,6 +279,61 @@ class SoundEngine {
       }
       this.breezeNode = null;
     }
+    this.stopRainLoop();
+  }
+
+  /** Rainy weather: want the rain patter loop on/off (plays over ambient). */
+  public setRainWanted(wanted: boolean) {
+    this.rainWanted = wanted;
+    if (wanted && this.ambientRunning) {
+      this.startRainLoop();
+    } else if (!wanted) {
+      this.stopRainLoop();
+    }
+  }
+
+  private startRainLoop() {
+    if (this.rainNode) return;
+    const ctx = this.getContext();
+    if (!ctx || !this.ambientGain) return;
+    try {
+      const len = ctx.sampleRate * 2;
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) {
+        d[i] = (Math.random() * 2 - 1) * 0.5;
+      }
+      this.rainNode = ctx.createBufferSource();
+      this.rainNode.buffer = buf;
+      this.rainNode.loop = true;
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.setValueAtTime(1800, ctx.currentTime);
+      const lp = ctx.createBiquadFilter();
+      lp.type = "lowpass";
+      lp.frequency.setValueAtTime(6500, ctx.currentTime);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.06, ctx.currentTime);
+      this.rainNode.connect(hp);
+      hp.connect(lp);
+      lp.connect(g);
+      g.connect(this.ambientGain);
+      this.rainNode.start();
+    } catch (e) {
+      console.warn("Failed to start rain loop", e);
+      this.rainNode = null;
+    }
+  }
+
+  private stopRainLoop() {
+    if (!this.rainNode) return;
+    try {
+      this.rainNode.stop();
+      this.rainNode.disconnect();
+    } catch {
+      // ignore
+    }
+    this.rainNode = null;
   }
 
   /** Realistic singing bird sound with randomized frequency modulation */
@@ -715,6 +777,151 @@ class SoundEngine {
 
     osc.start(now);
     osc.stop(now + 0.05);
+  }
+
+  /**
+   * Friendly male-dog "trying to speak" voice using browser speech synthesis.
+   * Picks a male voice when available, drops the pitch low, and wraps the
+   * speech in a happy bark so it sounds like a dog talking, not a human.
+   */
+  public speakDogVoice(text: string) {
+    try {
+      // Happy bark first — the dog "clears its throat"
+      this.playBark("normal");
+    } catch {
+      // ignore
+    }
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return;
+    }
+    try {
+      const clean = text
+        .replace(/\*[^*]*\*/g, "")
+        .replace(/\[ACTION:[^\]]+\]/g, "")
+        .trim()
+        .slice(0, 280);
+      if (!clean) return;
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(clean);
+      // Nice male dog voice: low pitch, slightly slower, like talking with a snout
+      utterance.pitch = 0.55;
+      utterance.rate = 0.92;
+      utterance.volume = 1.0;
+      const voices = window.speechSynthesis.getVoices?.() || [];
+      const maleVoice =
+        voices.find((v) =>
+          /daniel|david|alex|fred|male|guy|man|fenrir|brian|george|james|john|matthew|michael|william/i.test(
+            v.name
+          )
+        ) ||
+        voices.find((v) => v.lang?.toLowerCase().startsWith("en") && v.name.toLowerCase().includes("google")) ||
+        voices.find((v) => v.lang?.toLowerCase().startsWith("en"));
+      if (maleVoice) utterance.voice = maleVoice;
+      utterance.onend = () => {
+        try {
+          this.playSoftWoof();
+        } catch {
+          // ignore
+        }
+      };
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // ignore
+    }
+  }
+
+  /** Axe chop: woody thunk + crack */
+  public playChop() {
+    if (!this.settings.sfxEnabled) return;
+    const ctx = this.getContext();
+    if (!ctx || !this.sfxGain) return;
+    const now = ctx.currentTime;
+    // Low woody thunk
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(160, now);
+    osc.frequency.exponentialRampToValueAtTime(55, now + 0.12);
+    gain.gain.setValueAtTime(0.5, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    osc.connect(gain);
+    gain.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.15);
+    // Crackle noise burst
+    const len = Math.floor(ctx.sampleRate * 0.08);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * 0.015));
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = buf;
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.4, now);
+    ng.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.setValueAtTime(900, now);
+    noise.connect(hp);
+    hp.connect(ng);
+    ng.connect(this.sfxGain);
+    noise.start(now);
+  }
+
+  /** Pot lid slide-off shimmer + bubbling stew */
+  public playPotReveal() {
+    if (!this.settings.sfxEnabled) return;
+    const ctx = this.getContext();
+    if (!ctx || !this.sfxGain) return;
+    const now = ctx.currentTime;
+    // Metallic lid slide
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(1400, now);
+    osc.frequency.exponentialRampToValueAtTime(500, now + 0.35);
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.2, now + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+    osc.connect(gain);
+    gain.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.42);
+    // Bubbly stew after the lid lifts
+    [0.45, 0.58, 0.72].forEach((dt, i) => {
+      const b = ctx.createOscillator();
+      const bg = ctx.createGain();
+      b.type = "sine";
+      b.frequency.setValueAtTime(300 + i * 120, now + dt);
+      b.frequency.exponentialRampToValueAtTime(140, now + dt + 0.1);
+      bg.gain.setValueAtTime(0.18, now + dt);
+      bg.gain.exponentialRampToValueAtTime(0.001, now + dt + 0.12);
+      b.connect(bg);
+      bg.connect(this.sfxGain!);
+      b.start(now + dt);
+      b.stop(now + dt + 0.13);
+    });
+  }
+
+  /** Camera shutter click for Memory Album snapshots */
+  public playCameraShutter() {
+    if (!this.settings.sfxEnabled) return;
+    const ctx = this.getContext();
+    if (!ctx || !this.sfxGain) return;
+    [0, 0.09].forEach((dt, i) => {
+      const now = ctx.currentTime + dt;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "square";
+      osc.frequency.setValueAtTime(i === 0 ? 2200 : 1500, now);
+      gain.gain.setValueAtTime(0.16, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+      osc.connect(gain);
+      gain.connect(this.sfxGain!);
+      osc.start(now);
+      osc.stop(now + 0.06);
+    });
   }
 
   /** Squeaky rubber duck / house toy bounce */

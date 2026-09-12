@@ -4,6 +4,8 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ArrowUpFromLine,
+  ArrowDownToLine,
   RotateCw,
   RotateCcw,
   Check,
@@ -13,6 +15,7 @@ import {
 interface EditModeBarProps {
   selectedName: string | null;
   onMove: (dx: number, dz: number) => void;
+  onMoveY: (dy: number) => void;
   onRotate: (axis: "x" | "y" | "z") => void;
   onDone: () => void;
 }
@@ -22,11 +25,19 @@ const PRETTY_NAMES: Record<string, string> = {
   toy: "🧸 House toy",
   toycorner: "📦 Toy corner",
   lamp: "💡 Lamp",
+  dresser: "🗄️ Dresser",
+  bookshelf: "📚 Bookshelf",
+  fridge: "❄️ Fridge",
+  counters: "🍳 Counters",
+  shelf: "🫙 Shelves",
+  bowls: "🥣 Bowls",
+  hurdle: "🏁 Agility course",
 };
 
 export const EditModeBar: React.FC<EditModeBarProps> = ({
   selectedName,
   onMove,
+  onMoveY,
   onRotate,
   onDone,
 }) => {
@@ -38,7 +49,11 @@ export const EditModeBar: React.FC<EditModeBarProps> = ({
         <div className="flex items-center justify-between gap-3 mb-2">
           <span className="text-xs font-black flex items-center gap-1.5">
             <Move3d className="w-4 h-4 text-[#A7C957]" />
-            Edit mode: {selectedName ? PRETTY_NAMES[selectedName] || selectedName : "tap furniture"}
+            Edit mode:{" "}
+            {selectedName
+              ? PRETTY_NAMES[selectedName] ||
+                (selectedName.startsWith("tree") ? "🌲 Tree" : selectedName)
+              : "tap anything (park + rooms)"}
           </span>
           <button
             onClick={onDone}
@@ -64,6 +79,16 @@ export const EditModeBar: React.FC<EditModeBarProps> = ({
             </button>
             <button className={padBtn} onClick={() => onMove(0.25, 0)} aria-label="Move right">
               <ChevronRight className="w-5 h-5" />
+            </button>
+          </div>
+
+          {/* Lift pad (Y axis) */}
+          <div className="flex flex-col gap-1">
+            <button className={padBtn} onClick={() => onMoveY(0.25)} aria-label="Lift up" title="Lift up (Y axis)">
+              <ArrowUpFromLine className="w-5 h-5" />
+            </button>
+            <button className={padBtn} onClick={() => onMoveY(-0.25)} aria-label="Lower down" title="Lower down (Y axis)">
+              <ArrowDownToLine className="w-5 h-5" />
             </button>
           </div>
 
@@ -93,8 +118,10 @@ export const EditModeBar: React.FC<EditModeBarProps> = ({
           </div>
         </div>
 
-        <p className="mt-2 text-center text-[10px] text-white/60 font-semibold">
-          Drag furniture with a finger • double-tap spins • keyboard: arrows move, Shift+arrows turn
+        <p className="mt-2 text-center text-[10px] text-white/60 font-semibold leading-relaxed">
+          👆 Drag moves • double-tap spins • two-finger tap tilts • pinch lifts/lowers • hold nudges up
+          <br />
+          ⌨️ Arrows move • Shift+Up/Down spins (Y) • Shift+Left/Right tilts (X/Z)
         </p>
       </div>
     </div>
