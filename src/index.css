@@ -38,3 +38,28 @@
     }
   }
 }
+
+/* Breathing HUD status bars: a subtle living pulse on Energy/Joy/Hunger fills */
+@keyframes barBreathe {
+  0%, 100% { filter: brightness(1); transform: scaleX(1); }
+  50% { filter: brightness(1.28); transform: scaleX(1.035); }
+}
+.status-bar-breathe {
+  transform-origin: left center;
+  animation: barBreathe 3.2s ease-in-out infinite;
+}
+.status-bar-breathe:nth-of-type(2) { animation-delay: 0.4s; }
+.status-bar-breathe:nth-of-type(3) { animation-delay: 0.8s; }
+
+/* Falling emoji for easter-egg scenes */
+@keyframes fallRepeat {
+  0% { transform: translateY(-5vh) rotate(0deg); opacity: 0; }
+  8% { opacity: 1; }
+  92% { opacity: 1; }
+  100% { transform: translateY(105vh) rotate(340deg); opacity: 0; }
+}
+.animate-fall-repeat {
+  display: inline-block;
+  animation: fallRepeat linear infinite;
+}
+.animate-spin-slow { animation: spin 3s linear infinite; }

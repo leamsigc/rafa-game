@@ -11,9 +11,13 @@ import {
   MicOff,
   Radio,
   Play,
+  BookOpen,
 } from "lucide-react";
-import { ChatMessage, DogAction, PetStats } from "../../types/pet";
+import { ChatMessage, DogAction, HolidayId, PetStats } from "../../types/pet";
 import { deriveEmotion, getEmotionMeta } from "../emotions/emotion";
+import { getHolidayMeta } from "../seasonal/holidays";
+import { matchSecretCode } from "../secret/secretCodes";
+import { logDayEvent } from "../journal/dayJournal";
 import { sound } from "../../utils/audio";
 import dogAvatar from "../../assets/images/dog_avatar_1788547305164.jpg";
 import {
@@ -21,9 +25,12 @@ import {
   playPcmAudioChunk,
   resetAudioSchedule,
 } from "../../utils/geminiLiveVoice";
+import { VoiceJournal } from "./VoiceJournal";
 
 interface PetChatModalProps {
   petStats: PetStats;
+  holiday?: HolidayId;
+  onSecretCodeFound?: (codeId: string) => void;
   onClose: () => void;
   onTriggerDogAction: (action: DogAction) => void;
 }
@@ -44,15 +51,20 @@ const QUICK_PROMPTS = [
 
 export const PetChatModal: React.FC<PetChatModalProps> = ({
   petStats,
+  holiday = "none" as HolidayId,
+  onSecretCodeFound,
   onClose,
   onTriggerDogAction,
 }) => {
-  const [activeTab, setActiveTab] = useState<"chat" | "live">("chat");
+  const [activeTab, setActiveTab] = useState<"chat" | "live" | "journal">("chat");
+  const holidayMeta = getHolidayMeta(holiday);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "initial",
       sender: "dog",
-      text: `*Perks up floppy ears eagerly, smiling with a happy tail wag* Woof! Hey best friend! I'm ${petStats.name}! What are we going to do together today?`,
+      text:
+        holidayMeta?.chatGreeting ??
+        `*Perks up floppy ears eagerly, smiling with a happy tail wag* Woof! Hey best friend! I'm ${petStats.name}! What are we going to do together today?`,
       timestamp: Date.now(),
     },
   ]);
@@ -145,6 +157,24 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
     setMessages((prev) => [...prev, userMsg]);
     setInputText("");
     setIsLoading(true);
+    logDayEvent("chatMessages", "Chatted with the pup");
+
+    // ---- SECRET CODES (exact, case-sensitive easter eggs) ----
+    const secret = matchSecretCode(textToSend);
+    if (secret) {
+      const dogMsg: ChatMessage = {
+        id: `dog-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        sender: "dog",
+        text: secret.dogMessage,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => [...prev, dogMsg]);
+      speakWithGeminiVoice(secret.dogMessage);
+      logDayEvent("secretCodes", `Found secret code: ${secret.title}`);
+      setIsLoading(false);
+      if (onSecretCodeFound) onSecretCodeFound(secret.id);
+      return;
+    }
 
     try {
       const response = await fetch("/api/pet/chat", {
@@ -160,6 +190,7 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
             breed: petStats.breed,
             trickProgress: petStats.trickProgress || {},
             emotion: emotionMeta.emotion,
+            holiday,
           },
           history: messages.slice(-6).map((m) => ({
             role: m.sender,
@@ -342,6 +373,18 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
               <Radio className="w-3 h-3 animate-pulse" />
               <span>{petStats.name} Voice</span>
             </button>
+            <button
+              onClick={() => setActiveTab("journal")}
+              className={`px-3 py-1 rounded-full text-xs font-black transition-all flex items-center gap-1.5 cursor-pointer ${
+                activeTab === "journal"
+                  ? "bg-[#6A994E] text-white shadow-xs"
+                  : "bg-white/80 hover:bg-white text-[#386641]"
+              }`}
+              title={`${petStats.name} summarizes your day & reads it aloud`}
+            >
+              <BookOpen className="w-3 h-3" />
+              <span>Voice Journal 🎙️</span>
+            </button>
           </div>
 
           {activeTab === "live" && (
@@ -429,6 +472,9 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
               </div>
             </div>
           </div>
+        ) : activeTab === "journal" ? (
+          /* VOICE JOURNAL — the dog's daily audio recap */
+          <VoiceJournal petStats={petStats} holiday={holiday} />
         ) : (
           /* TEXT & COMMANDS STREAM */
           <>

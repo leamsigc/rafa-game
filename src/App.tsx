@@ -5,8 +5,10 @@ import {
   BedColors,
   DogAction,
   DogBreed,
+  HolidayId,
   HouseRoom,
   HouseViewMode,
+  LinkedAccount,
   MiniGameType,
   PetStats,
   Recipe,
@@ -28,13 +30,31 @@ import { MiniGameSelectorModal } from "./features/minigames/MiniGameSelectorModa
 import { AgilityMiniGame } from "./features/minigames/AgilityMiniGame";
 import { TreatCatchMiniGame } from "./features/minigames/TreatCatchMiniGame";
 import { FetchMiniGame } from "./features/minigames/FetchMiniGame";
+import { BoneRushRunner } from "./features/minigames/BoneRushRunner";
+import { BoneRushStore } from "./features/minigames/BoneRushStore";
+import { PawShuffleMiniGame } from "./features/minigames/PawShuffleMiniGame";
+import { BackyardDiggerMiniGame } from "./features/minigames/BackyardDiggerMiniGame";
+import { SupermarketMiniGame } from "./features/minigames/SupermarketMiniGame";
+import { GymMiniGame } from "./features/minigames/GymMiniGame";
 import { PetCustomizerModal } from "./features/hud/PetCustomizerModal";
 import { SettingsModal } from "./features/hud/SettingsModal";
 import { SkillTreeModal } from "./features/skills/SkillTreeModal";
 import { HouseShopModal } from "./features/shop/HouseShopModal";
 import { SleepOverlay } from "./features/hud/SleepOverlay";
 import { IrisTransition, IrisPhase } from "./features/hud/IrisTransition";
+import { CartoonTransition, CartoonPhase } from "./features/transitions/CartoonTransition";
 import { EditModeBar } from "./features/hud/EditModeBar";
+import { PhotoMode } from "./features/photomode/PhotoMode";
+import { PhotoReviewModal } from "./features/photomode/PhotoReviewModal";
+import { SecretCodeModal } from "./features/secret/SecretCodeModal";
+import { SECRET_CODES, SecretCodeDef } from "./features/secret/secretCodes";
+import { BreedJournal } from "./features/journal/BreedJournal";
+import { ScoreboardModal } from "./features/account/ScoreboardModal";
+import { getAccount, linkAccount, saveAccount } from "./features/account/AccountService";
+import { getCurrentHoliday, holidayBlurb } from "./features/seasonal/holidays";
+import { logDayEvent, bumpLifetime, getLifetime } from "./features/journal/dayJournal";
+import { ACHIEVEMENTS, evaluateAchievements } from "./features/achievements/achievementsData";
+import { getBoneBalance } from "./features/bonerush/boneRushData";
 import { sound } from "./utils/audio";
 
 const LAYOUT_STORAGE_KEY = "doghouse_layout_v1";
@@ -163,6 +183,29 @@ export default function App() {
     return DEFAULT_STATS;
   });
 
+  // ===== New feature states =====
+  // Seasonal holiday (drives Easter eggs everywhere)
+  const [holiday] = useState<HolidayId>(() => getCurrentHoliday());
+  // Daily Login Streak (consecutive days the app was opened)
+  const [streakDays, setStreakDays] = useState<number>(1);
+  // Google-linked trainer account
+  const [account, setAccount] = useState<LinkedAccount | null>(() => getAccount());
+  // Photo Mode
+  const [photoMode, setPhotoMode] = useState<boolean>(false);
+  const [reviewPhoto, setReviewPhoto] = useState<string | null>(null);
+  // Secret code easter egg
+  const [activeSecretCode, setActiveSecretCode] = useState<SecretCodeDef | null>(null);
+  // Cartoon black-screen chunk transitions (stairs, car rides)
+  const [cartoonPhase, setCartoonPhase] = useState<CartoonPhase>(null);
+  const [cartoonLabel, setCartoonLabel] = useState("Loading... 🐾");
+  // New modals
+  const [showBreedJournal, setShowBreedJournal] = useState<boolean>(false);
+  const [showScoreboard, setShowScoreboard] = useState<boolean>(false);
+  const [showBoneRushStore, setShowBoneRushStore] = useState<boolean>(false);
+  const [boneRushTick, setBoneRushTick] = useState<number>(0);
+  // Achievements re-evaluation tick (bumped whenever lifetime counters change)
+  const [achTick, setAchTick] = useState<number>(0);
+
   // Action & Environment States
   const [currentAction, setCurrentAction] = useState<DogAction>("idle");
   const [timeOfDay, setTimeOfDay] = useState<TimeOfDay>("day");
@@ -247,7 +290,7 @@ export default function App() {
   const [irisPhase, setIrisPhase] = useState<IrisPhase>(null);
   const [editMode, setEditMode] = useState<boolean>(false);
   const [selectedEditId, setSelectedEditId] = useState<string | null>(null);
-  const [settingsInitialTab, setSettingsInitialTab] = useState<"audio" | "pet" | "environment">("audio");
+  const [settingsInitialTab, setSettingsInitialTab] = useState<"audio" | "pet" | "environment" | "achievements" | "account">("audio");
 
   // Toast notification state
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -282,14 +325,77 @@ export default function App() {
     };
   }, []);
 
-  // Save pet stats to localStorage
+  // Save pet stats to localStorage (FIX: now saves to the same key it loads)
   useEffect(() => {
     try {
-      localStorage.setItem("pet_game_stats_v2", JSON.stringify(stats));
+      localStorage.setItem("pet_game_stats_v3", JSON.stringify(stats));
     } catch (e) {
       console.warn("Failed to save pet stats", e);
     }
   }, [stats]);
+
+  // Daily Login Streak: consecutive-day tracking with milestone bonuses
+  useEffect(() => {
+    try {
+      const KEY = "doghouse_streak_v1";
+      const today = new Date().toDateString();
+      const raw = localStorage.getItem(KEY);
+      const parsed = raw ? JSON.parse(raw) as { last: string; count: number; claimed: number[] } : null;
+      let count = 1;
+      if (parsed) {
+        if (parsed.last === today) {
+          count = parsed.count;
+        } else {
+          const yesterday = new Date(Date.now() - 86400000).toDateString();
+          count = parsed.last === yesterday ? parsed.count + 1 : 1;
+        }
+      }
+      localStorage.setItem(KEY, JSON.stringify({ last: today, count, claimed: parsed?.claimed || [] }));
+      setStreakDays(count);
+      // Milestone bonuses at 3 / 7 / 30 day streaks (claimed once per streak)
+      const milestones: Record<number, number> = { 3: 25, 7: 60, 30: 150 };
+      const claimed = new Set(parsed?.claimed || []);
+      if (milestones[count] && !claimed.has(count)) {
+        claimed.add(count);
+        localStorage.setItem(KEY, JSON.stringify({ last: today, count, claimed: [...claimed] }));
+        const bonus = milestones[count];
+        bumpLifetime("coinsEarned", bonus);
+        setStats((prev) => ({ ...prev, coins: prev.coins + bonus }));
+        confetti({ particleCount: 60, spread: 70, origin: { y: 0.4 } });
+        sound.playRewardFanfare();
+        showToast(`🔥 ${count}-day login streak! +${bonus} Treat Coins!`);
+      } else if (count > 1 && parsed?.last !== today) {
+        showToast(`🔥 Daily streak: Day ${count}! Come back tomorrow!`);
+      }
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Achievements: re-evaluate milestone badges after every meaningful event
+  useEffect(() => {
+    const already = stats.unlockedAchievements || [];
+    const newly = evaluateAchievements(
+      { stats, lifetime: getLifetime(), holiday },
+      already
+    );
+    if (newly.length === 0) return;
+    setStats((prev) => ({
+      ...prev,
+      unlockedAchievements: [...(prev.unlockedAchievements || []), ...newly],
+      coins: prev.coins + newly.length * 10, // badge bonus
+    }));
+    newly.forEach((id) => {
+      const a = ACHIEVEMENTS.find((x) => x.id === id);
+      if (a) {
+        confetti({ particleCount: 70, spread: 75, origin: { y: 0.5 } });
+        showToast(`🏅 Achievement unlocked: ${a.name}! (+10 Coins)`);
+        sound.playRewardFanfare();
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stats.energy, stats.happiness, stats.trickProgress, stats.foundSecretCodes, achTick, holiday]);
 
   // Persist the Memory Album (guarded: photos can be big, drop oldest if full)
   useEffect(() => {
@@ -368,6 +474,22 @@ export default function App() {
     }, 1050);
   };
 
+  /**
+   * Cartoon black-screen chunk loader: the screen goes dark with a bouncing
+   * cartoon pup 🐾, the chunk swaps behind the darkness, then the black
+   * screen disappears cartoon-style. (Stairs, car rides.)
+   */
+  const playCartoonTransition = (label: string, swapWorld: () => void, arrivedToast?: string) => {
+    setCartoonLabel(label);
+    setCartoonPhase("closing");
+    window.setTimeout(() => {
+      swapWorld();
+      setCartoonPhase("opening");
+      if (arrivedToast) showToast(arrivedToast);
+      window.setTimeout(() => setCartoonPhase(null), 950);
+    }, 750);
+  };
+
   // Initialize Three.js Park Scene
   useEffect(() => {
     if (!mountRef.current) return;
@@ -394,6 +516,9 @@ export default function App() {
       const fetchEnergyCost = w === "sunny" ? 3 : w === "rainy" ? 12 : 8;
       const fetchJoy = w === "snowy" ? 15 : 10;
 
+      logDayEvent("fetches", "Caught a fetch ball");
+      bumpLifetime("coinsEarned", coinsEarned);
+      setAchTick((t) => t + 1);
       showToast(
         `Good dog, ${stats.name}! Caught the ball! (+${points} XP, +${coinsEarned} Coins)` +
           (w === "sunny" ? " ☀️ Sunshine boost!" : w === "rainy" ? " ☔ Rainy-day drag..." : "")
@@ -451,16 +576,127 @@ export default function App() {
     };
 
     scene.onStairsClimbed = () => {
-      playIrisTransition(() => {
-        scene.enterUpstairs();
-      }, `Upstairs bedroom! ${stats.name} made it to the top! 🛏️✨`);
+      playCartoonTransition(
+        "Loading the bedroom... 🐾",
+        () => {
+          scene.enterUpstairs();
+        },
+        `Upstairs bedroom! ${stats.name} made it to the top! 🛏️✨`
+      );
     };
 
     scene.onDescendClicked = () => {
-      playIrisTransition(() => {
-        scene.enterHallway();
-      }, "Back down in the hallway! 🐾");
+      playCartoonTransition(
+        "Back downstairs... 🐾",
+        () => {
+          scene.enterHallway();
+        },
+        "Back down in the hallway! 🐾"
+      );
     };
+
+    // ---- The little car: a fully 3D cinematic ride seen from the side ----
+    // Park drive-off → forest highway (side view) → city parking lot.
+    scene.onCarRideMidway = () => {
+      playCartoonTransition(
+        "Cruising down the highway... 🚗💨",
+        () => {
+          scene.startHighwayToCity();
+        }
+      );
+    };
+    scene.onCityApproach = () => {
+      playCartoonTransition(
+        "Arriving in the city... 🏙️",
+        () => {
+          scene.startLotPullIn();
+        }
+      );
+    };
+    scene.onArrivedInCity = () => {
+      setViewMode("city");
+      logDayEvent("carRides", "Rode the car to the City Park");
+      bumpLifetime("carRides", 1);
+      setAchTick((t) => t + 1);
+      showToast(`🏙️ Parked at the City lot! Tap the 🛒 Supermarket or 🏋️ Gym — or the car to go home!`);
+    };
+    scene.onCarReturnMidway = () => {
+      playCartoonTransition(
+        "Cruising home through the forest... 🌲🚗",
+        () => {
+          scene.startHighwayHome();
+        }
+      );
+    };
+    scene.onHomeApproach = () => {
+      playCartoonTransition(
+        "Almost home... 🏡",
+        () => {
+          scene.startHomeArrival();
+        }
+      );
+    };
+    scene.onArrivedHome = () => {
+      setViewMode("park");
+      setHouseRoom("living");
+      showToast("Home sweet home! 🏡");
+    };
+
+    // ---- City buildings open their minigames ----
+    scene.onSupermarketClicked = () => {
+      setActiveMiniGame("supermarket");
+    };
+    scene.onGymClicked = () => {
+      setActiveMiniGame("gym");
+    };
+
+    // ---- The bedroom ARCADE MACHINE: zoom in & teleport to the Galaxy Arcade ----
+    scene.onArcadeClicked = () => {
+      scene.zoomToBedroomArcade(() => {
+        playCartoonTransition(
+          "Zooming into the Galaxy Arcade... 🌌",
+          () => {
+            scene.enterArcadeWorld("upstairs");
+          },
+          "🌌 Welcome to the Galaxy Arcade! Tap a machine to play — or the 🏠 HOME portal to leave!"
+        );
+      });
+    };
+
+    // ---- Arcade machines: zoom into the screen, then the game covers the whole screen ----
+    scene.onArcadeGameSelected = (gameId) => {
+      scene.zoomToArcadeGame(gameId, () => {
+        const game = gameId as MiniGameType;
+        setActiveMiniGame(game);
+        stampInteraction();
+      });
+    };
+
+    // ---- HOME portal: back to the bedroom (or the park) ----
+    scene.onArcadeExitClicked = () => {
+      scene.zoomToObject(scene.dog.group.position.clone().set(0, 1.6, 3.6), () => {
+        playCartoonTransition(
+          "Heading home from the arcade... 🐾",
+          () => {
+            scene.exitArcadeWorld();
+            if (scene.viewMode === "house") {
+              setViewMode("house");
+              setHouseRoom("upstairs");
+            } else {
+              setViewMode("park");
+            }
+          },
+          "Back from the arcade! 🐾"
+        );
+      });
+    };
+
+    // ---- Seasonal holiday Easter eggs ----
+    scene.setHoliday(holiday);
+    scene.dog.setHolidayHat(holiday === "christmas" ? "santa" : "none");
+    if (holiday !== "none") {
+      showToast(holidayBlurb(holiday));
+    }
 
     scene.onEditChanged = (selectedId) => {
       setSelectedEditId(selectedId);
@@ -550,6 +786,11 @@ export default function App() {
     showReadyModal ||
     showAlbum ||
     showTrainingModal ||
+    showBreedJournal ||
+    showScoreboard ||
+    showBoneRushStore ||
+    !!activeSecretCode ||
+    !!reviewPhoto ||
     isSleeping;
 
   // Keep the 3D scene's axe flag in sync with the shop purchase
@@ -839,6 +1080,7 @@ export default function App() {
     if (!parkSceneRef.current) return;
     parkSceneRef.current.triggerPetAffection();
 
+    logDayEvent("pets", "Got pets & cuddles");
     // Pure Heart perk gives double Joy!
     const joyBoost = hasSkill("pure_heart") ? 16 : 8;
     sound.playSoftWoof();
@@ -902,6 +1144,7 @@ export default function App() {
     parkSceneRef.current.feedTreat();
     stampInteraction();
     sound.playCrunch();
+    logDayEvent("feeds", `Ate a ${treat.name}`);
     confetti({ particleCount: 35, spread: 50, origin: { y: 0.7 } });
 
     // Iron Stomach passive gives +25% extra energy boost
@@ -970,6 +1213,7 @@ export default function App() {
     }
 
     stampInteraction();
+    logDayEvent("trainingSessions", `Tricked ${trick.name}`);
     setStats((prev) => ({
       ...prev,
       energy: Math.max(0, prev.energy - trick.energyCost),
@@ -1066,9 +1310,33 @@ export default function App() {
     }
   };
 
-  // Toggle View Mode: Between Park and House
+  // Toggle View Mode: Between Park, House, City and the Galaxy Arcade
   const handleToggleViewMode = () => {
     if (!parkSceneRef.current) return;
+    if (viewMode === "arcade") {
+      playCartoonTransition(
+        "Leaving the Galaxy Arcade... 🐾",
+        () => {
+          parkSceneRef.current!.exitArcadeWorld();
+          if (parkSceneRef.current!.viewMode === "house") {
+            setViewMode("house");
+            setHouseRoom("upstairs");
+          } else {
+            setViewMode("park");
+          }
+        },
+        "Back in the real world! 🐾"
+      );
+      return;
+    }
+    if (viewMode === "city") {
+      // Quick trip home from the city (full cinematic is via the car)
+      playCartoonTransition("Heading home... 🚗", () => {
+        parkSceneRef.current!.exitCityInstant();
+      }, "Back at the park! 🌳");
+      setViewMode("park");
+      return;
+    }
     if (viewMode === "park") {
       parkSceneRef.current.enterHouse();
       setHouseRoom("living");
@@ -1269,6 +1537,7 @@ export default function App() {
       emotionLabel: meta.label,
       favorite: false,
     };
+    logDayEvent("photosTaken", "Snapped a Memory Album photo");
     setPhotos((prev) => {
       const next = [photo, ...prev];
       // Album cap: drop the oldest non-favorite first
@@ -1329,6 +1598,7 @@ export default function App() {
       coins: prev.coins + 25, // Daily wake-up bonus
     }));
 
+    logDayEvent("sleeps", "Slept soundly and woke up fresh");
     showToast(`☀️ Good Morning! ${stats.name} woke up on a fresh day with 100% full energy! (+25 Coins)`);
   };
 
@@ -1388,6 +1658,144 @@ export default function App() {
     showToast(`Placed ${toy} on the house rug!`);
   };
 
+  // ===== Photo Mode: bake the filter + commemorative stamp into the shot =====
+  const handlePhotoCapture = async (filterCss: string, withStamp: boolean): Promise<string | null> => {
+    const scene = parkSceneRef.current;
+    if (!scene) return null;
+    const raw = scene.captureSnapshot();
+    if (!raw) return null;
+
+    return new Promise<string | null>((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext("2d")!;
+          // Aesthetic photo filters (Natural / Golden Hour / Vibrant / Vintage / Noir)
+          if (filterCss) {
+            try { ctx.filter = filterCss; } catch { /* unsupported filter — skip */ }
+          }
+          ctx.drawImage(img, 0, 0);
+          ctx.filter = "none";
+          // Commemorative stamp: pup name, level, breed & date
+          if (withStamp) {
+            const breedNames: Record<DogBreed, string> = {
+              golden: "Golden Retriever", chocolate: "Chocolate Lab", husky: "Siberian Husky",
+              dalmatian: "Dalmatian", corgi: "Pembroke Corgi",
+            };
+            const stampText = `🐾 ${stats.name} • Lv ${stats.level} • ${breedNames[stats.breed]} • ${new Date().toLocaleDateString()}`;
+            const pad = Math.round(canvas.width * 0.025);
+            const fontSize = Math.max(14, Math.round(canvas.width * 0.022));
+            ctx.font = `900 ${fontSize}px sans-serif`;
+            const textW = ctx.measureText(stampText).width;
+            ctx.fillStyle = "rgba(56, 102, 65, 0.82)";
+            ctx.beginPath();
+            ctx.roundRect(pad, canvas.height - pad - fontSize * 1.9, textW + fontSize * 1.2, fontSize * 1.6, fontSize * 0.5);
+            ctx.fill();
+            ctx.fillStyle = "#F2E8CF";
+            ctx.textBaseline = "middle";
+            ctx.fillText(stampText, pad + fontSize * 0.6, canvas.height - pad - fontSize * 1.1);
+          }
+          resolve(canvas.toDataURL("image/png"));
+        } catch {
+          resolve(raw);
+        }
+      };
+      img.onerror = () => resolve(raw);
+      img.src = raw;
+    });
+  };
+
+  const handlePhotoCaptured = (dataUrl: string) => {
+    bumpLifetime("photoCaptures", 1);
+    logDayEvent("photosTaken", "Captured a Photo Mode shot");
+    setAchTick((t) => t + 1);
+    setReviewPhoto(dataUrl);
+  };
+
+  // Save a Photo Mode shot into the Memory Album
+  const handleSavePhotoToAlbum = async (dataUrl: string) => {
+    const small = await downscaleSnapshot(dataUrl, SNAP_MAX_DIM);
+    const meta = getEmotionMeta(emotion);
+    const photo: MemoryPhoto = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      dataUrl: small,
+      timestamp: Date.now(),
+      dogName: stats.name,
+      level: stats.level,
+      emotionLabel: meta.label,
+      favorite: false,
+    };
+    setPhotos((prev) => {
+      const next = [photo, ...prev];
+      while (next.length > MAX_ALBUM_PHOTOS) {
+        const idx = next.map((p) => !p.favorite).lastIndexOf(true);
+        next.splice(idx >= 0 ? idx : next.length - 1, 1);
+      }
+      return next;
+    });
+    showToast(`📸 Added to the Memory Album! (${photos.length + 1}/${MAX_ALBUM_PHOTOS})`);
+  };
+
+  // ===== Secret codes: found from chat — reward coins + collect the badge =====
+  const handleSecretCodeFound = (codeId: string) => {
+    const def = SECRET_CODES.find((c) => c.id === codeId);
+    if (!def) return;
+    setStats((prev) => ({
+      ...prev,
+      foundSecretCodes: [...new Set([...(prev.foundSecretCodes || []), codeId])],
+      coins: prev.coins + def.rewardCoins,
+      happiness: Math.min(100, prev.happiness + 10),
+    }));
+    bumpLifetime("coinsEarned", def.rewardCoins);
+    setActiveSecretCode(def);
+    setAchTick((t) => t + 1);
+  };
+
+  // ===== Google Account Linking: popup flow, +100 XP & +50 Coins on first link =====
+  const handleLinkAccount = async () => {
+    const acc = await linkAccount();
+    if (!acc) {
+      showToast("Account linking cancelled.");
+      return;
+    }
+    const alreadyLinked = !!stats.linkedAccount;
+    setAccount(acc);
+    if (!alreadyLinked) {
+      setStats((prev) => {
+        const nextXp = prev.xp + 100;
+        const newLevel = Math.floor(nextXp / 100) + 1;
+        return {
+          ...prev,
+          linkedAccount: acc,
+          xp: nextXp,
+          level: newLevel,
+          coins: prev.coins + 50,
+        };
+      });
+      bumpLifetime("coinsEarned", 50);
+      confetti({ particleCount: 90, spread: 80, origin: { y: 0.4 } });
+      sound.playRewardFanfare();
+      showToast(`✅ Google account linked! +100 XP, +50 Coins — verified shield earned!`);
+      setAchTick((t) => t + 1);
+    } else {
+      setStats((prev) => ({ ...prev, linkedAccount: acc }));
+      showToast(`✅ Synced with ${acc.name}!`);
+    }
+  };
+
+  const handleUnlinkAccount = () => {
+    saveAccount(null);
+    setAccount(null);
+    setStats((prev) => ({ ...prev, linkedAccount: undefined }));
+    showToast("Account unlinked.");
+  };
+
+  // ===== Bone Rush store refresh helper =====
+  const refreshBoneRush = () => setBoneRushTick((t) => t + 1);
+
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#2d4734] font-sans">
       {/* 3D WebGL Canvas Mount Container */}
@@ -1395,6 +1803,10 @@ export default function App() {
 
       {/* Anime iris transition for stair travel */}
       <IrisTransition phase={irisPhase} />
+
+      {/* Cartoon black-screen chunk loader (stairs, car rides to the City) */}
+      <CartoonTransition phase={cartoonPhase} label={cartoonLabel} />
+
 
       {/* Edit-mode touch controls (mobile friendly, no keyboard needed) */}
       {editMode && !anyModalOpen && (
@@ -1438,8 +1850,19 @@ export default function App() {
         </div>
       )}
 
-      {/* Interactive HUD & Actions Layer */}
-      <PetActionButtons
+      {/* Photo Mode: unobstructed viewfinder with poses, grid & filters */}
+      {photoMode && !anyModalOpen && (
+        <PhotoMode
+          dogName={stats.name}
+          onExit={() => { setPhotoMode(false); showToast("Back to the game! 🐾"); }}
+          onPose={(action) => parkSceneRef.current?.dog.setAction(action, 6.0)}
+          onCapture={handlePhotoCapture}
+          onCaptured={handlePhotoCaptured}
+        />
+      )}
+
+      {/* Interactive HUD & Actions Layer (hidden during Photo Mode) */}
+      {!photoMode && <PetActionButtons
         stats={stats}
         emotion={emotion}
         currentAction={currentAction}
@@ -1483,7 +1906,11 @@ export default function App() {
         albumCount={photos.length}
         weather={weather}
         onCycleWeather={handleCycleWeather}
-      />
+        holiday={holiday}
+        onOpenPhotoMode={() => { stampInteraction(); setPhotoMode(true); }}
+        onOpenBreedJournal={() => setShowBreedJournal(true)}
+        streakDays={streakDays}
+      />}
 
       {/* Canine Skill Tree Modal */}
       {showSkillTree && (
@@ -1512,6 +1939,8 @@ export default function App() {
       {showChatModal && (
         <PetChatModal
           petStats={stats}
+          holiday={holiday}
+          onSecretCodeFound={handleSecretCodeFound}
           onClose={() => setShowChatModal(false)}
           onTriggerDogAction={(act) => {
             handleTriggerAction(act);
@@ -1523,10 +1952,25 @@ export default function App() {
       {showMiniGameSelector && (
         <MiniGameSelectorModal
           dogName={stats.name}
+          boneBalance={getBoneBalance()}
           onSelectGame={(game) => {
             setShowMiniGameSelector(false);
             stampInteraction();
             setActiveMiniGame(game);
+          }}
+          onOpenBoneRushStore={() => setShowBoneRushStore(true)}
+          onOpenGalaxyArcade={() => {
+            setShowMiniGameSelector(false);
+            const scene = parkSceneRef.current;
+            if (!scene) return;
+            playCartoonTransition(
+              "Teleporting to the Galaxy Arcade... 🌌",
+              () => {
+                scene.enterArcadeWorld(viewMode === "house" ? "upstairs" : "park");
+              },
+              "🌌 Galaxy Arcade! Tap a machine to play — or the 🏠 HOME portal to leave!"
+            );
+            setViewMode("arcade");
           }}
           onClose={() => setShowMiniGameSelector(false)}
         />
@@ -1605,6 +2049,145 @@ export default function App() {
         />
       )}
 
+      {/* Active Mini-Game: Subway Pup — Bone Rush (3D lane runner + wallet) */}
+      {activeMiniGame === "boneRush" && (
+        <BoneRushRunner
+          dogName={stats.name}
+          dogEnergy={stats.energy}
+          walletTick={boneRushTick}
+          onOpenStore={() => setShowBoneRushStore(true)}
+          onClose={() => setActiveMiniGame("none")}
+          onGameComplete={(score, coinsEarned, energyUsed) => {
+            const coinMultiplier = hasSkill("treasure_hunter") ? 1.5 : 1.0;
+            const finalCoins = Math.round(coinsEarned * coinMultiplier);
+            stampInteraction();
+            logDayEvent("miniGames", `Bone Rush run: ${score} bones banked`);
+            if (score >= 20) logDayEvent("wins", `Bone Rush run with ${score} bones!`);
+            bumpLifetime("coinsEarned", finalCoins);
+            setStats((prev) => ({
+              ...prev,
+              coins: prev.coins + finalCoins,
+              xp: prev.xp + score,
+              energy: Math.max(0, prev.energy - energyUsed),
+              happiness: Math.min(100, prev.happiness + 15),
+            }));
+            refreshBoneRush();
+            setAchTick((t) => t + 1);
+            showToast(`Bone Rush complete! 🦴 +${score} bones banked, +${finalCoins} Coins`);
+          }}
+        />
+      )}
+
+      {/* Bone Rush Store (launched from the runner or the game selector) */}
+      {showBoneRushStore && (
+        <BoneRushStore
+          onClose={() => setShowBoneRushStore(false)}
+          onChange={refreshBoneRush}
+        />
+      )}
+
+      {/* Active Mini-Game: Paw Shuffle (Find the Hidden Treat) */}
+      {activeMiniGame === "pawShuffle" && (
+        <PawShuffleMiniGame
+          dogName={stats.name}
+          onClose={() => setActiveMiniGame("none")}
+          onGameComplete={(score, coinsEarned, energyUsed) => {
+            const finalCoins = Math.round(coinsEarned * (hasSkill("treasure_hunter") ? 1.5 : 1.0));
+            bumpLifetime("coinsEarned", finalCoins);
+            setStats((prev) => ({
+              ...prev,
+              coins: prev.coins + finalCoins,
+              xp: prev.xp + score * 5,
+              energy: Math.max(0, prev.energy - energyUsed),
+              happiness: Math.min(100, prev.happiness + 12),
+            }));
+            refreshBoneRush();
+            setAchTick((t) => t + 1);
+            showToast(`Paw Shuffle done! +${finalCoins} Coins, +${score * 5} XP`);
+          }}
+        />
+      )}
+
+      {/* Active Mini-Game: Backyard Digger (5x5 buried treasure) */}
+      {activeMiniGame === "backyardDigger" && (
+        <BackyardDiggerMiniGame
+          dogName={stats.name}
+          onClose={() => setActiveMiniGame("none")}
+          onGameComplete={(coinsEarned, xpEarned, energyUsed, fossils) => {
+            const finalCoins = Math.round(coinsEarned * (hasSkill("treasure_hunter") ? 1.5 : 1.0));
+            logDayEvent("digs", `Digger haul: +${coinsEarned} coins`);
+            bumpLifetime("coinsEarned", finalCoins);
+            if (fossils > 0) bumpLifetime("fossilsFound", fossils);
+            setStats((prev) => ({
+              ...prev,
+              coins: prev.coins + finalCoins,
+              xp: prev.xp + xpEarned,
+              energy: Math.max(0, prev.energy - energyUsed),
+              happiness: Math.min(100, prev.happiness + Math.min(25, 5 + coinsEarned / 4)),
+            }));
+            setAchTick((t) => t + 1);
+            showToast(`Dig complete! 🏺 +${finalCoins} Coins, +${xpEarned} XP${fossils ? `, 🦕 ${fossils} fossil${fossils > 1 ? "s" : ""}!` : ""}`);
+          }}
+        />
+      )}
+
+      {/* City Supermarket: shopping dash (score 5/10 → take home 5 foods) */}
+      {activeMiniGame === "supermarket" && (
+        <SupermarketMiniGame
+          dogName={stats.name}
+          onClose={() => setActiveMiniGame("none")}
+          onGameComplete={(score, foodId) => {
+            setStats((prev) => {
+              const next: PetStats = {
+                ...prev,
+                coins: prev.coins + 10,
+                xp: prev.xp + score * 3,
+                happiness: Math.min(100, prev.happiness + 10),
+              };
+              if (foodId) {
+                next.ingredientsInventory = {
+                  ...(prev.ingredientsInventory || {}),
+                  [foodId]: ((prev.ingredientsInventory || {})[foodId] || 0) + 5,
+                };
+              }
+              return next;
+            });
+            bumpLifetime("coinsEarned", 10);
+            setAchTick((t) => t + 1);
+            showToast(
+              foodId
+                ? `🛒 Shopping done! 5× ${ALL_INGREDIENTS.find((i) => i.id === foodId)?.name || "food"} added to your pantry!`
+                : `🛒 Shopping done! ${score}/10 — come back for the 5/10 reward!`
+            );
+          }}
+        />
+      )}
+
+      {/* City Gym: train with MAX the muscular coach dog! */}
+      {activeMiniGame === "gym" && (
+        <GymMiniGame
+          dogName={stats.name}
+          onClose={() => setActiveMiniGame("none")}
+          onDogAction={(act) => {
+            // The real 3D dog trains behind the modal too
+            parkSceneRef.current?.dog.setAction(act, 5.5);
+          }}
+          onComplete={(xp, coins) => {
+            bumpLifetime("gymSessions", 1);
+            bumpLifetime("coinsEarned", coins);
+            setStats((prev) => ({
+              ...prev,
+              xp: prev.xp + xp,
+              coins: prev.coins + coins,
+              energy: Math.max(0, prev.energy - 5),
+              happiness: Math.min(100, prev.happiness + 12),
+            }));
+            setAchTick((t) => t + 1);
+            showToast(`🏋️ Training complete! +${xp} XP, +${coins} Doggy Coins!`);
+          }}
+        />
+      )}
+
       {/* Active Mini-Game 2: Treat Catch Frenzy */}
       {activeMiniGame === "treatCatch" && (
         <TreatCatchMiniGame
@@ -1635,15 +2218,9 @@ export default function App() {
           dogName={stats.name}
           timeOfDay={timeOfDay}
           followCamera={followCamera}
-          onUpdateBreed={(breed: DogBreed) => {
-            setStats((prev) => ({ ...prev, breed }));
-          }}
-          onUpdateCollar={(collar: string) => {
-            setStats((prev) => ({ ...prev, collarColor: collar }));
-          }}
-          onUpdateName={(name: string) => {
-            setStats((prev) => ({ ...prev, name }));
-          }}
+          stats={stats}
+          account={account}
+          holiday={holiday}
           onUpdateTimeOfDay={(newTime: TimeOfDay) => {
             setTimeOfDay(newTime);
             sound.setNightMode(newTime === "night");
@@ -1656,6 +2233,24 @@ export default function App() {
             if (parkSceneRef.current) {
               parkSceneRef.current.followDog = follow;
             }
+          }}
+          onLinkAccount={handleLinkAccount}
+          onOpenBreedJournal={() => {
+            setShowSettingsModal(false);
+            setShowBreedJournal(true);
+          }}
+          onOpenScoreboard={() => {
+            setShowSettingsModal(false);
+            setShowScoreboard(true);
+          }}
+          onUpdateBreed={(breed: DogBreed) => {
+            setStats((prev) => ({ ...prev, breed }));
+          }}
+          onUpdateCollar={(collar: string) => {
+            setStats((prev) => ({ ...prev, collarColor: collar }));
+          }}
+          onUpdateName={(name: string) => {
+            setStats((prev) => ({ ...prev, name }));
           }}
           onClose={() => setShowSettingsModal(false)}
           initialTab={settingsInitialTab}
@@ -1727,6 +2322,59 @@ export default function App() {
           dogName={stats.name}
           onServe={handleServeReadyMeal}
           onClose={() => setShowReadyModal(false)}
+        />
+      )}
+
+      {/* Secret code easter-egg reveal (e.g. the legendary HaPpY m3aL) */}
+      {activeSecretCode && (
+        <SecretCodeModal
+          code={activeSecretCode}
+          dogName={stats.name}
+          onClose={() => setActiveSecretCode(null)}
+        />
+      )}
+
+      {/* Breed Discovery Journal */}
+      {showBreedJournal && (
+        <BreedJournal
+          dogName={stats.name}
+          dogBreed={stats.breed}
+          level={stats.level}
+          accountName={account?.name}
+          onClose={() => setShowBreedJournal(false)}
+          onOpenScoreboard={() => {
+            setShowBreedJournal(false);
+            setShowScoreboard(true);
+          }}
+          onLinkAccount={handleLinkAccount}
+        />
+      )}
+
+      {/* Online Scoreboard (global trainers + Google-verified shields) */}
+      {showScoreboard && (
+        <ScoreboardModal
+          dogName={stats.name}
+          level={stats.level}
+          xp={stats.xp}
+          accountName={account?.name}
+          googleVerified={account?.googleVerified}
+          onClose={() => setShowScoreboard(false)}
+          onLinkAccount={handleLinkAccount}
+        />
+      )}
+
+      {/* Photo Mode review: save to device / clipboard / album / snap another */}
+      {reviewPhoto && (
+        <PhotoReviewModal
+          photoUrl={reviewPhoto}
+          dogName={stats.name}
+          onSaveToAlbum={() => handleSavePhotoToAlbum(reviewPhoto)}
+          onSnapAnother={() => {
+            setReviewPhoto(null);
+            if (!photoMode) setPhotoMode(true);
+          }}
+          onClose={() => setReviewPhoto(null)}
+          onToast={showToast}
         />
       )}
 

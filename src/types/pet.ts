@@ -34,9 +34,29 @@ export interface PetAccessory {
   description: string;
 }
 
-export type HouseViewMode = "park" | "house";
+export type HouseViewMode = "park" | "house" | "city" | "arcade" | "highway";
 
 export type HouseRoom = "living" | "hallway" | "kitchen" | "upstairs";
+
+/** Seasonal holiday detection (drives Easter eggs: hats, pumpkins, flags...). */
+export type HolidayId = "none" | "halloween" | "christmas" | "july4" | "valentines" | "newyear";
+
+export interface Achievement {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  /** Progress label shown on locked badges, e.g. "3 / 10 wins". */
+  progress: (ctx: AchievementContext) => { current: number; goal: number };
+  unlocked: (ctx: AchievementContext) => boolean;
+}
+
+/** Everything achievements are evaluated against. */
+export interface AchievementContext {
+  stats: PetStats;
+  lifetime: Record<string, number>;
+  holiday: HolidayId;
+}
 
 export interface PetStats {
   name: string;
@@ -65,6 +85,29 @@ export interface PetStats {
   ingredientsInventory?: Record<string, number>;
   /** Owned tools (e.g. "axe" for chopping park trees). */
   ownedTools?: string[];
+  /** Unlocked achievement badge ids. */
+  unlockedAchievements?: string[];
+  /** Secret chat codes discovered (exact code ids). */
+  foundSecretCodes?: string[];
+  /** Google-linked trainer account (name shown on the online scoreboard). */
+  linkedAccount?: LinkedAccount;
+  /** Bone Rush runner save: banked bones + unlocked/equipped cosmetics. */
+  boneRush?: BoneRushSave;
+}
+
+/** A Google-linked (or locally linked) trainer account. */
+export interface LinkedAccount {
+  name: string;
+  email?: string;
+  googleVerified: boolean;
+  linkedAt: number;
+}
+
+/** Subway Pup: Bone Rush persistent cosmetics wallet. */
+export interface BoneRushSave {
+  bones: number;
+  unlocked: string[];
+  equipped: { design: string; trail: string; costume: string };
 }
 
 /** A saved snapshot from the Memory Album gallery. */
@@ -149,7 +192,16 @@ export interface ChatMessage {
   actionTriggered?: DogAction;
 }
 
-export type MiniGameType = "none" | "fetch" | "agility" | "treatCatch";
+export type MiniGameType =
+  | "none"
+  | "fetch"
+  | "agility"
+  | "treatCatch"
+  | "pawShuffle"
+  | "backyardDigger"
+  | "supermarket"
+  | "gym"
+  | "boneRush";
 
 export interface MiniGameScore {
   game: MiniGameType;

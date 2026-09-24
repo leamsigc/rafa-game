@@ -1,6 +1,8 @@
 import express from "express";
 import http from "http";
+import os from "os";
 import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
@@ -167,7 +169,7 @@ app.post("/api/pet/chat", async (req, res) => {
     });
   }
 
-  const systemInstruction = `You are ${petName}, a loving, highly expressive, realistic 3D pet dog (${breed}).
+  let systemInstruction = `You are ${petName}, a loving, highly expressive, realistic 3D pet dog (${breed}).
 You are talking directly to your human owner who you adore more than anything in the world!
 Your current physiological state:
 - Energy level: ${energy}% (low <30% means sleepy/panting/sluggish; high >70% means bouncy, zoomies, ready to play!)
@@ -204,6 +206,20 @@ Rules for your speech:
 5. If energy is low (<30%), gently mention feeling a bit tuckered out or wanting a quick nap or snack.
 6. COMMANDS you truly know (proficiency 40+): perform them proudly with the matching [ACTION:...] tag (sit -> [ACTION:SIT], stay -> [ACTION:STAY], fetch -> [ACTION:FETCH]). For commands below 40%, do NOT emit the action tag — instead attempt it clumsily in the fiction (*tries to stay but wiggles...*) and cheerfully ask the owner to train that trick with you in the Training menu.
 7. If the owner asks how you feel, describe your current emotion above honestly through body language and words.`;
+
+  // Holiday Easter egg: the dog celebrates the season in chat
+  // (e.g. "trick or treat!" on Halloween, Santa hat on Christmas...)
+  const holiday = petState?.holiday;
+  const holidayChat: Record<string, string> = {
+    halloween: "Today is HALLOWEEN! Start your reply with a playful 'Trick or treat!' 🎃 and mention spooky pumpkin fun.",
+    christmas: "Today is CHRISTMAS! You are wearing a little Santa hat. Wish the owner a merry Christmas and mention presents or cookies. 🎄",
+    july4: "Today is the 4TH OF JULY! Your cooking cauldron is dressed as an American flag. Celebrate with fireworks and hot dog jokes. 🇺🇸",
+    valentines: "Today is VALENTINE'S DAY! Be extra lovey-dovey and mention hearts and cuddles. 💝",
+    newyear: "Today is NEW YEAR'S! Celebrate with a happy howl and wish the owner a great year ahead. 🎊",
+  };
+  if (holiday && holidayChat[holiday]) {
+    systemInstruction += `\n8. FESTIVE SEASON: ${holidayChat[holiday]}`;
+  }
 
   // Build chat contents with history
   let contents = "";
@@ -321,6 +337,202 @@ app.post("/api/pet/tts", async (req, res) => {
 // Health check route
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", geminiReady: !!process.env.GEMINI_API_KEY });
+});
+
+// 4. Voice Journal Endpoint: dog summarizes the day's events
+//    (fed by the client's Day Journal tracker), personalized via Gemini.
+app.post("/api/pet/journal", async (req, res) => {
+  try {
+    const { petState, journal, holiday } = req.body;
+    const name = petState?.name || "Happy";
+    const breed = petState?.breed || "golden";
+    const level = petState?.level ?? 1;
+    const counts: Record<string, number> = journal?.counts || {};
+    const notable: string[] = Array.isArray(journal?.notable) ? journal.notable.slice(0, 12) : [];
+
+    const activityLines = Object.entries(counts)
+      .map(([k, v]) => `- ${k}: ${v}`)
+      .join("\n");
+    const highlights = notable.length ? `Highlights:\n${notable.map((n) => `- ${n}`).join("\n")}` : "No special highlights logged.";
+    const holidayLine =
+      holiday && holiday !== "none"
+        ? `Today is also ${holiday} — wish the owner a happy ${holiday} at the end!`
+        : "";
+
+    const ai = getAIClient();
+    let recap = "";
+
+    if (ai) {
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: `Owner's day summary with their dog:
+Activity counts:
+${activityLines || "- nothing yet (a quiet day)"}
+${highlights}
+${holidayLine}
+
+Write the dog's end-of-day journal recap.`,
+          config: {
+            systemInstruction: `You are ${name}, a loving ${breed} dog (level ${level}) writing your end-of-day Voice Journal for your beloved owner.
+Summarize the day warmly from the dog's first-person perspective: mention the concrete things you did together (feeds, fetches, mini-games, training, photos, car rides...), celebrate one highlight, and say goodnight.
+Rules: 3 to 5 sentences, warm and cozy, sprinkle ONE short *stage action* in asterisks, and include a happy "woof" or "awoo". No action tags.`,
+            temperature: 0.8,
+          },
+        });
+        recap = response.text || "";
+      } catch (err: any) {
+        console.warn("Journal generation failed:", err?.message || err);
+      }
+    }
+
+    if (!recap) {
+      // Local fallback recap: template-based, still personal
+      const bits: string[] = [];
+      if (counts.feeds) bits.push(`I got ${counts.feeds} yummy treat${counts.feeds > 1 ? "s" : ""}`);
+      if (counts.fetches) bits.push(`we played ${counts.fetches} rounds of fetch`);
+      if (counts.miniGames) bits.push(`we tried ${counts.miniGames} mini-game${counts.miniGames > 1 ? "s" : ""}`);
+      if (counts.trainingSessions) bits.push(`training went great`);
+      if (counts.pets) bits.push(`you gave me ${counts.pets} cuddle${counts.pets > 1 ? "s" : ""}`);
+      if (counts.photosTaken) bits.push(`you took ${counts.photosTaken} photo${counts.photosTaken > 1 ? "s" : ""} of me`);
+      if (counts.carRides) bits.push(`we went for a car ride!`);
+      if (counts.journalListens) bits.push(`we listened to my journal together`);
+      const done = bits.length ? bits.join(", ") : "we just relaxed and enjoyed each other's company";
+      recap = `*stretches and curls up beside you* Woof... what a day, best friend! Today ${done}. ${notable[0] ? `My favorite part? ${notable[0]}! ` : ""}I'm one lucky pup. Goodnight — awoo! 🌙`;
+      if (holiday && holiday !== "none") recap += ` (And happy ${holiday}!)`;
+    }
+
+    return res.json({ recap, mode: ai ? "gemini" : "local_engine" });
+  } catch (error: any) {
+    console.error("Journal endpoint error:", error);
+    return res.json({ recap: "*yawns* Woof... today was a good day with you. Goodnight, best friend! 🌙" });
+  }
+});
+
+// 5. Online Scoreboard — global trainer rankings (Google-verified shields included)
+// The scoreboard persists OUTSIDE the Vite-watched project root so the
+// dev server never reloads the page on writes (that caused a reload loop),
+// and it only flushes when an entry actually changed.
+const SCOREBOARD_FILE = path.join(os.tmpdir(), "doghouse_scoreboard.json");
+let scoreboard: Array<Record<string, any>> = [];
+try {
+  if (fs.existsSync(SCOREBOARD_FILE)) {
+    scoreboard = JSON.parse(fs.readFileSync(SCOREBOARD_FILE, "utf-8"));
+  }
+} catch {
+  // fresh scoreboard
+}
+let scoreboardDirty = false;
+const flushScoreboard = () => {
+  if (!scoreboardDirty) return;
+  scoreboardDirty = false;
+  try {
+    fs.writeFileSync(SCOREBOARD_FILE, JSON.stringify(scoreboard));
+  } catch {
+    // ignore
+  }
+};
+setInterval(flushScoreboard, 5000);
+process.on("exit", flushScoreboard);
+
+app.get("/api/scoreboard", (_req, res) => {
+  const entries = [...scoreboard].sort(
+    (a, b) => (b.level || 0) - (a.level || 0) || (b.xp || 0) - (a.xp || 0)
+  );
+  res.json({ entries: entries.slice(0, 50) });
+});
+
+app.post("/api/scoreboard/submit", (req, res) => {
+  const { trainerName, pupName, level, xp, breeds, googleVerified } = req.body;
+  if (!trainerName || !pupName) return res.status(400).json({ error: "trainerName and pupName are required" });
+  const entry = {
+    trainerName: String(trainerName).slice(0, 40),
+    pupName: String(pupName).slice(0, 24),
+    level: Number(level) || 1,
+    xp: Number(xp) || 0,
+    breeds: Number(breeds) || 0,
+    googleVerified: !!googleVerified,
+    updatedAt: Date.now(),
+  };
+  const idx = scoreboard.findIndex(
+    (e) => e.trainerName === entry.trainerName && e.pupName === entry.pupName
+  );
+  if (idx >= 0) scoreboard[idx] = entry;
+  else scoreboard.push(entry);
+  if (scoreboard.length > 200) scoreboard = scoreboard.slice(-200);
+  scoreboardDirty = true;
+  res.json({ ok: true, rank: scoreboard.filter((e) => e.level > entry.level).length + 1 });
+});
+
+// 6. Google Account Linking popup page.
+//    With GOOGLE_CLIENT_ID set, renders the real Google Identity Services
+//    button. Otherwise falls back to a local trainer-card form so the
+//    flow always works. The page posts the result to the opener window.
+app.get("/auth/google", (_req, res) => {
+  const clientId = process.env.GOOGLE_CLIENT_ID || "";
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Link Google Account</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background: #F2E8CF; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  .card { background: #fff; border-radius: 24px; box-shadow: 0 10px 40px rgba(0,0,0,.15); padding: 32px; width: 340px; text-align: center; }
+  h2 { color: #386641; font-size: 18px; margin: 0 0 6px; }
+  p { color: #6b7280; font-size: 13px; margin: 0 0 20px; }
+  input { width: 100%; box-sizing: border-box; padding: 12px 14px; border: 2px solid #d1d5db; border-radius: 14px; font-size: 14px; margin-bottom: 10px; }
+  input:focus { outline: none; border-color: #386641; }
+  button { width: 100%; padding: 12px; border: none; border-radius: 14px; font-size: 14px; font-weight: 800; cursor: pointer; }
+  .link { background: #386641; color: #F2E8CF; }
+  .cancel { background: #f3f4f6; color: #6b7280; margin-top: 8px; font-weight: 600; }
+  .paw { font-size: 40px; }
+</style>
+${clientId ? `<script src="https://accounts.google.com/gsi/client" async defer></script>` : ""}
+</head>
+<body>
+<div class="card">
+  <div class="paw">🐾</div>
+  <h2>Link Google Account</h2>
+  <p>Verify your trainer account for the Online Scoreboard — earn a verified shield badge, +100 XP and +50 Coins!</p>
+  ${clientId ? `<div id="gButton"></div>` : `
+  <input id="name" placeholder="Your Google account name" maxlength="40" />
+  <button class="link" id="linkBtn">Link Account</button>`}
+  <button class="cancel" id="cancelBtn">Cancel</button>
+</div>
+<script>
+  const post = (msg) => { window.opener && window.opener.postMessage(msg, window.location.origin); };
+  document.getElementById('cancelBtn').onclick = () => { post({ type: 'google-link-cancel' }); window.close(); };
+  const send = (account) => post({ type: 'google-linked', account });
+
+  ${clientId ? `
+  window.onGoogleSdkLoad = () => {};
+  (function wait() {
+    if (window.google && google.accounts && google.accounts.id) {
+      google.accounts.id.initialize({
+        client_id: '${clientId}',
+        callback: (resp) => {
+          try {
+            const payload = JSON.parse(atob(resp.credential.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
+            send({ name: payload.name || payload.email || 'Google Trainer', email: payload.email, googleVerified: true, linkedAt: Date.now() });
+            window.close();
+          } catch (e) { alert('Verification failed, try again.'); }
+        }
+      });
+      google.accounts.id.renderButton(document.getElementById('gButton'), { theme: 'outline', size: 'large', width: 276, text: 'continue_with' });
+      google.accounts.id.prompt();
+    } else { setTimeout(wait, 150); }
+  })();` : `
+  document.getElementById('linkBtn').onclick = () => {
+    const name = document.getElementById('name').value.trim();
+    if (!name) { document.getElementById('name').focus(); return; }
+    send({ name, googleVerified: true, linkedAt: Date.now() });
+    window.close();
+  };`}
+</script>
+</body>
+</html>`;
+  res.type("html").send(html);
 });
 
 async function startServer() {

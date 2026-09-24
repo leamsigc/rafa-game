@@ -30,12 +30,14 @@ import {
   Axe,
   Aperture,
   Images,
-  CloudRain,
-  Snowflake,
+  Focus,
+  BookOpen,
+  Flame,
 } from "lucide-react";
-import { DogAction, PetStats, HouseRoom, HouseViewMode } from "../../types/pet";
+import { DogAction, HolidayId, PetStats, HouseRoom, HouseViewMode } from "../../types/pet";
 import { DogEmotion, getEmotionMeta } from "../emotions/emotion";
 import { TimeOfDay, WeatherType } from "../dog3d/ParkScene";
+import { WeatherWidget } from "./WeatherWidget";
 import dogAvatar from "../../assets/images/dog_avatar_1788547305164.jpg";
 import { SKILL_NODES } from "../skills/skillTreeData";
 
@@ -74,6 +76,12 @@ interface PetActionButtonsProps {
   albumCount?: number;
   weather?: WeatherType;
   onCycleWeather?: () => void;
+  /** Festive season — the weather widget shows holiday icons (❄️ at Christmas...). */
+  holiday?: HolidayId;
+  onOpenPhotoMode?: () => void;
+  onOpenBreedJournal?: () => void;
+  /** Consecutive login days (shows the 🔥 streak chip). */
+  streakDays?: number;
 }
 
 interface TrickItem {
@@ -133,13 +141,24 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   albumCount = 0,
   weather = "sunny",
   onCycleWeather,
+  holiday = "none",
+  onOpenPhotoMode,
+  onOpenBreedJournal,
+  streakDays = 1,
 }) => {
   const unlockedSet = new Set(stats.unlockedSkills || []);
   const hasAxe = (stats.ownedTools || []).includes("axe");
   const isHouse = viewMode === "house";
+  const isCity = viewMode === "city";
+  const isArcade = viewMode === "arcade";
+  const isAway = isCity || isArcade; // away-from-home worlds (city & galaxy arcade)
   const isKitchen = isHouse && houseRoom === "kitchen";
   const isHallway = isHouse && houseRoom === "hallway";
-  const roomLabel = !isHouse
+  const roomLabel = isArcade
+    ? "🌌 Galaxy Arcade"
+    : isCity
+    ? "🏙️ City Park"
+    : !isHouse
     ? "🌳 Park"
     : houseRoom === "kitchen"
       ? "🍳 Kitchen"
@@ -208,6 +227,14 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
                 </span>
               </div>
               <div className="mt-1 flex items-center gap-1.5">
+                {streakDays >= 2 && (
+                  <span
+                    title={`Daily Login Streak: ${streakDays} days in a row! Bonuses at 3, 7 and 30 days.`}
+                    className="text-[10px] font-black px-2 py-0.5 rounded-full bg-orange-100 text-orange-800 border border-orange-300 flex items-center gap-0.5"
+                  >
+                    <Flame className="w-3 h-3 text-orange-500 fill-orange-400" /> {streakDays}d
+                  </span>
+                )}
                 <span
                   title={getEmotionMeta(emotion).blurb}
                   className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${getEmotionMeta(emotion).badge}`}
@@ -308,10 +335,15 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             <button
               id="hud-toggle-viewmode-button"
               onClick={onToggleViewMode}
-              title={isHouse ? "Exit to Outdoor Park Lawn" : "Enter Dog House Room"}
+              title={isAway ? "Head back home" : isHouse ? "Exit to Outdoor Park Lawn" : "Enter Dog House Room"}
               className="p-2.5 rounded-2xl bg-white/80 hover:bg-white text-[#386641] transition-colors cursor-pointer flex items-center gap-1 font-bold text-xs"
             >
-              {isHouse ? (
+              {isAway ? (
+                <>
+                  <Home className="w-4 h-4 text-amber-700" />
+                  <span className="hidden sm:inline">Go Home</span>
+                </>
+              ) : isHouse ? (
                 <>
                   <Trees className="w-4 h-4 text-emerald-600" />
                   <span className="hidden sm:inline">Park</span>
@@ -360,27 +392,15 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             <span className="hidden sm:inline">Skills</span>
           </button>
 
-          {/* Weather toggle: sunny / rainy / snowy (auto-rotates every few hours) */}
+          {/* Dynamic Weather Widget: icon reacts to weather + time of day +
+              festive season (❄️ Christmas, 🎃 Halloween, 🇺🇸 July 4...) */}
           {onCycleWeather && (
-            <button
-              onClick={onCycleWeather}
-              title={
-                weather === "sunny"
-                  ? "Sunny! Outdoor play costs less energy. Click for rain."
-                  : weather === "rainy"
-                    ? "Rainy! Dog feels lethargic. Click for snow."
-                    : "Snowy! Extra happiness. Click for sun."
-              }
-              className="p-2.5 rounded-2xl bg-white/80 hover:bg-white active:bg-[#F2E8CF] transition-colors cursor-pointer"
-            >
-              {weather === "sunny" ? (
-                <Sun className="w-4 h-4 text-amber-500" />
-              ) : weather === "rainy" ? (
-                <CloudRain className="w-4 h-4 text-blue-500" />
-              ) : (
-                <Snowflake className="w-4 h-4 text-sky-400" />
-              )}
-            </button>
+            <WeatherWidget
+              weather={weather}
+              timeOfDay={timeOfDay}
+              holiday={holiday}
+              onCycleWeather={onCycleWeather}
+            />
           )}
 
           {/* Time of day toggle */}
@@ -452,6 +472,29 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
               className="p-2.5 rounded-2xl bg-rose-50 hover:bg-rose-100 active:bg-rose-200 text-rose-700 transition-colors cursor-pointer"
             >
               <Aperture className="w-4 h-4" />
+            </button>
+          )}
+
+          {/* PHOTO MODE: dedicated unobstructed viewfinder & pose director */}
+          {onOpenPhotoMode && (
+            <button
+              onClick={onOpenPhotoMode}
+              title="Photo Mode: hide the HUD, pose your dog, pick filters & snap a photo!"
+              className="px-3 py-2.5 rounded-2xl bg-gradient-to-r from-rose-500 to-violet-500 text-white font-black text-xs shadow-md flex items-center gap-1.5 cursor-pointer active:scale-95 transition-transform"
+            >
+              <Focus className="w-4 h-4" />
+              <span className="hidden sm:inline">Photo Mode</span>
+            </button>
+          )}
+
+          {/* Breed Discovery Journal */}
+          {onOpenBreedJournal && (
+            <button
+              onClick={onOpenBreedJournal}
+              title="Breed Discovery Journal — trivia, origins & the Online Scoreboard"
+              className="p-2.5 rounded-2xl bg-white/80 hover:bg-white text-[#386641] transition-colors cursor-pointer"
+            >
+              <BookOpen className="w-4 h-4" />
             </button>
           )}
 
@@ -648,8 +691,20 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             <span className="text-[9px] font-bold text-[#6A994E] -mt-0.5">+Energy</span>
           </button>
 
-          {/* 2. Play Fetch (Park) / Toy (Living) / Cook (Kitchen pot) */}
-          {!isHouse ? (
+          {/* 2. Play Fetch (Park) / Toy (Living) / Cook (Kitchen) / Games (City) */}
+          {isAway ? (
+            <button
+              onClick={onOpenMiniGames}
+              title="Mini-Games: Subway Pup Bone Rush, Paw Shuffle, Backyard Digger & more!"
+              className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-white hover:bg-[#A7C957]/20 active:bg-white border border-[#386641]/15 rounded-2xl shadow-xs transition-all active:scale-95 group cursor-pointer"
+            >
+              <div className="w-8 h-8 rounded-xl bg-[#A7C957]/30 group-hover:bg-[#386641] text-[#386641] group-hover:text-[#F2E8CF] flex items-center justify-center transition-colors">
+                <Gamepad2 className="w-4 h-4" />
+              </div>
+              <span className="text-xs font-black text-[#386641]">Games</span>
+              <span className="text-[9px] font-bold text-[#386641]/70 -mt-0.5">Mini-Games</span>
+            </button>
+          ) : !isHouse ? (
             <button
               onClick={onPlayFetch}
               title="Throw tennis ball across the 3D park for dog to retrieve"

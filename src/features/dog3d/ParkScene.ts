@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { Dog3D } from "./DogModel";
 import { DogAction, DogBreed, BedColors, HouseViewMode, HouseRoom } from "../../types/pet";
+import { getCurrentSeason } from "../seasonal/holidays";
 import { sound } from "../../utils/audio";
 
 export type TimeOfDay = "day" | "sunset" | "night";
@@ -30,7 +31,7 @@ export class ParkScene {
   private renderer: THREE.WebGLRenderer;
   public dog: Dog3D;
 
-  // View Mode: Outdoor Park vs Cozy House Interior (multi-room)
+  // View Mode: Outdoor Park vs Cozy House Interior (multi-room) + City
   public viewMode: HouseViewMode = "park";
   public houseRoom: HouseRoom = "living";
   private parkGroup: THREE.Group = new THREE.Group();
@@ -38,6 +39,63 @@ export class ParkScene {
   private kitchenGroup: THREE.Group = new THREE.Group();
   private hallwayGroup: THREE.Group = new THREE.Group();
   private upstairsGroup: THREE.Group = new THREE.Group();
+  private cityGroup: THREE.Group = new THREE.Group();
+
+  // The little car (parked in front of the house — drives to the City!)
+  private carGroup: THREE.Group = new THREE.Group();
+  private carWheels: THREE.Object3D[] = [];
+  private carRide: {
+    phase: "none" | "hopIn" | "driveToCity" | "cityDrive" | "driveHome" | "highwayToCity" | "lotPullIn" | "highwayHome" | "homeArrival";
+    midwayFired: boolean;
+  } = {
+    phase: "none",
+    midwayFired: false,
+  };
+  private cinematicCam: boolean = false;
+  // Side-view tracking cam: watch the 3D car drive from the side (highway)
+  private sideCam: boolean = false;
+  public onCarRideMidway?: () => void;
+  public onArrivedInCity?: () => void;
+  public onCarReturnMidway?: () => void;
+  public onArrivedHome?: () => void;
+  public onSupermarketClicked?: () => void;
+  public onGymClicked?: () => void;
+
+  // City buildings (clickable: supermarket + gym)
+  private supermarketGroup: THREE.Group = new THREE.Group();
+  private gymGroup: THREE.Group = new THREE.Group();
+  private cityGroundMesh!: THREE.Mesh;
+
+  // Seasonal holiday decorations (pumpkins, gifts, flags...)
+  private holidayDecorGroup: THREE.Group = new THREE.Group();
+  public holiday: string = "none";
+
+  // Bedroom cozy lamp + the ARCADE MACHINE (portal to the Galaxy Arcade)
+  private bedLampShade!: THREE.Mesh;
+  private bedLampLight!: THREE.PointLight;
+  public bedLampOn: boolean = true;
+  private bedroomArcadeGroup: THREE.Group = new THREE.Group();
+
+  // Galaxy Arcade world (a whole different dimension of arcade games!)
+  private galaxyGroup: THREE.Group = new THREE.Group();
+  private arcadeMachines: THREE.Group[] = [];
+  private arcadeMachinePos: Record<string, THREE.Vector3> = {};
+  private arcadeExitGroup: THREE.Group = new THREE.Group();
+  private arcadeReturnTo: "upstairs" | "park" = "upstairs";
+  private arcadeFloorMesh!: THREE.Mesh;
+  public onArcadeClicked?: () => void;
+  public onArcadeGameSelected?: (gameId: string) => void;
+  public onArcadeExitClicked?: () => void;
+  // Camera tween (zoom-into-the-machine portal effect)
+  private camTween: {
+    active: boolean;
+    t: number;
+    dur: number;
+    fromPos: THREE.Vector3;
+    toPos: THREE.Vector3;
+    lookAt: THREE.Vector3;
+    onDone?: () => void;
+  } = { active: false, t: 0, dur: 1, fromPos: new THREE.Vector3(), toPos: new THREE.Vector3(), lookAt: new THREE.Vector3() };
 
   // Lights
   private ambientLight!: THREE.AmbientLight;
@@ -67,6 +125,21 @@ export class ParkScene {
   // Weather system (sunny / rainy / snowy)
   public weather: WeatherType = "sunny";
   public weatherSpeedFactor: number = 1.0;
+  // Seasonal ambient particles: ❄️ snow at Christmas, 🍃 leaves/pollen in
+  // spring — visual environmental feedback beyond the HUD widget.
+  private seasonPoints: THREE.Points | null = null;
+  private seasonVel: Float32Array | null = null;
+  private seasonKind: "none" | "snow" | "leaves" = "none";
+  // The forest highway chunk (the 3D side-view drive between home & city)
+  private highwayGroup: THREE.Group = new THREE.Group();
+  public onCityApproach?: () => void;
+  public onHomeApproach?: () => void;
+  // Snow accumulation: while it snows, the grass slowly turns white
+  // (0 = green lawn, 1 = fully blanketed). Melts back when it clears.
+  private snowCoverage: number = 0;
+  private readonly SNOW_COLOR = new THREE.Color(0xf4f8fb);
+  private readonly GRASS_SUNNY = new THREE.Color(0xffffff);
+  private readonly GRASS_RAINY = new THREE.Color(0x9fb3a8);
   private precipPoints: THREE.Points | null = null;
   private precipVel: Float32Array | null = null;
   private precipKind: "none" | "rain" | "snow" = "none";
@@ -88,8 +161,8 @@ export class ParkScene {
   private hallwayKitchenMesh!: THREE.Mesh;
   private stairsGroup: THREE.Group = new THREE.Group();
   private stairsMatMesh!: THREE.Mesh;
-  private readonly STAIR_BASE = new THREE.Vector3(1.55, 0, 2.9);
-  private readonly STAIR_TOP = new THREE.Vector3(1.55, 2.8, -1.1);
+  private readonly STAIR_BASE = new THREE.Vector3(2.3, 0, 4.1);
+  private readonly STAIR_TOP = new THREE.Vector3(2.3, 2.8, -0.2);
 
   // Upstairs bedroom elements (wider than deep)
   private upstairsFloorMesh!: THREE.Mesh;
@@ -249,6 +322,12 @@ export class ParkScene {
     this.setupToyCorner();
     this.setupCookBeacon();
     this.setupSelectionMarker();
+    // The City (park + supermarket + gym), the little car & the Galaxy Arcade
+    this.setupCity();
+    this.buildCar();
+    this.setupGalaxyArcade();
+    this.setupHighway();
+    this.applySeasonParticles();
     // Edit mode: everything movable EXCEPT the dog house + cooking pot.
     // (bed/toy/lamp indoors, dresser/shelves upstairs, counters/fridge in
     // kitchen, bowls/hurdles/trees outside — the house shell & pot stay put.)
@@ -276,10 +355,14 @@ export class ParkScene {
     this.scene.add(this.kitchenGroup);
     this.scene.add(this.hallwayGroup);
     this.scene.add(this.upstairsGroup);
+    this.scene.add(this.cityGroup);
+    this.scene.add(this.galaxyGroup);
     this.houseGroup.visible = false; // Initially outdoors
     this.kitchenGroup.visible = false;
     this.hallwayGroup.visible = false;
     this.upstairsGroup.visible = false;
+    this.cityGroup.visible = false;
+    this.galaxyGroup.visible = false;
 
     // 9. Dog model
     this.dog = new Dog3D(breed, collarColor);
@@ -815,21 +898,26 @@ export class ParkScene {
     this.houseGroup.add(rugRim);
 
     // 3. Walls (Back, Left, Right, Front with Doorway)
-    const wallHeight = 3.6;
-    const roomWidth = 8.4;
-    const roomDepth = 8.4;
+    // Bigger, cozier rooms with solid walls (DoubleSide so nothing ever
+    // looks see-through when the camera grazes a wall).
+    const wallHeight = 4.0;
+    const roomWidth = 10.0;
+    const roomDepth = 10.0;
 
     const wallMat = new THREE.MeshStandardMaterial({
       color: 0xfef3c7,
       roughness: 0.85,
+      side: THREE.DoubleSide,
     });
     const wainscotMat = new THREE.MeshStandardMaterial({
       color: 0x9a3412,
       roughness: 0.7,
+      side: THREE.DoubleSide,
     });
     const trimMat = new THREE.MeshStandardMaterial({
       color: 0x78350f,
       roughness: 0.5,
+      side: THREE.DoubleSide,
     });
 
     const createWall = (x: number, z: number, rotY: number, hasWindow: boolean = false) => {
@@ -971,6 +1059,63 @@ export class ParkScene {
     doorTrim.position.set(0, 2.4, 0);
     frontWall.add(doorTrim);
     this.houseGroup.add(frontWall);
+
+    // Seal the doorway with a cozy wooden front door (doggy flap included!)
+    // Oversized panel overlaps the wall around the opening so there is NEVER
+    // a hairline see-through gap, from any angle.
+    const frontDoor = new THREE.Group();
+    const doorPanel = new THREE.Mesh(
+      new THREE.BoxGeometry(2.56, 2.62, 0.14),
+      new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.6 })
+    );
+    doorPanel.position.set(0, 1.28, 0);
+    doorPanel.castShadow = true;
+    frontDoor.add(doorPanel);
+    // Carved panels
+    [0.78, 1.74].forEach((py) => {
+      const panel = new THREE.Mesh(
+        new THREE.BoxGeometry(1.5, 0.72, 0.03),
+        new THREE.MeshStandardMaterial({ color: 0x6b4423, roughness: 0.55 })
+      );
+      panel.position.set(0, py, 0.075);
+      frontDoor.add(panel);
+    });
+    // Doggy flap at the bottom — the pup's own private entrance!
+    const flap = new THREE.Mesh(
+      new THREE.BoxGeometry(0.62, 0.62, 0.06),
+      new THREE.MeshStandardMaterial({ color: 0x3f2a17, roughness: 0.8 })
+    );
+    flap.position.set(0, 0.36, 0.075);
+    frontDoor.add(flap);
+    const flapHole = new THREE.Mesh(
+      new THREE.CircleGeometry(0.22, 16),
+      new THREE.MeshBasicMaterial({ color: 0x1f140e })
+    );
+    flapHole.position.set(0, 0.36, 0.108);
+    frontDoor.add(flapHole);
+    // Door knob
+    const knob = new THREE.Mesh(
+      new THREE.SphereGeometry(0.06, 10, 10),
+      new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.8, roughness: 0.25 })
+    );
+    knob.position.set(0.86, 1.25, 0.09);
+    frontDoor.add(knob);
+    // Sits proud of the wall inner face, covering the opening with margin
+    frontDoor.position.set(0, 0, roomDepth / 2 - 0.12);
+    this.houseGroup.add(frontDoor);
+
+    // Corner posts seal the wall-joint notches so no gaps can be seen
+    const cornerGeom = new THREE.BoxGeometry(0.42, wallHeight, 0.42);
+    [
+      [-roomWidth / 2, -roomDepth / 2],
+      [roomWidth / 2, -roomDepth / 2],
+      [-roomWidth / 2, roomDepth / 2],
+      [roomWidth / 2, roomDepth / 2],
+    ].forEach(([x, z]) => {
+      const post = new THREE.Mesh(cornerGeom, trimMat);
+      post.position.set(x, wallHeight / 2, z);
+      this.houseGroup.add(post);
+    });
 
     // Welcome / Exit Door Mat (Click to Exit to Park)
     const doorMatGeom = new THREE.PlaneGeometry(1.8, 0.9);
@@ -1245,9 +1390,9 @@ export class ParkScene {
 
   private setupKitchenRoom() {
     this.kitchenGroup.clear();
-    const roomWidth = 8.4;
-    const roomDepth = 8.4;
-    const wallHeight = 3.6;
+    const roomWidth = 10.0;
+    const roomDepth = 10.0;
+    const wallHeight = 4.0;
 
     // 1. Classic checkerboard tile floor (ivory + charcoal) — big bold squares
     this.kitchenCountersGroup = new THREE.Group();
@@ -1285,8 +1430,8 @@ export class ParkScene {
     this.kitchenGroup.add(this.kitchenFloorMesh);
 
     // 2. Walls (warm kitchen yellow + white tile backsplash look)
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0xffedd5, roughness: 0.85 });
-    const backsplashMat = new THREE.MeshStandardMaterial({ color: 0xfdba74, roughness: 0.6 });
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xffedd5, roughness: 0.85, side: THREE.DoubleSide });
+    const backsplashMat = new THREE.MeshStandardMaterial({ color: 0xfdba74, roughness: 0.6, side: THREE.DoubleSide });
     const mkWall = (x: number, z: number, rotY: number) => {
       const g = new THREE.Group();
       g.position.set(x, 0, z);
@@ -1316,6 +1461,35 @@ export class ParkScene {
     ft.position.set(0, 2.4 + (wallHeight - 2.4) / 2, 0);
     frontWall.add(ft);
     this.kitchenGroup.add(frontWall);
+
+    // Seal the kitchen doorway with an oversized door + doggy flap —
+    // overlaps the wall so no hairline gap is visible from any angle.
+    const kitchenDoor = new THREE.Mesh(
+      new THREE.BoxGeometry(2.56, 2.62, 0.14),
+      new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.6 })
+    );
+    kitchenDoor.position.set(0, 1.28, roomDepth / 2 - 0.12);
+    kitchenDoor.castShadow = true;
+    this.kitchenGroup.add(kitchenDoor);
+    const kitchenFlap = new THREE.Mesh(
+      new THREE.CircleGeometry(0.22, 16),
+      new THREE.MeshBasicMaterial({ color: 0x1f140e })
+    );
+    kitchenFlap.position.set(0, 0.36, roomDepth / 2 - 0.12 + 0.073);
+    this.kitchenGroup.add(kitchenFlap);
+
+    // Corner posts to seal the wall joints
+    const kCornerGeom = new THREE.BoxGeometry(0.42, wallHeight, 0.42);
+    [
+      [-roomWidth / 2, -roomDepth / 2],
+      [roomWidth / 2, -roomDepth / 2],
+      [-roomWidth / 2, roomDepth / 2],
+      [roomWidth / 2, roomDepth / 2],
+    ].forEach(([x, z]) => {
+      const post = new THREE.Mesh(kCornerGeom, wallMat);
+      post.position.set(x, wallHeight / 2, z);
+      this.kitchenGroup.add(post);
+    });
 
     // Ceiling
     const ceilGeom = new THREE.PlaneGeometry(roomWidth, roomDepth);
@@ -1368,28 +1542,29 @@ export class ParkScene {
         this.kitchenCountersGroup.add(knob);
       }
     };
-    mkCounter(-1.6, -3.55, 4.6, 1.0);
-    mkCounter(-3.55, -1.2, 1.0, 4.4);
-    mkCounter(3.55, -1.2, 1.0, 4.4);
+    // Counters pushed flush against the (now larger) walls
+    mkCounter(-1.6, -4.42, 4.6, 1.0);
+    mkCounter(-4.42, -1.2, 1.0, 4.4);
+    mkCounter(4.42, -1.2, 1.0, 4.4);
 
     // Kitchen sink with faucet on the back counter
     const sinkBasin = new THREE.Mesh(
       new THREE.BoxGeometry(0.9, 0.18, 0.6),
       new THREE.MeshStandardMaterial({ color: 0xcbd5e1, metalness: 0.7, roughness: 0.3 })
     );
-    sinkBasin.position.set(-1.6, 1.0, -3.55);
+    sinkBasin.position.set(-1.6, 1.0, -4.42);
     this.kitchenCountersGroup.add(sinkBasin);
     const faucetStem = new THREE.Mesh(
       new THREE.CylinderGeometry(0.04, 0.04, 0.5, 8),
       new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.8, roughness: 0.25 })
     );
-    faucetStem.position.set(-1.6, 1.25, -3.8);
+    faucetStem.position.set(-1.6, 1.25, -4.68);
     this.kitchenCountersGroup.add(faucetStem);
     const faucetSpout = new THREE.Mesh(
       new THREE.TorusGeometry(0.14, 0.035, 8, 12, Math.PI),
       new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.8, roughness: 0.25 })
     );
-    faucetSpout.position.set(-1.6, 1.45, -3.66);
+    faucetSpout.position.set(-1.6, 1.45, -4.54);
     faucetSpout.rotation.y = Math.PI / 2;
     this.kitchenCountersGroup.add(faucetSpout);
 
@@ -1397,14 +1572,14 @@ export class ParkScene {
     const shelfMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6 });
     [-2.2, -1.2, -0.2].forEach((sx) => {
       const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.07, 0.35), shelfMat);
-      shelf.position.set(sx, 2.3, -4.0);
+      shelf.position.set(sx, 2.3, -4.72);
       this.kitchenShelfGroup.add(shelf);
       const jarColors = [0xfacc15, 0x86efac, 0xfda4af];
       const jar = new THREE.Mesh(
         new THREE.CylinderGeometry(0.11, 0.11, 0.28, 10),
         new THREE.MeshStandardMaterial({ color: jarColors[Math.abs(Math.floor(sx * 10)) % 3], roughness: 0.4 })
       );
-      jar.position.set(sx, 2.48, -4.0);
+      jar.position.set(sx, 2.48, -4.72);
       jar.castShadow = true;
       this.kitchenShelfGroup.add(jar);
     });
@@ -1414,14 +1589,15 @@ export class ParkScene {
       new THREE.MeshStandardMaterial({ color: 0x475569, metalness: 0.8, roughness: 0.3 })
     );
     railBar.rotation.z = Math.PI / 2;
-    railBar.position.set(2.2, 2.4, -3.9);
+    railBar.position.set(4.55, 2.4, -2.4);
+    railBar.rotation.set(0, 0, Math.PI / 2);
     this.kitchenShelfGroup.add(railBar);
-    [1.5, 2.2, 2.9].forEach((hx, hi) => {
+    [0, 1, 2].forEach((hi) => {
       const pan = new THREE.Mesh(
         new THREE.CylinderGeometry(0.16 - hi * 0.02, 0.16 - hi * 0.02, 0.1, 12),
         new THREE.MeshStandardMaterial({ color: hi === 1 ? 0xb45309 : 0x334155, metalness: 0.6, roughness: 0.4 })
       );
-      pan.position.set(hx, 2.1, -3.9);
+      pan.position.set(4.55, 2.1, -1.7 + hi * 0.7);
       pan.castShadow = true;
       this.kitchenShelfGroup.add(pan);
     });
@@ -1430,13 +1606,13 @@ export class ParkScene {
       new THREE.BoxGeometry(1.8, 1.2, 0.12),
       new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.5 })
     );
-    winFrame.position.set(-1.6, 2.5, -4.12);
+    winFrame.position.set(-1.6, 2.5, -4.9);
     this.kitchenGroup.add(winFrame);
     const winGlass = new THREE.Mesh(
       new THREE.PlaneGeometry(1.5, 0.95),
       new THREE.MeshBasicMaterial({ color: 0xbfe6f5 })
     );
-    winGlass.position.set(-1.6, 2.5, -4.05);
+    winGlass.position.set(-1.6, 2.5, -4.82);
     this.kitchenGroup.add(winGlass);
 
     // Fridge (tall white box) in corner — grouped for edit mode
@@ -1466,7 +1642,7 @@ export class ParkScene {
     );
     magnetB.position.set(-0.15, 0.7, 0.52);
     this.kitchenFridgeGroup.add(magnetB);
-    this.kitchenFridgeGroup.position.set(3.4, 1.1, -3.3);
+    this.kitchenFridgeGroup.position.set(4.3, 1.1, -4.35);
     this.kitchenGroup.add(this.kitchenCountersGroup);
     this.kitchenGroup.add(this.kitchenShelfGroup);
     this.kitchenGroup.add(this.kitchenFridgeGroup);
@@ -1505,6 +1681,7 @@ export class ParkScene {
       new THREE.CylinderGeometry(0.62, 0.5, 0.5, 20),
       new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.75, roughness: 0.3 })
     );
+    potBody.name = "potBody"; // July 4th Easter egg: gets an American flag texture
     potBody.position.y = 0.25;
     potBody.castShadow = true;
     potBody.userData = { type: "pot" };
@@ -1688,33 +1865,42 @@ export class ParkScene {
 
   private setupHallway() {
     this.hallwayGroup.clear();
-    const roomW = 5;
-    const roomD = 9;
-    const wallH = 3.4;
+    // A ROOMY grand hallway: wide enough to always see where you're walking
+    const roomW = 7;
+    const roomD = 12;
+    const wallH = 4.0;
 
     // Wood flooring hallway runner
     const floorGeom = new THREE.PlaneGeometry(roomW, roomD);
     floorGeom.rotateX(-Math.PI / 2);
     this.hallwayFloorMesh = new THREE.Mesh(
       floorGeom,
-      new THREE.MeshStandardMaterial({ map: this.makeWoodFloorTexture(1.5, 2.5), roughness: 0.6 })
+      new THREE.MeshStandardMaterial({ map: this.makeWoodFloorTexture(2, 3.5), roughness: 0.6 })
     );
     this.hallwayFloorMesh.receiveShadow = true;
     this.hallwayFloorMesh.userData = { type: "floor" };
     this.hallwayGroup.add(this.hallwayFloorMesh);
 
-    // Cozy runner rug down the middle
+    // Wide cozy runner rug down the middle
     const runner = new THREE.Mesh(
-      new THREE.BoxGeometry(1.6, 0.03, 7.2),
+      new THREE.BoxGeometry(2.4, 0.03, 10.4),
       new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.95 })
     );
-    runner.position.set(-0.6, 0.015, 0);
+    runner.position.set(-0.9, 0.015, 0);
     runner.receiveShadow = true;
     runner.userData = { type: "floor" };
     this.hallwayGroup.add(runner);
+    // Little bone pattern stripes on the runner
+    const stripeMat = new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.9 });
+    for (let z = -4.4; z <= 4.4; z += 1.6) {
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.012, 0.14), stripeMat);
+      stripe.position.set(-0.9, 0.028, z);
+      stripe.userData = { type: "floor" };
+      this.hallwayGroup.add(stripe);
+    }
 
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.85 });
-    const trimMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6 });
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.85, side: THREE.DoubleSide });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6, side: THREE.DoubleSide });
     const mkWall = (w: number, x: number, z: number, rotY: number) => {
       const wall = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, 0.15), wallMat);
       wall.position.set(x, wallH / 2, z);
@@ -1725,39 +1911,192 @@ export class ParkScene {
       base.position.set(x, 0.08, z);
       base.rotation.y = rotY;
       this.hallwayGroup.add(base);
+      // Crown molding for a comfy home feel
+      const crown = new THREE.Mesh(new THREE.BoxGeometry(w, 0.12, 0.2), trimMat);
+      crown.position.set(x, wallH - 0.06, z);
+      crown.rotation.y = rotY;
+      this.hallwayGroup.add(crown);
     };
     mkWall(roomW, 0, -roomD / 2, 0);
     mkWall(roomW, 0, roomD / 2, 0);
     mkWall(roomD, -roomW / 2, 0, Math.PI / 2);
     mkWall(roomD, roomW / 2, 0, Math.PI / 2);
 
-    // Ceiling + warm light
+    // Corner posts seal the hallway wall joints (no gaps!)
+    const hCornerGeom = new THREE.BoxGeometry(0.4, wallH, 0.4);
+    [
+      [-roomW / 2, -roomD / 2],
+      [roomW / 2, -roomD / 2],
+      [-roomW / 2, roomD / 2],
+      [roomW / 2, roomD / 2],
+    ].forEach(([x, z]) => {
+      const post = new THREE.Mesh(hCornerGeom, trimMat);
+      post.position.set(x, wallH / 2, z);
+      this.hallwayGroup.add(post);
+    });
+
+    // Ceiling + two warm hanging lamps (bright & cozy)
     const ceil = new THREE.Mesh(
       new THREE.PlaneGeometry(roomW, roomD),
-      new THREE.MeshStandardMaterial({ color: 0xfff7ed, roughness: 0.9 })
+      new THREE.MeshStandardMaterial({ color: 0xfff7ed, roughness: 0.9, side: THREE.DoubleSide })
     );
     ceil.geometry.rotateX(Math.PI / 2);
     ceil.position.y = wallH;
     this.hallwayGroup.add(ceil);
-    const lamp = new THREE.PointLight(0xffe9b8, 1.8, 12);
-    lamp.position.set(0, wallH - 0.5, 0);
-    this.hallwayGroup.add(lamp);
+    [2.8, -2.8].forEach((lz) => {
+      const lamp = new THREE.PointLight(0xffe9b8, 1.9, 14);
+      lamp.position.set(0, wallH - 0.55, lz);
+      this.hallwayGroup.add(lamp);
+      const shade = new THREE.Mesh(
+        new THREE.ConeGeometry(0.34, 0.26, 14, 1, true),
+        new THREE.MeshStandardMaterial({ color: 0xfef08a, roughness: 0.4, side: THREE.DoubleSide })
+      );
+      shade.position.set(0, wallH - 0.5, lz);
+      this.hallwayGroup.add(shade);
+      const bulb = new THREE.Mesh(
+        new THREE.SphereGeometry(0.09, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffe082, emissiveIntensity: 1.0 })
+      );
+      bulb.position.set(0, wallH - 0.62, lz);
+      this.hallwayGroup.add(bulb);
+    });
 
-    // Framed paw pictures along the left wall
-    [-2, 0, 2].forEach((z, i) => {
-      const frame = new THREE.Mesh(
-        new THREE.BoxGeometry(0.08, 0.7, 0.9),
-        new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.5 })
-      );
-      frame.position.set(-roomW / 2 + 0.1, 1.9, z);
+    // Gallery wall of framed paw portraits (left wall, whole length)
+    const frameMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.5 });
+    [-4.2, -2.1, 0, 2.1, 4.2].forEach((z, i) => {
+      const frame = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.72, 0.92), frameMat);
+      frame.position.set(-roomW / 2 + 0.1, 2.0, z);
       this.hallwayGroup.add(frame);
+      const picColors = [0xfbcfe8, 0xbfdbfe, 0xfde68a, 0xbbf7d0, 0xfed7aa];
       const pic = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.7, 0.5),
-        new THREE.MeshBasicMaterial({ color: [0xfbcfe8, 0xbfdbfe, 0xfde68a][i % 3] })
+        new THREE.PlaneGeometry(0.72, 0.52),
+        new THREE.MeshBasicMaterial({ color: picColors[i % picColors.length] })
       );
-      pic.position.set(-roomW / 2 + 0.15, 1.9, z);
+      pic.position.set(-roomW / 2 + 0.15, 2.0, z);
       pic.rotation.y = Math.PI / 2;
       this.hallwayGroup.add(pic);
+      // Little paw dot on each portrait
+      const paw = new THREE.Mesh(
+        new THREE.CircleGeometry(0.1, 12),
+        new THREE.MeshBasicMaterial({ color: 0x78350f })
+      );
+      paw.position.set(-roomW / 2 + 0.155, 2.0, z);
+      paw.rotation.y = Math.PI / 2;
+      this.hallwayGroup.add(paw);
+    });
+
+    // Wall clock (canvas face with real hour marks)
+    const clockCanvas = document.createElement("canvas");
+    clockCanvas.width = 128;
+    clockCanvas.height = 128;
+    const cCtx = clockCanvas.getContext("2d")!;
+    cCtx.fillStyle = "#fef3c7";
+    cCtx.beginPath();
+    cCtx.arc(64, 64, 60, 0, Math.PI * 2);
+    cCtx.fill();
+    cCtx.strokeStyle = "#78350f";
+    cCtx.lineWidth = 8;
+    cCtx.stroke();
+    cCtx.fillStyle = "#78350f";
+    for (let t = 0; t < 12; t++) {
+      const a = (t / 12) * Math.PI * 2;
+      cCtx.beginPath();
+      cCtx.arc(64 + Math.sin(a) * 46, 64 - Math.cos(a) * 46, 4, 0, Math.PI * 2);
+      cCtx.fill();
+    }
+    cCtx.strokeStyle = "#b91c1c";
+    cCtx.lineWidth = 5;
+    cCtx.beginPath();
+    cCtx.moveTo(64, 64);
+    cCtx.lineTo(64, 34);
+    cCtx.moveTo(64, 64);
+    cCtx.lineTo(86, 72);
+    cCtx.stroke();
+    const clock = new THREE.Mesh(
+      new THREE.CircleGeometry(0.42, 24),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(clockCanvas) })
+    );
+    clock.position.set(0, 2.6, -roomD / 2 + 0.09);
+    this.hallwayGroup.add(clock);
+
+    // Console table with a cozy lamp near the living-room end
+    const consoleMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.6 });
+    const consoleGroup = new THREE.Group();
+    const tableTop = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.08, 2.0), consoleMat);
+    tableTop.position.y = 0.85;
+    consoleGroup.add(tableTop);
+    [[-0.35, -0.8], [0.35, -0.8], [-0.35, 0.8], [0.35, 0.8]].forEach(([lx, lz]) => {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.85, 0.08), consoleMat);
+      leg.position.set(lx, 0.42, lz);
+      consoleGroup.add(leg);
+    });
+    // Table lamp (glowing)
+    const lampBase = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07, 0.1, 0.22, 10),
+      new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.5 })
+    );
+    lampBase.position.set(0, 1.0, 0);
+    consoleGroup.add(lampBase);
+    const lampShade = new THREE.Mesh(
+      new THREE.ConeGeometry(0.2, 0.24, 12, 1, true),
+      new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.4, side: THREE.DoubleSide })
+    );
+    lampShade.position.set(0, 1.2, 0);
+    consoleGroup.add(lampShade);
+    const consoleLight = new THREE.PointLight(0xffd9a0, 0.9, 5);
+    consoleLight.position.set(0, 1.25, 0);
+    consoleGroup.add(consoleLight);
+    consoleGroup.position.set(-roomW / 2 + 0.62, 0, 4.6);
+    this.hallwayGroup.add(consoleGroup);
+
+    // Leash + collar hooks by the living-room door
+    const hookMat = new THREE.MeshStandardMaterial({ color: 0xd6d6d6, metalness: 0.7, roughness: 0.3 });
+    [3.9, 4.4].forEach((hz, hi) => {
+      const hook = new THREE.Mesh(new THREE.TorusGeometry(0.05, 0.02, 8, 12), hookMat);
+      hook.position.set(roomW / 2 - 0.1, 1.6, hz);
+      this.hallwayGroup.add(hook);
+      if (hi === 0) {
+        // Hanging leash (curvy rope)
+        const leash = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.03, 0.03, 0.8, 8),
+          new THREE.MeshStandardMaterial({ color: 0xbc4749, roughness: 0.8 })
+        );
+        leash.position.set(roomW / 2 - 0.12, 1.2, hz);
+        leash.rotation.z = 0.15;
+        this.hallwayGroup.add(leash);
+        const clasp = new THREE.Mesh(
+          new THREE.SphereGeometry(0.05, 8, 8),
+          new THREE.MeshStandardMaterial({ color: 0xd6d6d6, metalness: 0.8 })
+        );
+        clasp.position.set(roomW / 2 - 0.18, 0.78, hz);
+        this.hallwayGroup.add(clasp);
+      } else {
+        // Spare collar
+        const collar = new THREE.Mesh(
+          new THREE.TorusGeometry(0.12, 0.035, 8, 16),
+          new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.5 })
+        );
+        collar.position.set(roomW / 2 - 0.13, 1.44, hz);
+        collar.rotation.x = Math.PI / 2;
+        this.hallwayGroup.add(collar);
+      }
+    });
+
+    // Potted plants at both ends for a fresh home vibe
+    const potMat = new THREE.MeshStandardMaterial({ color: 0xc2703e, roughness: 0.8 });
+    const leafMat = new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.8 });
+    [[-2.8, -5.2], [2.8, 5.2]].forEach(([px, pz]) => {
+      const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.18, 0.4, 10), potMat);
+      pot.position.set(px, 0.2, pz);
+      pot.castShadow = true;
+      this.hallwayGroup.add(pot);
+      for (let l = 0; l < 5; l++) {
+        const leaf = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8), leafMat);
+        leaf.scale.set(0.5, 1.4, 0.5);
+        leaf.position.set(px + (Math.random() - 0.5) * 0.3, 0.75 + l * 0.14, pz + (Math.random() - 0.5) * 0.3);
+        leaf.castShadow = true;
+        this.hallwayGroup.add(leaf);
+      }
     });
 
     // Staircase along the right wall (8 steps climbing toward -z)
@@ -1766,23 +2105,23 @@ export class ParkScene {
     const stepTopMat = new THREE.MeshStandardMaterial({ color: 0xd6a35c, roughness: 0.55 });
     for (let i = 0; i < 8; i++) {
       const step = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.35, 0.58), stepMat);
-      step.position.set(1.55, 0.175 + i * 0.35, 3.0 - i * 0.55);
+      step.position.set(2.3, 0.175 + i * 0.35, 3.9 - i * 0.55);
       step.castShadow = true;
       step.receiveShadow = true;
       this.stairsGroup.add(step);
       const tread = new THREE.Mesh(new THREE.BoxGeometry(1.44, 0.05, 0.6), stepTopMat);
-      tread.position.set(1.55, 0.35 + i * 0.35, 3.0 - i * 0.55);
+      tread.position.set(2.3, 0.35 + i * 0.35, 3.9 - i * 0.55);
       tread.receiveShadow = true;
       this.stairsGroup.add(tread);
     }
     // Wooden handrail
     const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 4.6), stepMat);
-    rail.position.set(0.78, 1.9, 1.0);
+    rail.position.set(1.5, 1.9, 1.9);
     rail.rotation.x = -0.55;
     this.stairsGroup.add(rail);
     for (let i = 0; i < 4; i++) {
       const post = new THREE.Mesh(new THREE.BoxGeometry(0.07, 1.1, 0.07), stepMat);
-      post.position.set(0.78, 0.9 + i * 0.55, 2.6 - i * 1.05);
+      post.position.set(1.5, 0.9 + i * 0.55, 3.5 - i * 1.05);
       this.stairsGroup.add(post);
     }
     // Dark opening at the top of the stairs (mystery above!)
@@ -1790,7 +2129,7 @@ export class ParkScene {
       new THREE.PlaneGeometry(1.8, 1.4),
       new THREE.MeshBasicMaterial({ color: 0x000000 })
     );
-    darkOpening.position.set(1.55, 3.3, -1.75);
+    darkOpening.position.set(2.3, 3.35, -0.85);
     this.stairsGroup.add(darkOpening);
     this.stairsGroup.userData = { type: "stairs" };
     this.stairsGroup.traverse((c) => {
@@ -1799,23 +2138,24 @@ export class ParkScene {
     this.hallwayGroup.add(this.stairsGroup);
 
     // "UPSTAIRS" mat at the stair base (click to climb!)
-    this.stairsMatMesh = this.makeDoorMat("⬆ UPSTAIRS 🐾", "#6d28d9", "#ddd6fe", "stairs", 0, 3.4);
+    this.stairsMatMesh = this.makeDoorMat("⬆ UPSTAIRS 🐾", "#6d28d9", "#ddd6fe", "stairs", 1.0, 4.9);
     this.stairsMatMesh.userData = { type: "stairs" };
     this.hallwayGroup.add(this.stairsMatMesh);
 
-    // Door mats to living room + kitchen
-    this.hallwayLivingMesh = this.makeDoorMat("🛋️ LIVING", "#386641", "#A7C957", "living_door", -1.3, 3.5);
+    // Door mats to living room + kitchen (spread out in the long hall)
+    this.hallwayLivingMesh = this.makeDoorMat("🛋️ LIVING", "#386641", "#A7C957", "living_door", -1.7, 5.1);
     this.hallwayGroup.add(this.hallwayLivingMesh);
-    this.hallwayKitchenMesh = this.makeDoorMat("🍳 KITCHEN", "#b45309", "#fde68a", "kitchen_door", -1.3, -3.5);
+    this.hallwayKitchenMesh = this.makeDoorMat("🍳 KITCHEN", "#b45309", "#fde68a", "kitchen_door", -1.7, -5.1);
     this.hallwayGroup.add(this.hallwayKitchenMesh);
   }
 
   private setupUpstairs() {
     this.upstairsGroup.clear();
-    // Bedroom is WIDER than deep
+    // Bedroom is WIDER than deep — with a comfortable margin so the
+    // camera never pops through the walls.
     const roomW = 12;
-    const roomD = 7;
-    const wallH = 3.4;
+    const roomD = 9;
+    const wallH = 3.6;
 
     const floorGeom = new THREE.PlaneGeometry(roomW, roomD);
     floorGeom.rotateX(-Math.PI / 2);
@@ -1837,8 +2177,8 @@ export class ParkScene {
     rug.userData = { type: "floor" };
     this.upstairsGroup.add(rug);
 
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0xe0e7ff, roughness: 0.85 });
-    const trimMat = new THREE.MeshStandardMaterial({ color: 0x4c1d95, roughness: 0.6 });
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xe0e7ff, roughness: 0.85, side: THREE.DoubleSide });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x4c1d95, roughness: 0.6, side: THREE.DoubleSide });
     const mkWall = (w: number, x: number, z: number, rotY: number, withWindow: boolean = false) => {
       const wall = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, 0.15), wallMat);
       wall.position.set(x, wallH / 2, z);
@@ -1885,6 +2225,19 @@ export class ParkScene {
     mkWall(roomD, -roomW / 2, 0, Math.PI / 2);
     mkWall(roomD, roomW / 2, 0, Math.PI / 2);
 
+    // Corner posts seal the bedroom wall joints (no gaps!)
+    const uCornerGeom = new THREE.BoxGeometry(0.4, wallH, 0.4);
+    [
+      [-roomW / 2, -roomD / 2],
+      [roomW / 2, -roomD / 2],
+      [-roomW / 2, roomD / 2],
+      [roomW / 2, roomD / 2],
+    ].forEach(([x, z]) => {
+      const post = new THREE.Mesh(uCornerGeom, trimMat);
+      post.position.set(x, wallH / 2, z);
+      this.upstairsGroup.add(post);
+    });
+
     // Ceiling + moon-night lamp glow
     const ceil = new THREE.Mesh(
       new THREE.PlaneGeometry(roomW, roomD),
@@ -1902,7 +2255,7 @@ export class ParkScene {
 
     // Little dresser with drawers — grouped so edit mode can move it
     this.upstairsDresserGroup = new THREE.Group();
-    this.upstairsDresserGroup.position.set(4.6, 0, -2.9);
+    this.upstairsDresserGroup.position.set(4.9, 0, -4.05);
     const dresserMat = new THREE.MeshStandardMaterial({ color: 0x7c3aed, roughness: 0.6 });
     const dresser = new THREE.Mesh(new THREE.BoxGeometry(1.6, 1.0, 0.6), dresserMat);
     dresser.position.set(0, 0.5, 0);
@@ -1926,7 +2279,7 @@ export class ParkScene {
 
     // Bookshelf with colorful books — grouped so edit mode can move it
     this.upstairsShelfGroup = new THREE.Group();
-    this.upstairsShelfGroup.position.set(-5.2, 0, -3.1);
+    this.upstairsShelfGroup.position.set(-4.85, 0, -4.15);
     const shelfMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.6 });
     const bookColors = [0xef4444, 0x3b82f6, 0x22c55e, 0xeab308, 0xa855f7, 0xec4899];
     for (let s = 0; s < 2; s++) {
@@ -1944,6 +2297,140 @@ export class ParkScene {
       }
     }
     this.upstairsGroup.add(this.upstairsShelfGroup);
+
+    // ===== Cozy bedroom upgrades =====
+
+    // Nightstand with a clickable lamp + alarm clock (next to the bed)
+    const nightstand = new THREE.Group();
+    const nsMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.6 });
+    const nsBody = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.55, 0.55), nsMat);
+    nsBody.position.y = 0.28;
+    nsBody.castShadow = true;
+    nightstand.add(nsBody);
+    const nsDrawer = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.2, 0.04), new THREE.MeshStandardMaterial({ color: 0xddd6fe, roughness: 0.5 }));
+    nsDrawer.position.set(0, 0.34, 0.29);
+    nightstand.add(nsDrawer);
+    const nsKnob = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 8), new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.7 }));
+    nsKnob.position.set(0, 0.34, 0.32);
+    nightstand.add(nsKnob);
+    // Bedside lamp (click to toggle the cozy glow!)
+    const bedLampGroup = new THREE.Group();
+    const bedLampBase = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07, 0.1, 0.2, 10),
+      new THREE.MeshStandardMaterial({ color: 0x4c1d95, roughness: 0.5 })
+    );
+    bedLampBase.position.y = 0.66;
+    bedLampGroup.add(bedLampBase);
+    this.bedLampShade = new THREE.Mesh(
+      new THREE.ConeGeometry(0.17, 0.2, 12, 1, true),
+      new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.4, side: THREE.DoubleSide })
+    );
+    this.bedLampShade.position.y = 0.82;
+    bedLampGroup.add(this.bedLampShade);
+    this.bedLampLight = new THREE.PointLight(0xffd9a0, 1.8, 7);
+    this.bedLampLight.position.set(0, 0.85, 0);
+    bedLampGroup.add(this.bedLampLight);
+    bedLampGroup.position.set(0.2, 0, 0);
+    nightstand.add(bedLampGroup);
+    // Alarm clock (click — pup wakes up with a start!)
+    const clockBody = new THREE.Mesh(
+      new THREE.BoxGeometry(0.16, 0.16, 0.1),
+      new THREE.MeshStandardMaterial({ color: 0xbc4749, roughness: 0.5 })
+    );
+    clockBody.position.set(-0.2, 0.66, 0.1);
+    nightstand.add(clockBody);
+    const clockFace = new THREE.Mesh(
+      new THREE.CircleGeometry(0.06, 12),
+      new THREE.MeshBasicMaterial({ color: 0xffffff })
+    );
+    clockFace.position.set(-0.2, 0.66, 0.155);
+    nightstand.add(clockFace);
+    nightstand.position.set(-5.35, 0, -0.3);
+    nightstand.userData = { type: "floor" };
+    nightstand.traverse((c) => {
+      if (c === this.bedLampShade || c === bedLampBase) c.userData = { type: "bedlamp" };
+      if (c === clockBody || c === clockFace) c.userData = { type: "clock" };
+    });
+    this.bedLampShade.userData = { type: "bedlamp" };
+    bedLampBase.userData = { type: "bedlamp" };
+    clockBody.userData = { type: "clock" };
+    this.upstairsGroup.add(nightstand);
+
+    // Curtains flanking the starry window (cosy midnight vibes)
+    const curtainMat = new THREE.MeshStandardMaterial({ color: 0x7c3aed, roughness: 0.9 });
+    [-1.55, 1.55].forEach((cx) => {
+      const curtain = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2.4, 0.12), curtainMat);
+      curtain.position.set(cx, 2.15, -4.36);
+      this.upstairsGroup.add(curtain);
+      // Curtain rod cap
+      const cap = new THREE.Mesh(
+        new THREE.SphereGeometry(0.05, 8, 8),
+        new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.7 })
+      );
+      cap.position.set(cx + (cx > 0 ? 0.28 : -0.28), 3.42, -4.36);
+      this.upstairsGroup.add(cap);
+    });
+    const curtainRod = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.03, 0.03, 4.6, 8),
+      new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.7 })
+    );
+    curtainRod.rotation.z = Math.PI / 2;
+    curtainRod.position.set(0, 3.42, -4.36);
+    this.upstairsGroup.add(curtainRod);
+
+    // Fluffy slippers by the bed (click for happy paws!)
+    const slipperMat = new THREE.MeshStandardMaterial({ color: 0xf9a8d4, roughness: 0.95 });
+    [-0.22, 0.22].forEach((sx) => {
+      const slipper = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 10), slipperMat);
+      slipper.scale.set(1, 0.5, 1.6);
+      slipper.position.set(-2.4 + sx, 0.07, 0.6);
+      slipper.userData = { type: "slippers" };
+      this.upstairsGroup.add(slipper);
+    });
+
+    // Bone art canvas above the bed
+    const artCanvas = document.createElement("canvas");
+    artCanvas.width = 256;
+    artCanvas.height = 128;
+    const aCtx = artCanvas.getContext("2d")!;
+    aCtx.fillStyle = "#c4b5fd";
+    aCtx.fillRect(0, 0, 256, 128);
+    aCtx.strokeStyle = "#4c1d95";
+    aCtx.lineWidth = 8;
+    aCtx.strokeRect(6, 6, 244, 116);
+    aCtx.font = "64px serif";
+    aCtx.textAlign = "center";
+    aCtx.fillText("🦴", 128, 84);
+    const bedArt = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.5, 0.75),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(artCanvas) })
+    );
+    bedArt.position.set(-3.8, 2.5, 0.35);
+    bedArt.rotation.y = Math.PI / 2 + 0.25;
+    this.upstairsGroup.add(bedArt);
+
+    // Throw pillows on the bed + blanket chest at its foot
+    const pillowMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95 });
+    [-0.3, 0.25].forEach((px, i) => {
+      const throwPillow = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 12), pillowMat);
+      throwPillow.scale.set(1.3, 0.6, 0.8);
+      throwPillow.position.set(-3.8 + px + (i === 0 ? -0.35 : 0.55), 0.26, -1.2 + (i === 0 ? 0.3 : -0.25));
+      this.upstairsGroup.add(throwPillow);
+    });
+    const chestMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.7 });
+    const chest = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.5, 0.6), chestMat);
+    chest.position.set(-3.8, 0.25, 0.6);
+    chest.castShadow = true;
+    this.upstairsGroup.add(chest);
+    const chestLid = new THREE.Mesh(new THREE.BoxGeometry(1.14, 0.1, 0.64), new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.6 }));
+    chestLid.position.set(-3.8, 0.54, 0.6);
+    this.upstairsGroup.add(chestLid);
+
+    // ===== THE ARCADE MACHINE (portal to the Galaxy Arcade world!) =====
+    this.bedroomArcadeGroup = this.makeArcadeMachine("GALAXY ARCADE", 0x7c3aed, 0x22d3ee, "galaxyArcade");
+    this.bedroomArcadeGroup.position.set(5.05, 0, 2.2);
+    this.bedroomArcadeGroup.rotation.y = -Math.PI / 2; // faces into the room
+    this.upstairsGroup.add(this.bedroomArcadeGroup);
 
     // Descend mat back to the hallway stairs
     this.descendMesh = this.makeDoorMat("⬇ DOWNSTAIRS", "#6d28d9", "#ddd6fe", "stairs_down", 1.55, 2.4);
@@ -2008,6 +2495,1256 @@ export class ParkScene {
       c.userData = { type: "toy" };
     });
     this.houseGroup.add(this.toyCornerGroup);
+  }
+
+  // ================= THE FOREST HIGHWAY (3D drive between home & city) =================
+
+  /**
+   * A long country road: forest on both sides that thins out into city
+   * outskirts at the far end. The camera rides alongside so you clearly
+   * see the 3D car driving from the side — all the way to the city.
+   */
+  private setupHighway() {
+    const hw = this.highwayGroup;
+
+    // Asphalt road running along z
+    const road = new THREE.Mesh(
+      new THREE.PlaneGeometry(8, 260),
+      new THREE.MeshStandardMaterial({ color: 0x3b4045, roughness: 0.95 })
+    );
+    road.geometry.rotateX(-Math.PI / 2);
+    road.position.y = 0.01;
+    road.receiveShadow = true;
+    hw.add(road);
+    // Center dashes
+    for (let z = -125; z <= 125; z += 6) {
+      const dash = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.02, 2.6), new THREE.MeshBasicMaterial({ color: 0xf7d45c }));
+      dash.position.set(0, 0.02, z);
+      hw.add(dash);
+    }
+    // Grass shoulders
+    [-1, 1].forEach((side) => {
+      const g = new THREE.Mesh(
+        new THREE.PlaneGeometry(60, 260),
+        new THREE.MeshStandardMaterial({ color: 0x69b34c, roughness: 0.95 })
+      );
+      g.geometry.rotateX(-Math.PI / 2);
+      g.position.set(side * 34, 0, 0);
+      g.receiveShadow = true;
+      hw.add(g);
+    });
+    // Dense forest for the first stretch, thinning toward the city
+    for (let i = 0; i < 56; i++) {
+      const side = i % 2 ? 1 : -1;
+      const t = this.makeOneTree(0.8 + ((i * 29) % 30) / 100, i % 3 === 0);
+      const z = 120 - i * 3.4 - Math.random() * 3;
+      if (z < -30) continue; // no trees once the city starts
+      t.position.set(side * (7 + Math.random() * 20), 0, z);
+      hw.add(t);
+    }
+    // City outskirts at the far (north) end: buildings rise along the road
+    for (let i = 0; i < 16; i++) {
+      const w = 5 + ((i * 7) % 4);
+      const h = 8 + ((i * 13) % 11);
+      const b = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, 5),
+        new THREE.MeshStandardMaterial({ color: i % 2 ? 0x64748b : 0x5d6b81, roughness: 0.7 })
+      );
+      const side = i % 2 ? 1 : -1;
+      b.position.set(side * (10 + (i % 3) * 9), h / 2, -60 - (i % 5) * 9 - ((i * 3) % 5));
+      b.castShadow = true;
+      hw.add(b);
+    }
+    // Street lamps the whole way
+    for (let z = -110; z <= 110; z += 18) {
+      [-1, 1].forEach((side) => {
+        const pole = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.07, 0.09, 3, 8),
+          new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.5 })
+        );
+        pole.position.set(side * 4.6, 1.5, z);
+        hw.add(pole);
+        const bulb = new THREE.Mesh(
+          new THREE.SphereGeometry(0.18, 8, 8),
+          new THREE.MeshStandardMaterial({ color: 0xfff7cc, emissive: 0xffe082, emissiveIntensity: 0.9 })
+        );
+        bulb.position.set(side * 4.6, 3.1, z);
+        hw.add(bulb);
+      });
+    }
+    hw.visible = false;
+    this.scene.add(hw);
+  }
+
+  // ================= ARCADE MACHINES + GALAXY WORLD =================
+
+  /** A chunky retro arcade cabinet with a glowing marquee, fake-game screen,
+   *  joystick & buttons, and a floating title. Fully clickable. */
+  private makeArcadeMachine(title: string, bodyColor: number, glowColor: number, gameId: string): THREE.Group {
+    const g = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.5 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.4 });
+    const glowMat = new THREE.MeshStandardMaterial({
+      color: glowColor, emissive: glowColor, emissiveIntensity: 1.2, roughness: 0.4,
+    });
+
+    // Body
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.9, 0.85), bodyMat);
+    body.position.y = 0.95;
+    body.castShadow = true;
+    g.add(body);
+    // Marquee top with glowing strip
+    const marquee = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.34, 0.92), bodyMat);
+    marquee.position.y = 2.05;
+    g.add(marquee);
+    const glowStrip = new THREE.Mesh(new THREE.BoxGeometry(1.05, 0.1, 0.06), glowMat);
+    glowStrip.position.set(0, 1.96, 0.46);
+    g.add(glowStrip);
+    // Screen with fake game art + title
+    const screenCanvas = document.createElement("canvas");
+    screenCanvas.width = 256;
+    screenCanvas.height = 176;
+    const sc = screenCanvas.getContext("2d")!;
+    const grad = sc.createLinearGradient(0, 0, 0, 176);
+    grad.addColorStop(0, "#0f172a");
+    grad.addColorStop(1, "#312e81");
+    sc.fillStyle = grad;
+    sc.fillRect(0, 0, 256, 176);
+    sc.fillStyle = "#fde047";
+    sc.font = "bold 26px sans-serif";
+    sc.textAlign = "center";
+    sc.fillText(title.toUpperCase().slice(0, 14), 128, 60);
+    sc.font = "40px serif";
+    sc.fillText("🎮", 128, 120);
+    for (let i = 0; i < 24; i++) {
+      sc.fillStyle = "rgba(255,255,255,0.8)";
+      sc.fillRect(Math.random() * 256, Math.random() * 176, 2, 2);
+    }
+    const screen = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.85, 0.58),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(screenCanvas) })
+    );
+    screen.position.set(0, 1.5, 0.45);
+    screen.rotation.x = -0.12;
+    g.add(screen);
+    // Control panel with joystick + buttons
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.12, 0.42), darkMat);
+    panel.position.set(0, 1.06, 0.6);
+    panel.rotation.x = 0.35;
+    g.add(panel);
+    const stick = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.025, 0.03, 0.22, 8),
+      new THREE.MeshStandardMaterial({ color: 0x9ca3af, metalness: 0.6 })
+    );
+    stick.position.set(-0.28, 1.2, 0.68);
+    stick.rotation.x = 0.35;
+    g.add(stick);
+    const stickBall = new THREE.Mesh(new THREE.SphereGeometry(0.07, 10, 10), new THREE.MeshStandardMaterial({ color: 0xef4444 }));
+    stickBall.position.set(-0.28, 1.33, 0.63);
+    g.add(stickBall);
+    [-0.02, 0.18].forEach((bx, i) => {
+      const btn = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.05, 10), glowMat);
+      btn.position.set(bx, 1.19, 0.72 - i * 0.02);
+      g.add(btn);
+    });
+    // Neon side stripes
+    [-0.58, 0.58].forEach((sx) => {
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.7, 0.06), glowMat);
+      stripe.position.set(sx, 0.95, 0.44);
+      g.add(stripe);
+    });
+    // Floating title bubble sprite above the marquee
+    const tCanvas = document.createElement("canvas");
+    tCanvas.width = 320;
+    tCanvas.height = 80;
+    const tc = tCanvas.getContext("2d")!;
+    tc.fillStyle = "rgba(17, 24, 39, 0.9)";
+    tc.beginPath();
+    tc.roundRect(6, 6, 308, 68, 20);
+    tc.fill();
+    tc.strokeStyle = `#${new THREE.Color(glowColor).getHexString()}`;
+    tc.lineWidth = 5;
+    tc.stroke();
+    tc.fillStyle = "#ffffff";
+    tc.font = "bold 30px sans-serif";
+    tc.textAlign = "center";
+    tc.fillText(title, 160, 50);
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(tCanvas), transparent: true, depthTest: false })
+    );
+    sprite.scale.set(2.4, 0.6, 1);
+    sprite.position.y = 2.75;
+    g.add(sprite);
+
+    g.userData = { type: "arcadeGame", gameId };
+    g.traverse((c) => {
+      c.userData = { type: "arcadeGame", gameId };
+    });
+    return g;
+  }
+
+  /** The Galaxy Arcade dimension: a starry neon platform ringed by arcade
+   *  cabinets — each one a portal into a real playable mini-game. */
+  private setupGalaxyArcade() {
+    const galaxy = this.galaxyGroup;
+
+    // ---- Space dome (galaxy canvas: stars + nebulae) ----
+    const domeCanvas = document.createElement("canvas");
+    domeCanvas.width = 1024;
+    domeCanvas.height = 512;
+    const dc = domeCanvas.getContext("2d")!;
+    const bg = dc.createLinearGradient(0, 0, 0, 512);
+    bg.addColorStop(0, "#020617");
+    bg.addColorStop(0.5, "#1e1b4b");
+    bg.addColorStop(1, "#312e81");
+    dc.fillStyle = bg;
+    dc.fillRect(0, 0, 1024, 512);
+    // Nebula blobs
+    for (let n = 0; n < 7; n++) {
+      const nx = Math.random() * 1024;
+      const ny = Math.random() * 512;
+      const r = 60 + Math.random() * 130;
+      const ng = dc.createRadialGradient(nx, ny, 0, nx, ny, r);
+      ng.addColorStop(0, ["rgba(167,139,250,0.5)", "rgba(56,189,248,0.4)", "rgba(244,114,182,0.4)"][n % 3]);
+      ng.addColorStop(1, "rgba(0,0,0,0)");
+      dc.fillStyle = ng;
+      dc.fillRect(nx - r, ny - r, r * 2, r * 2);
+    }
+    // Stars
+    for (let i = 0; i < 420; i++) {
+      dc.fillStyle = Math.random() > 0.15 ? "rgba(255,255,255,0.9)" : "#fde047";
+      const size = Math.random() > 0.85 ? 3 : 1.6;
+      dc.fillRect(Math.random() * 1024, Math.random() * 512, size, size);
+    }
+    const domeMat = new THREE.MeshBasicMaterial({
+      map: new THREE.CanvasTexture(domeCanvas),
+      side: THREE.BackSide,
+      fog: false,
+    });
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(50, 32, 24), domeMat);
+    galaxy.add(dome);
+
+    // ---- Floating 3D star particles ----
+    const starCount = 350;
+    const starPos = new Float32Array(starCount * 3);
+    for (let i = 0; i < starCount; i++) {
+      const r = 14 + Math.random() * 30;
+      const th = Math.random() * Math.PI * 2;
+      const ph = Math.random() * Math.PI;
+      starPos[i * 3] = Math.cos(th) * r * Math.sin(ph);
+      starPos[i * 3 + 1] = Math.abs(Math.cos(ph) * r * 0.7) + 1;
+      starPos[i * 3 + 2] = Math.sin(th) * r * Math.sin(ph);
+    }
+    const starGeom = new THREE.BufferGeometry();
+    starGeom.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+    const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.14, transparent: true, opacity: 0.9, fog: false });
+    const stars = new THREE.Points(starGeom, starMat);
+    galaxy.add(stars);
+
+    // ---- Neon platform ----
+    const platform = new THREE.Mesh(
+      new THREE.CylinderGeometry(12.5, 13, 0.4, 48),
+      new THREE.MeshStandardMaterial({ color: 0x1e1b4b, roughness: 0.4, metalness: 0.4 })
+    );
+    platform.position.y = 0.2;
+    platform.receiveShadow = true;
+    platform.userData = { type: "arcade_floor" };
+    galaxy.add(platform);
+    this.arcadeFloorMesh = platform;
+    // Glowing rim ring
+    const rim = new THREE.Mesh(
+      new THREE.TorusGeometry(12.55, 0.09, 8, 48),
+      new THREE.MeshStandardMaterial({ color: 0x22d3ee, emissive: 0x22d3ee, emissiveIntensity: 1.6 })
+    );
+    rim.rotation.x = Math.PI / 2;
+    rim.position.y = 0.4;
+    galaxy.add(rim);
+    // Inner glow ring
+    const inner = new THREE.Mesh(
+      new THREE.TorusGeometry(7.2, 0.05, 8, 48),
+      new THREE.MeshStandardMaterial({ color: 0xa78bfa, emissive: 0x7c3aed, emissiveIntensity: 1.4 })
+    );
+    inner.rotation.x = Math.PI / 2;
+    inner.position.y = 0.42;
+    galaxy.add(inner);
+
+    // ---- The arcade machines (each a real playable game) ----
+    const games: { id: string; title: string; body: number; glow: number }[] = [
+      { id: "boneRush", title: "Subway Pup: Bone Rush", body: 0x4338ca, glow: 0x22d3ee },
+      { id: "pawShuffle", title: "Paw Shuffle", body: 0x9d174d, glow: 0xf472b6 },
+      { id: "backyardDigger", title: "Backyard Digger", body: 0x92400e, glow: 0xfbbf24 },
+      { id: "treatCatch", title: "Treat Catch Frenzy", body: 0x166534, glow: 0x4ade80 },
+      { id: "agility", title: "Agility Park Dash", body: 0xb45309, glow: 0xfde047 },
+    ];
+    this.arcadeMachines = [];
+    this.arcadeMachinePos = {};
+    games.forEach((game, i) => {
+      const machine = this.makeArcadeMachine(game.title, game.body, game.glow, game.id);
+      // Arrange in an arc facing the center of the platform
+      const angle = (-0.5 + (i / (games.length - 1)) * 1.0) * Math.PI * 0.9;
+      const radius = 7.4;
+      const mx = Math.sin(angle) * radius;
+      const mz = -Math.cos(angle) * radius * 0.75 - 2.2;
+      machine.position.set(mx, 0.4, mz);
+      machine.rotation.y = Math.atan2(-mx, -mz) + Math.PI;
+      this.arcadeMachines.push(machine);
+      this.arcadeMachinePos[game.id] = new THREE.Vector3(mx, 1.4, mz);
+      galaxy.add(machine);
+    });
+
+    // ---- HOME portal (exit pedestal) ----
+    this.arcadeExitGroup = new THREE.Group();
+    const portalRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1.05, 0.14, 10, 32),
+      new THREE.MeshStandardMaterial({ color: 0xf472b6, emissive: 0xdb2777, emissiveIntensity: 1.5 })
+    );
+    portalRing.position.y = 1.6;
+    portalRing.rotation.x = 0;
+    this.arcadeExitGroup.add(portalRing);
+    const portalSwirl = new THREE.Mesh(
+      new THREE.CircleGeometry(0.95, 24),
+      new THREE.MeshBasicMaterial({ color: 0x1e1b4b, transparent: true, opacity: 0.85 })
+    );
+    portalSwirl.position.y = 1.6;
+    this.arcadeExitGroup.add(portalSwirl);
+    const homeCanvas = document.createElement("canvas");
+    homeCanvas.width = 160;
+    homeCanvas.height = 80;
+    const hc = homeCanvas.getContext("2d")!;
+    hc.fillStyle = "rgba(17,24,39,0.92)";
+    hc.beginPath();
+    hc.roundRect(6, 6, 148, 68, 18);
+    hc.fill();
+    hc.strokeStyle = "#f472b6";
+    hc.lineWidth = 5;
+    hc.stroke();
+    hc.fillStyle = "#ffffff";
+    hc.font = "bold 30px sans-serif";
+    hc.textAlign = "center";
+    hc.fillText("🏠 HOME", 80, 50);
+    const homeSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(homeCanvas), transparent: true, depthTest: false })
+    );
+    homeSprite.scale.set(1.9, 0.95, 1);
+    homeSprite.position.y = 3.1;
+    this.arcadeExitGroup.add(homeSprite);
+    this.arcadeExitGroup.position.set(0, 0.4, 3.6);
+    this.arcadeExitGroup.userData = { type: "arcadeExit" };
+    this.arcadeExitGroup.traverse((c) => {
+      c.userData = { type: "arcadeExit" };
+    });
+    galaxy.add(this.arcadeExitGroup);
+
+    // ---- Neon lighting ----
+    const neonPurple = new THREE.PointLight(0x7c3aed, 2.2, 26);
+    neonPurple.position.set(-6, 6, -4);
+    galaxy.add(neonPurple);
+    const neonCyan = new THREE.PointLight(0x22d3ee, 2.0, 26);
+    neonCyan.position.set(6, 6, -4);
+    galaxy.add(neonCyan);
+    const neonPink = new THREE.PointLight(0xf472b6, 1.6, 20);
+    neonPink.position.set(0, 5, 6);
+    galaxy.add(neonPink);
+  }
+
+  /** Enter the Galaxy Arcade dimension (behind a cartoon transition). */
+  public enterArcadeWorld(returnTo: "upstairs" | "park" = "upstairs") {
+    this.arcadeReturnTo = returnTo;
+    this.viewMode = "arcade";
+    this.hideAllRooms();
+    this.galaxyGroup.visible = true;
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    this.dog.group.position.set(0, 0.4, 6.2);
+    this.dog.group.rotation.y = Math.PI;
+    this.dog.setAction("idle");
+    this.spherical.set(9.5, Math.PI / 3.0, 0);
+    this.cameraTarget.set(0, 1.4, 0);
+    this.updateCameraPosition();
+    sound.playPotReveal();
+  }
+
+  /** Leave the arcade — back to wherever you came from. */
+  public exitArcadeWorld() {
+    this.galaxyGroup.visible = false;
+    if (this.arcadeReturnTo === "park") {
+      this.viewMode = "park";
+      this.hideAllRooms();
+      this.parkGroup.visible = true;
+      this.dog.group.position.set(-4.5, 0, -2.5);
+      this.dog.group.rotation.y = Math.PI;
+      this.dog.setAction("idle");
+      this.spherical.set(7.5, Math.PI / 3.2, 0);
+      this.cameraTarget.copy(this.dog.group.position).add(new THREE.Vector3(0, 1.0, 0));
+    } else {
+      this.viewMode = "house";
+      this.houseRoom = "upstairs";
+      this.hideAllRooms();
+      this.upstairsGroup.visible = true;
+      this.dog.group.position.set(1.55, 0, 1.8);
+      this.dog.group.rotation.y = Math.PI * 0.9;
+      this.dog.setAction("idle");
+      this.spherical.set(4.8, Math.PI / 3.1, 0);
+      this.cameraTarget.set(0, 0.9, 0);
+    }
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    this.updateCameraPosition();
+    sound.playSoftWoof();
+  }
+
+  /** Bedside lamp toggle (cozy bedroom functionality). */
+  public toggleBedLamp() {
+    this.bedLampOn = !this.bedLampOn;
+    this.bedLampLight.visible = this.bedLampOn;
+    sound.playLightSwitch();
+  }
+
+  /** Smooth cinematic zoom toward a point in the world (portal effect). */
+  public zoomToObject(target: THREE.Vector3, onDone?: () => void) {
+    const dir = new THREE.Vector3().subVectors(this.camera.position, target);
+    if (dir.lengthSq() < 0.01) dir.set(0.5, 0.8, 1.5);
+    const toPos = target.clone().add(dir.setLength(1.7));
+    toPos.y = Math.max(target.y + 0.9, 1.2);
+    this.camTween = {
+      active: true,
+      t: 0,
+      dur: 1.0,
+      fromPos: this.camera.position.clone(),
+      toPos,
+      lookAt: target.clone(),
+      onDone,
+    };
+  }
+
+  public zoomToBedroomArcade(onDone?: () => void) {
+    this.zoomToObject(new THREE.Vector3(4.55, 1.5, 2.2), onDone);
+  }
+
+  public zoomToArcadeGame(gameId: string, onDone?: () => void) {
+    const pos = this.arcadeMachinePos[gameId];
+    if (!pos) {
+      if (onDone) onDone();
+      return;
+    }
+    this.zoomToObject(pos.clone().add(new THREE.Vector3(0, 0.1, 0.55)), onDone);
+  }
+
+  private updateCameraTween(delta: number) {
+    if (!this.camTween.active) return;
+    this.camTween.t += delta;
+    const k = Math.min(1, this.camTween.t / this.camTween.dur);
+    const e = k * k * (3 - 2 * k); // smoothstep ease
+    this.camera.position.lerpVectors(this.camTween.fromPos, this.camTween.toPos, e);
+    this.camera.lookAt(this.camTween.lookAt);
+    if (k >= 1) {
+      this.camTween.active = false;
+      const cb = this.camTween.onDone;
+      this.camTween.onDone = undefined;
+      if (cb) cb();
+    }
+  }
+
+  // ================= THE LITTLE CAR =================
+
+  /** A cute low-poly car parked at the end of the platform in front of the
+   *  house door. Click it and Happy hops in for the drive to the City! */
+  private buildCar() {
+    const car = new THREE.Group();
+    car.position.set(-5, 0, 10.5);
+    car.rotation.y = 0; // faces +z (away from the house, ready to drive)
+
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xe11d48, roughness: 0.35, metalness: 0.25 });
+    const cabinMat = new THREE.MeshStandardMaterial({ color: 0xfecdd3, roughness: 0.2, metalness: 0.3 });
+    const tireMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.9 });
+
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.6, 2.9), bodyMat);
+    body.position.y = 0.62;
+    body.castShadow = true;
+    car.add(body);
+
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.55, 1.3), cabinMat);
+    cabin.position.set(0, 1.15, -0.25);
+    cabin.castShadow = true;
+    car.add(cabin);
+
+    // Windshield + happy doggy behind the wheel (peeking ears!)
+    const windshield = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.1, 0.4),
+      new THREE.MeshStandardMaterial({ color: 0xbfe6f5, roughness: 0.1, metalness: 0.4, side: THREE.DoubleSide })
+    );
+    windshield.position.set(0, 1.12, 0.42);
+    windshield.rotation.x = -0.25;
+    car.add(windshield);
+
+    this.carWheels = [];
+    [
+      [-0.82, 1.0], [0.82, 1.0], [-0.82, -1.0], [0.82, -1.0],
+    ].forEach(([x, z]) => {
+      const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.22, 12), tireMat);
+      wheel.rotation.z = Math.PI / 2;
+      wheel.position.set(x, 0.3, z);
+      wheel.castShadow = true;
+      car.add(wheel);
+      this.carWheels.push(wheel);
+    });
+
+    // Headlights + taillights
+    [0xd, 0xd].forEach((_, i) => {
+      const light = new THREE.Mesh(
+        new THREE.SphereGeometry(0.09, 8, 8),
+        new THREE.MeshStandardMaterial({ color: 0xfff9c4, emissive: 0xffe082, emissiveIntensity: 0.8 })
+      );
+      light.position.set(i === 0 ? -0.5 : 0.5, 0.62, 1.47);
+      car.add(light);
+    });
+
+    car.userData = { type: "car" };
+    car.traverse((c) => {
+      c.userData = { type: "car" };
+    });
+    this.carGroup = car;
+    this.parkGroup.add(car);
+  }
+
+  /** Click the parked car: Happy walks over, hops in, and the drive begins. */
+  public startCarRideToCity() {
+    if (this.viewMode !== "park" || this.carRide.phase !== "none") return;
+    this.carRide = { phase: "hopIn", midwayFired: false };
+    const side = new THREE.Vector3(this.carGroup.position.x + 1.6, 0, this.carGroup.position.z);
+    this.walkTo(side, () => {
+      this.dog.group.visible = false; // hops in!
+      this.carRide.phase = "driveToCity";
+      this.cinematicCam = true;
+      sound.playWhistle();
+      sound.playToyBounce();
+    });
+  }
+
+  /** In the City: click the car again to drive home. */
+  public startCarRideHome() {
+    if (this.viewMode !== "city" || this.carRide.phase !== "none") return;
+    this.carRide = { phase: "hopIn", midwayFired: false };
+    const side = new THREE.Vector3(this.carGroup.position.x + 1.6, 0, this.carGroup.position.z);
+    this.walkTo(side, () => {
+      this.dog.group.visible = false;
+      // Pull out of the lot, then cruise south down the street
+      this.carPath = [new THREE.Vector3(3, 0, 9), new THREE.Vector3(3, 0, 26)];
+      this.carPathIdx = 0;
+      this.carRide.phase = "driveHome";
+      this.sideCam = true;
+      sound.playWhistle();
+    });
+  }
+
+  /** Called (behind the cartoon black screen) to land the car in the City. */
+  public arriveInCity() {
+    this.viewMode = "city";
+    this.houseRoom = "living";
+    this.hideAllRooms();
+    this.cityGroup.visible = true;
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    // Car enters from the forest road in the south and cruises to the park
+    this.carGroup.rotation.y = Math.PI; // face -z (into the city)
+    this.carGroup.position.set(3, 0, 24);
+    this.carRide.phase = "cityDrive";
+    this.cinematicCam = true;
+  }
+
+  /** Called (behind the black screen) to land the car back home in the park. */
+  public arriveHomeFromCity() {
+    this.viewMode = "park";
+    this.hideAllRooms();
+    this.parkGroup.visible = true;
+    this.carGroup.rotation.y = 0;
+    this.carGroup.position.set(-5, 0, 10.5);
+    this.dog.group.visible = true;
+    this.dog.group.position.set(-4.5, 0, -2.5);
+    this.dog.group.rotation.y = Math.PI;
+    this.dog.setAction("idle");
+    this.carRide = { phase: "none", midwayFired: false };
+    this.cinematicCam = false;
+    this.spherical.set(7.5, Math.PI / 3.2, 0);
+    this.cameraTarget.copy(this.dog.group.position).add(new THREE.Vector3(0, 1.0, 0));
+    this.updateCameraPosition();
+    if (this.onArrivedHome) this.onArrivedHome();
+  }
+
+  /**
+   * Called behind the cutscene's parking scene: the car is already parked at
+   * the City lot and Happy has just walked out — reveal a ready-to-play city.
+   */
+  public arriveInCityParked() {
+    this.viewMode = "city";
+    this.houseRoom = "living";
+    this.hideAllRooms();
+    this.cityGroup.visible = true;
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    // Nose-in at the painted parking spot by the park entrance
+    this.carGroup.rotation.y = -Math.PI / 2;
+    this.carGroup.position.set(5.4, 0, 2.5);
+    this.dog.group.visible = true;
+    this.dog.group.position.set(4.3, 0, 3.6);
+    this.dog.group.rotation.y = Math.PI * 0.8;
+    this.dog.setAction("sit", 3.0);
+    this.carRide = { phase: "none", midwayFired: false };
+    this.cinematicCam = false;
+    this.spherical.set(8.5, Math.PI / 3.1, 0.5);
+    this.cameraTarget.set(0, 1.0, 1.5);
+    this.updateCameraPosition();
+  }
+
+  /**
+   * The reverse trip: the cutscene parks the car back at its home spot in
+   * front of the house and Happy walks out onto the lawn.
+   */
+  public arriveHomeParked() {
+    this.viewMode = "park";
+    this.houseRoom = "living";
+    this.hideAllRooms();
+    this.parkGroup.visible = true;
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    this.carGroup.rotation.y = 0;
+    this.carGroup.position.set(-5, 0, 10.5);
+    this.dog.group.visible = true;
+    this.dog.group.position.set(-3.9, 0, 9.4);
+    this.dog.group.rotation.y = Math.PI;
+    this.dog.setAction("sit", 3.0);
+    this.carRide = { phase: "none", midwayFired: false };
+    this.cinematicCam = false;
+    this.spherical.set(7.5, Math.PI / 3.2, 0);
+    this.cameraTarget.copy(this.dog.group.position).add(new THREE.Vector3(0, 1.0, 0));
+    this.updateCameraPosition();
+  }
+
+  /** Quick escape from the City without the full cinematic (HUD button). */
+  public exitCityInstant() {
+    if (this.viewMode !== "city") return;
+    this.arriveHomeFromCity();
+  }
+
+  /** Drive the car along waypoints (lot pull-in / pull-out paths). */
+  private carPath: THREE.Vector3[] = [];
+  private carPathIdx = 0;
+  private moveCarAlongPath(delta: number, speed: number): boolean {
+    if (this.carPathIdx >= this.carPath.length) return true;
+    const target = this.carPath[this.carPathIdx];
+    const pos = this.carGroup.position;
+    const dx = target.x - pos.x;
+    const dz = target.z - pos.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 0.15) {
+      this.carPathIdx++;
+      return this.carPathIdx >= this.carPath.length;
+    }
+    const step = Math.min(dist, speed * delta);
+    pos.x += (dx / dist) * step;
+    pos.z += (dz / dist) * step;
+    const targetAngle = Math.atan2(dx, dz);
+    this.carGroup.rotation.y = THREE.MathUtils.lerp(
+      this.carGroup.rotation.y,
+      targetAngle,
+      Math.min(1, delta * 6)
+    );
+    return false;
+  }
+
+  // ---- Highway ride phases (all fully 3D, viewed from the side) ----
+
+  /** Swap to the forest highway chunk and cruise toward the city. */
+  public startHighwayToCity() {
+    this.viewMode = "highway";
+    this.hideAllRooms();
+    this.highwayGroup.visible = true;
+    this.carGroup.position.set(0, 0, 115);
+    this.carGroup.rotation.y = Math.PI; // nose toward -z (city end)
+    this.sideCam = true;
+    this.carRide = { phase: "highwayToCity", midwayFired: false };
+  }
+
+  /** Enter the city and drive into the parking lot, seen from the side. */
+  public startLotPullIn() {
+    this.viewMode = "city";
+    this.hideAllRooms();
+    this.cityGroup.visible = true;
+    this.carGroup.position.set(3, 0, 15);
+    this.carGroup.rotation.y = Math.PI;
+    this.carPath = [new THREE.Vector3(3, 0, 10), new THREE.Vector3(3, 0, 4.2), new THREE.Vector3(5.4, 0, 2.5)];
+    this.carPathIdx = 0;
+    this.sideCam = true;
+    this.carRide = { phase: "lotPullIn", midwayFired: false };
+  }
+
+  /** Leave the city on the highway, cruising home through the forest. */
+  public startHighwayHome() {
+    this.viewMode = "highway";
+    this.hideAllRooms();
+    this.highwayGroup.visible = true;
+    this.carGroup.position.set(0, 0, -112);
+    this.carGroup.rotation.y = 0; // nose toward +z (home end)
+    this.sideCam = true;
+    this.carRide = { phase: "highwayHome", midwayFired: false };
+  }
+
+  /** Back at the park: drive the last stretch up to the house spot. */
+  public startHomeArrival() {
+    this.viewMode = "park";
+    this.hideAllRooms();
+    this.parkGroup.visible = true;
+    this.carGroup.position.set(-5, 0, 32);
+    this.carGroup.rotation.y = Math.PI; // nose toward -z (the house spot)
+    this.sideCam = false;
+    this.cinematicCam = true;
+    this.carRide = { phase: "homeArrival", midwayFired: false };
+  }
+
+  private updateCarRide(delta: number) {
+    const ride = this.carRide;
+    if (ride.phase === "none" || ride.phase === "hopIn") return;
+
+    const speed = ride.phase === "highwayToCity" || ride.phase === "highwayHome" ? 17 : 10;
+    // Spin the wheels while driving
+    this.carWheels.forEach((w) => (w.rotation.x += delta * speed * 2));
+
+    if (ride.phase === "driveToCity") {
+      this.carGroup.position.z += speed * delta;
+      if (this.carGroup.position.z > 26 && !ride.midwayFired) {
+        ride.midwayFired = true;
+        ride.phase = "none";
+        this.cinematicCam = false;
+        if (this.onCarRideMidway) this.onCarRideMidway(); // → highway
+      }
+    } else if (ride.phase === "highwayToCity") {
+      this.carGroup.position.z -= speed * delta;
+      if (this.carGroup.position.z < -112 && !ride.midwayFired) {
+        ride.midwayFired = true;
+        ride.phase = "none";
+        if (this.onCityApproach) this.onCityApproach(); // → city lot
+      }
+    } else if (ride.phase === "lotPullIn") {
+      if (this.moveCarAlongPath(delta, 8)) {
+        // Parked at the lot! Snap clean, Happy hops out
+        this.carGroup.rotation.y = Math.PI / 2; // nose-in, facing east
+        this.dog.group.visible = true;
+        this.dog.group.position.set(4.3, 0, 3.6);
+        this.dog.group.rotation.y = Math.PI * 0.8;
+        this.dog.setAction("sit", 3.0);
+        this.carRide = { phase: "none", midwayFired: false };
+        this.sideCam = false;
+        this.spherical.set(8.5, Math.PI / 3.1, 0.5);
+        this.cameraTarget.set(2, 1.0, 2);
+        this.updateCameraPosition();
+        sound.playRewardFanfare();
+        if (this.onArrivedInCity) this.onArrivedInCity();
+      }
+    } else if (ride.phase === "driveHome") {
+      if (this.moveCarAlongPath(delta, 10)) {
+        ride.midwayFired = true;
+        ride.phase = "none";
+        if (this.onCarReturnMidway) this.onCarReturnMidway(); // → highway
+      }
+    } else if (ride.phase === "highwayHome") {
+      this.carGroup.position.z += speed * delta;
+      if (this.carGroup.position.z > 112 && !ride.midwayFired) {
+        ride.midwayFired = true;
+        ride.phase = "none";
+        if (this.onHomeApproach) this.onHomeApproach(); // → park arrival
+      }
+    } else if (ride.phase === "homeArrival") {
+      this.carGroup.position.z -= 12 * delta;
+      if (this.carGroup.position.z <= 10.5 && !ride.midwayFired) {
+        ride.midwayFired = true;
+        this.carGroup.position.z = 10.5;
+        this.dog.group.visible = true;
+        this.dog.group.position.set(-3.9, 0, 9.4);
+        this.dog.group.rotation.y = Math.PI;
+        this.dog.setAction("sit", 3.0);
+        this.carRide = { phase: "none", midwayFired: false };
+        this.cinematicCam = false;
+        this.spherical.set(7.5, Math.PI / 3.2, 0);
+        this.cameraTarget.copy(this.dog.group.position).add(new THREE.Vector3(0, 1.0, 0));
+        this.updateCameraPosition();
+        sound.playSoftWoof();
+        if (this.onArrivedHome) this.onArrivedHome();
+      }
+    }
+  }
+
+  // ================= THE CITY =================
+
+  /** Modern city chunk: street + forest approach, a beautiful city park,
+   *  the SUPERMARKET, the GYM, and a skyline backdrop. */
+  private setupCity() {
+    const city = this.cityGroup;
+
+    // Concrete ground
+    const groundCanvas = document.createElement("canvas");
+    groundCanvas.width = 256;
+    groundCanvas.height = 256;
+    const gCtx = groundCanvas.getContext("2d")!;
+    gCtx.fillStyle = "#9aa1a8";
+    gCtx.fillRect(0, 0, 256, 256);
+    for (let i = 0; i < 700; i++) {
+      gCtx.fillStyle = Math.random() > 0.5 ? "#8d949b" : "#a8afb6";
+      gCtx.fillRect(Math.random() * 256, Math.random() * 256, 2, 2);
+    }
+    const groundTex = new THREE.CanvasTexture(groundCanvas);
+    groundTex.wrapS = THREE.RepeatWrapping;
+    groundTex.wrapT = THREE.RepeatWrapping;
+    groundTex.repeat.set(10, 10);
+    this.cityGroundMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(80, 80),
+      new THREE.MeshStandardMaterial({ map: groundTex, roughness: 0.95 })
+    );
+    this.cityGroundMesh.geometry.rotateX(-Math.PI / 2);
+    this.cityGroundMesh.receiveShadow = true;
+    this.cityGroundMesh.userData = { type: "city_floor" };
+    city.add(this.cityGroundMesh);
+
+    // Street running along z (the car drives in on it from the forest)
+    const streetCanvas = document.createElement("canvas");
+    streetCanvas.width = 64;
+    streetCanvas.height = 256;
+    const sCtx = streetCanvas.getContext("2d")!;
+    sCtx.fillStyle = "#3b4045";
+    sCtx.fillRect(0, 0, 64, 256);
+    sCtx.fillStyle = "#f7d45c";
+    for (let y = 10; y < 256; y += 42) {
+      sCtx.fillRect(29, y, 6, 22);
+    }
+    const streetTex = new THREE.CanvasTexture(streetCanvas);
+    streetTex.wrapS = THREE.RepeatWrapping;
+    streetTex.wrapT = THREE.RepeatWrapping;
+    streetTex.repeat.set(1, 6);
+    const street = new THREE.Mesh(
+      new THREE.PlaneGeometry(5.5, 52),
+      new THREE.MeshStandardMaterial({ map: streetTex, roughness: 0.95 })
+    );
+    street.geometry.rotateX(-Math.PI / 2);
+    street.position.set(3, 0.02, 2);
+    street.userData = { type: "city_floor" };
+    city.add(street);
+
+    // Sidewalks flanking the street
+    const sidewalkMat = new THREE.MeshStandardMaterial({ color: 0xd4d4d8, roughness: 0.9 });
+    [-0.1, 6.2].forEach((x) => {
+      const sw = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 52), sidewalkMat);
+      sw.geometry.rotateX(-Math.PI / 2);
+      sw.position.set(x, 0.03, 2);
+      sw.userData = { type: "city_floor" };
+      city.add(sw);
+    });
+
+    // ---- Modern city park (west of the street) ----
+    const park = new THREE.Group();
+    // Grand plaza circle
+    const plaza = new THREE.Mesh(
+      new THREE.CylinderGeometry(5.2, 5.35, 0.08, 36),
+      new THREE.MeshStandardMaterial({ color: 0xe8e0cc, roughness: 0.8 })
+    );
+    plaza.position.set(-5, 0.05, 1);
+    plaza.receiveShadow = true;
+    plaza.userData = { type: "city_floor" };
+    park.add(plaza);
+    // Stone paths radiating out
+    const pathMat = new THREE.MeshStandardMaterial({ color: 0xd6c29e, roughness: 0.85 });
+    [[-11, 1, 8, 1.4], [-5, -4.4, 1.4, 8]].forEach(([x, z, w, d]) => {
+      const p = new THREE.Mesh(new THREE.PlaneGeometry(w, d), pathMat);
+      p.geometry.rotateX(-Math.PI / 2);
+      p.position.set(x, 0.06, z);
+      p.userData = { type: "city_floor" };
+      park.add(p);
+    });
+    // Fountain centerpiece
+    const fountain = new THREE.Group();
+    const fBase = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.4, 1.55, 0.5, 20),
+      new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.4 })
+    );
+    fBase.position.y = 0.25;
+    fountain.add(fBase);
+    const water = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.25, 1.25, 0.12, 20),
+      new THREE.MeshStandardMaterial({ color: 0x38bdf8, roughness: 0.1, metalness: 0.4, transparent: true, opacity: 0.9 })
+    );
+    water.position.y = 0.52;
+    fountain.add(water);
+    const jet = new THREE.Mesh(
+      new THREE.ConeGeometry(0.18, 1.2, 10),
+      new THREE.MeshStandardMaterial({ color: 0x7dd3fc, transparent: true, opacity: 0.7 })
+    );
+    jet.position.y = 1.1;
+    fountain.add(jet);
+    fountain.position.set(-5, 0, 1);
+    park.add(fountain);
+    // Benches, lamps, flower beds & trees around the plaza
+    const benchMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.7 });
+    [
+      [-8.5, -1.8, 0], [-1.5, -1.8, 0], [-8.5, 3.8, Math.PI], [-1.5, 3.8, Math.PI],
+    ].forEach(([x, z, r]) => {
+      const bench = new THREE.Group();
+      const seat = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 0.5), benchMat);
+      seat.position.y = 0.45;
+      bench.add(seat);
+      const back = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.5, 0.08), benchMat);
+      back.position.set(0, 0.7, -0.22);
+      bench.add(back);
+      bench.position.set(x, 0, z);
+      bench.rotation.y = r;
+      bench.traverse((c) => (c.castShadow = true));
+      park.add(bench);
+    });
+    const lampMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.6, roughness: 0.4 });
+    [[-10, -2.5], [0, -2.5], [-10, 4.5], [0, 4.5]].forEach(([x, z]) => {
+      const lamp = new THREE.Group();
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 2.6, 8), lampMat);
+      pole.position.y = 1.3;
+      lamp.add(pole);
+      const bulb = new THREE.Mesh(
+        new THREE.SphereGeometry(0.16, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0xfff7cc, emissive: 0xffe082, emissiveIntensity: 0.9 })
+      );
+      bulb.position.y = 2.7;
+      lamp.add(bulb);
+      lamp.position.set(x, 0, z);
+      park.add(lamp);
+    });
+    const flowerColors = [0xf43f5e, 0xfacc15, 0xa855f7, 0x38bdf8];
+    [[-9.5, 0], [-0.5, 0], [-9.5, 2.2], [-0.5, 2.2]].forEach(([x, z], i) => {
+      const bed = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.6, 0.65, 0.24, 12),
+        new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.8 })
+      );
+      bed.position.set(x, 0.12, z);
+      park.add(bed);
+      for (let f = 0; f < 5; f++) {
+        const fl = new THREE.Mesh(
+          new THREE.SphereGeometry(0.11, 8, 8),
+          new THREE.MeshStandardMaterial({ color: flowerColors[(i + f) % flowerColors.length] })
+        );
+        fl.position.set(x + (Math.random() - 0.5) * 0.8, 0.32, z + (Math.random() - 0.5) * 0.8);
+        park.add(fl);
+      }
+    });
+    [[-12.5, -3], [-12.5, 5], [2.5, 7.5]].forEach(([x, z], i) => {
+      const tree = this.makeOneTree(0.8 + i * 0.06, i % 2 === 0);
+      tree.position.set(x, 0, z);
+      park.add(tree);
+    });
+    city.add(park);
+
+    // ---- Supermarket (clickable building) ----
+    const makeBuilding = (
+      w: number, h: number, d: number, x: number, z: number,
+      bodyColor: number, signText: string, signBg: string, signFg: string
+    ) => {
+      const group = new THREE.Group();
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.6 })
+      );
+      body.position.y = h / 2;
+      body.castShadow = true;
+      body.receiveShadow = true;
+      group.add(body);
+      // Big canvas sign above the doors
+      const signCanvas = document.createElement("canvas");
+      signCanvas.width = 512;
+      signCanvas.height = 128;
+      const ctx = signCanvas.getContext("2d")!;
+      ctx.fillStyle = signBg;
+      ctx.beginPath();
+      ctx.roundRect(6, 6, 500, 116, 22);
+      ctx.fill();
+      ctx.fillStyle = signFg;
+      ctx.font = "bold 64px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(signText, 256, 86);
+      const sign = new THREE.Mesh(
+        new THREE.PlaneGeometry(w * 0.85, 1.2),
+        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(signCanvas) })
+      );
+      sign.position.set(0, h - 0.9, d / 2 + 0.03);
+      group.add(sign);
+      // Glass double doors
+      const doorMat = new THREE.MeshStandardMaterial({
+        color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85,
+      });
+      [-0.65, 0.65].forEach((dx) => {
+        const door = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 2.0), doorMat);
+        door.position.set(dx, 1.0, d / 2 + 0.04);
+        group.add(door);
+      });
+      group.position.set(x, 0, z);
+      return group;
+    };
+
+    this.supermarketGroup = makeBuilding(9, 4.5, 5, 11, -9, 0x38bdf8, "🛒 SUPERMARKET", "#0369a1", "#ffffff");
+    this.supermarketGroup.userData = { type: "supermarket" };
+    this.supermarketGroup.traverse((c) => (c.userData = { type: "supermarket" }));
+    city.add(this.supermarketGroup);
+
+    this.gymGroup = makeBuilding(8, 4.2, 5, -13, -10, 0xf97316, "🏋️ DOGGY GYM", "#9a3412", "#ffffff");
+    this.gymGroup.userData = { type: "gym" };
+    this.gymGroup.traverse((c) => (c.userData = { type: "gym" }));
+    city.add(this.gymGroup);
+
+    // ---- Skyline backdrop (north edge) ----
+    const skyline = new THREE.Group();
+    const windowCanvas = document.createElement("canvas");
+    windowCanvas.width = 64;
+    windowCanvas.height = 64;
+    const wCtx = windowCanvas.getContext("2d")!;
+    wCtx.fillStyle = "#64748b";
+    wCtx.fillRect(0, 0, 64, 64);
+    for (let y = 6; y < 60; y += 12) {
+      for (let x = 6; x < 60; x += 12) {
+        wCtx.fillStyle = Math.random() > 0.35 ? "#fde68a" : "#94a3b8";
+        wCtx.fillRect(x, y, 7, 7);
+      }
+    }
+    const windowTex = new THREE.CanvasTexture(windowCanvas);
+    windowTex.wrapS = THREE.RepeatWrapping;
+    windowTex.wrapT = THREE.RepeatWrapping;
+    for (let i = 0; i < 7; i++) {
+      const h = 7 + Math.random() * 9;
+      const tower = new THREE.Mesh(
+        new THREE.BoxGeometry(3.4, h, 3.4),
+        new THREE.MeshStandardMaterial({ map: windowTex, roughness: 0.7 })
+      );
+      tower.position.set(-21 + i * 6.5, h / 2, -24 - Math.random() * 3);
+      skyline.add(tower);
+    }
+    city.add(skyline);
+
+    // ---- Forest approach (south edge — the car drives through it) ----
+    const forestApproach = new THREE.Group();
+    for (let i = 0; i < 16; i++) {
+      const t = this.makeOneTree(0.85 + ((i * 31) % 30) / 100, i % 2 === 0);
+      const x = -18 + i * 2.4 + Math.random() * 1.2;
+      t.position.set(x, 0, 19 + Math.random() * 7);
+      forestApproach.add(t);
+    }
+    city.add(forestApproach);
+
+    // ---- Parking lot by the park entrance (the car parks here!) ----
+    const lot = new THREE.Group();
+    const lotPad = new THREE.Mesh(
+      new THREE.PlaneGeometry(7, 6.2),
+      new THREE.MeshStandardMaterial({ color: 0x4b5563, roughness: 0.95 })
+    );
+    lotPad.geometry.rotateX(-Math.PI / 2);
+    lotPad.position.y = 0.02;
+    lotPad.receiveShadow = true;
+    lot.add(lotPad);
+    // Painted white spot dividers
+    [0.7, 1.85, 3.0, 4.15].forEach((z) => {
+      const line = new THREE.Mesh(
+        new THREE.BoxGeometry(6.8, 0.01, 0.12),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+      );
+      line.position.set(0, 0.03, z);
+      lot.add(line);
+    });
+    // Little 🅿️ sign post
+    const signPole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.05, 1.8, 8),
+      new THREE.MeshStandardMaterial({ color: 0xd6d6d6, metalness: 0.6 })
+    );
+    signPole.position.set(3.6, 0.9, 5.6);
+    lot.add(signPole);
+    const signCanvas = document.createElement("canvas");
+    signCanvas.width = 96;
+    signCanvas.height = 96;
+    const pCtx = signCanvas.getContext("2d")!;
+    pCtx.fillStyle = "#1d4ed8";
+    pCtx.beginPath();
+    pCtx.roundRect(4, 4, 88, 88, 14);
+    pCtx.fill();
+    pCtx.fillStyle = "#ffffff";
+    pCtx.font = "bold 60px sans-serif";
+    pCtx.textAlign = "center";
+    pCtx.fillText("P", 48, 70);
+    const signPlate = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.7, 0.7),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(signCanvas) })
+    );
+    signPlate.position.set(3.6, 1.85, 5.6);
+    lot.add(signPlate);
+    lot.position.set(5.4, 0, 2.4);
+    this.cityGroup.add(lot);
+
+    // Warm city lighting
+    const cityLight = new THREE.PointLight(0xfff1b8, 1.4, 30);
+    cityLight.position.set(-5, 6, 1);
+    city.add(cityLight);
+  }
+
+  // ================= HOLIDAY EASTER EGGS =================
+
+  /** Apply seasonal decorations: pumpkins at Halloween, gifts + wreath at
+   *  Christmas, an American-flag cauldron on the 4th of July... */
+  public setHoliday(holiday: string) {
+    this.holiday = holiday;
+    this.applySeasonParticles(); // ❄️ Christmas snow / 🍃 spring leaves
+
+    // The kitchen cauldron becomes an American flag on the 4th of July 🇺🇸
+    const potBody = this.potGroup.getObjectByName("potBody") as THREE.Mesh | undefined;
+    if (potBody) {
+      const mat = potBody.material as THREE.MeshStandardMaterial;
+      if (holiday === "july4") {
+        const flagCanvas = document.createElement("canvas");
+        flagCanvas.width = 128;
+        flagCanvas.height = 128;
+        const f = flagCanvas.getContext("2d")!;
+        // 13 stripes
+        for (let i = 0; i < 13; i++) {
+          f.fillStyle = i % 2 === 0 ? "#B22234" : "#FFFFFF";
+          f.fillRect(0, i * 10, 128, 10);
+        }
+        // Blue canton + stars
+        f.fillStyle = "#3C3B6E";
+        f.fillRect(0, 0, 54, 70);
+        f.fillStyle = "#FFFFFF";
+        for (let r = 0; r < 5; r++) {
+          for (let c = 0; c < 6; c++) {
+            f.fillRect(6 + c * 8 + (r % 2) * 4, 7 + r * 13, 3, 3);
+          }
+        }
+        const flagTex = new THREE.CanvasTexture(flagCanvas);
+        mat.map = flagTex;
+        mat.color.setHex(0xffffff);
+        mat.needsUpdate = true;
+      } else {
+        mat.map = null;
+        mat.color.setHex(0x334155);
+        mat.needsUpdate = true;
+      }
+    }
+
+    // Rebuild the park decorations for the season
+    while (this.holidayDecorGroup.children.length) {
+      this.holidayDecorGroup.remove(this.holidayDecorGroup.children[0]);
+    }
+    this.holidayDecorGroup = new THREE.Group();
+
+    if (holiday === "halloween") {
+      // 🎃 Pumpkins along the entrance path
+      [[-1.5, 5.5], [0.5, 6.5], [2.5, 5.8]].forEach(([x, z], i) => {
+        const pumpkin = new THREE.Group();
+        const body = new THREE.Mesh(
+          new THREE.SphereGeometry(0.42, 12, 10),
+          new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.6 })
+        );
+        body.scale.set(1, 0.78, 1);
+        body.position.y = 0.33;
+        body.castShadow = true;
+        pumpkin.add(body);
+        const stem = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.06, 0.09, 0.2, 8),
+          new THREE.MeshStandardMaterial({ color: 0x166534 })
+        );
+        stem.position.y = 0.75;
+        pumpkin.add(stem);
+        // Carved face: triangle eyes + jagged grin
+        const faceMat = new THREE.MeshStandardMaterial({ color: 0xfde047, emissive: 0xfacc15, emissiveIntensity: 1.2 });
+        [-0.14, 0.14].forEach((fx) => {
+          const eye = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.14, 4), faceMat);
+          eye.rotation.x = Math.PI;
+          eye.position.set(fx, 0.42, 0.38);
+          pumpkin.add(eye);
+        });
+        const grin = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.07, 0.05), faceMat);
+        grin.position.set(0, 0.24, 0.4);
+        pumpkin.add(grin);
+        pumpkin.position.set(x, 0, z);
+        pumpkin.rotation.y = i * 0.6;
+        this.holidayDecorGroup.add(pumpkin);
+      });
+    } else if (holiday === "christmas") {
+      // 🎄 Gift boxes by the dog house door + a wreath on the front
+      const giftColors = [0xdc2626, 0x2563eb, 0x16a34a];
+      [[-6.8, -2.4], [-6.4, -3.4], [-7.4, -3.0]].forEach(([x, z], i) => {
+        const gift = new THREE.Group();
+        const box = new THREE.Mesh(
+          new THREE.BoxGeometry(0.55, 0.45, 0.55),
+          new THREE.MeshStandardMaterial({ color: giftColors[i % 3], roughness: 0.5 })
+        );
+        box.position.y = 0.23;
+        box.castShadow = true;
+        gift.add(box);
+        const ribbon = new THREE.Mesh(
+          new THREE.BoxGeometry(0.58, 0.48, 0.12),
+          new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.4 })
+        );
+        ribbon.position.y = 0.23;
+        gift.add(ribbon);
+        gift.position.set(x, 0, z);
+        gift.rotation.y = i * 0.8;
+        this.holidayDecorGroup.add(gift);
+      });
+      const wreath = new THREE.Mesh(
+        new THREE.TorusGeometry(0.42, 0.1, 10, 20),
+        new THREE.MeshStandardMaterial({ color: 0x166534, roughness: 0.8 })
+      );
+      wreath.position.set(-5, 1.7, -2.52);
+      this.holidayDecorGroup.add(wreath);
+      const bow = new THREE.Mesh(
+        new THREE.SphereGeometry(0.09, 8, 8),
+        new THREE.MeshStandardMaterial({ color: 0xdc2626 })
+      );
+      bow.position.set(-5, 1.45, -2.5);
+      this.holidayDecorGroup.add(bow);
+    } else if (holiday === "july4") {
+      // 🇺🇸 Little flag stands near the path
+      [[-2.5, 4.5], [1.5, 5.2]].forEach(([x, z]) => {
+        const flag = new THREE.Group();
+        const pole = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.03, 0.03, 1.6, 8),
+          new THREE.MeshStandardMaterial({ color: 0xd6d6d6, metalness: 0.6 })
+        );
+        pole.position.y = 0.8;
+        flag.add(pole);
+        const cloth = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.7, 0.42),
+          new THREE.MeshStandardMaterial({
+            map: this.makeUsFlagTexture(),
+            side: THREE.DoubleSide,
+          })
+        );
+        cloth.position.set(0.38, 1.35, 0);
+        flag.add(cloth);
+        flag.position.set(x, 0, z);
+        this.holidayDecorGroup.add(flag);
+      });
+    }
+
+    this.parkGroup.add(this.holidayDecorGroup);
+  }
+
+  private makeUsFlagTexture(): THREE.CanvasTexture {
+    const c = document.createElement("canvas");
+    c.width = 96;
+    c.height = 56;
+    const f = c.getContext("2d")!;
+    for (let i = 0; i < 13; i++) {
+      f.fillStyle = i % 2 === 0 ? "#B22234" : "#FFFFFF";
+      f.fillRect(0, i * 4.3, 96, 4.3);
+    }
+    f.fillStyle = "#3C3B6E";
+    f.fillRect(0, 0, 40, 30);
+    f.fillStyle = "#FFFFFF";
+    for (let r = 0; r < 4; r++) {
+      for (let col = 0; col < 5; col++) {
+        f.fillRect(4 + col * 7 + (r % 2) * 3, 4 + r * 7, 2.4, 2.4);
+      }
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    return tex;
   }
 
   private setupWalkMarker() {
@@ -2216,8 +3953,25 @@ export class ParkScene {
 
     dom.addEventListener("wheel", (e) => {
       e.preventDefault();
-      const minRadius = this.viewMode === "house" ? 3.0 : 3.5;
-      const maxRadius = this.viewMode === "house" ? 5.5 : 18.0;
+      // Zoom limits keep the camera INSIDE the room so walls never look
+      // see-through from outside (city gets a wide orbit).
+      let minRadius = 3.5;
+      let maxRadius = 18.0;
+      if (this.viewMode === "city") {
+        minRadius = 4.0;
+        maxRadius = 16.0;
+      } else if (this.viewMode === "arcade") {
+        minRadius = 3.5;
+        maxRadius = 13.0;
+      } else if (this.viewMode === "house") {
+        minRadius = 2.0;
+        maxRadius =
+          this.houseRoom === "hallway"
+            ? 3.3
+            : this.houseRoom === "upstairs"
+              ? 4.8
+              : 4.6; // living / kitchen
+      }
       this.spherical.radius = THREE.MathUtils.clamp(
         this.spherical.radius + e.deltaY * 0.008,
         minRadius,
@@ -2231,6 +3985,8 @@ export class ParkScene {
   }
 
   private handleSceneClick(clientX: number, clientY: number) {
+    // The highway ride is a pure cinematic — no world interaction mid-drive
+    if (this.viewMode === "highway") return;
     const dom = this.renderer.domElement;
     const rect = dom.getBoundingClientRect();
     const mouse = new THREE.Vector2(
@@ -2319,6 +4075,41 @@ export class ParkScene {
           const hits = raycaster.intersectObject(this.descendMesh, false);
           if (hits.length > 0) {
             if (this.onDescendClicked) this.onDescendClicked();
+            return;
+          }
+        }
+        // Cozy bedroom functionalities: bedside lamp, alarm clock, slippers
+        // + THE ARCADE MACHINE (portal to the Galaxy Arcade world!)
+        const roomHits = raycaster.intersectObject(this.upstairsGroup, true);
+        if (roomHits.length > 0) {
+          let o: THREE.Object3D | null = roomHits[0].object;
+          let clickKind = "";
+          while (o) {
+            const ty = (o.userData as { type?: string }).type;
+            if (ty === "bedlamp" || ty === "clock" || ty === "slippers" || ty === "arcade") {
+              clickKind = ty;
+              break;
+            }
+            o = o.parent;
+          }
+          if (clickKind === "bedlamp") {
+            this.toggleBedLamp();
+            return;
+          }
+          if (clickKind === "clock") {
+            this.dog.setAction("backflip", 1.6);
+            sound.playWhistle();
+            this.spawnHeartParticles(this.dog.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)));
+            return;
+          }
+          if (clickKind === "slippers") {
+            this.dog.setAction("zoomies", 3.0);
+            sound.playSqueak();
+            this.spawnHeartParticles(this.dog.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)));
+            return;
+          }
+          if (clickKind === "arcade") {
+            if (this.onArcadeClicked) this.onArcadeClicked();
             return;
           }
         }
@@ -2485,6 +4276,13 @@ export class ParkScene {
         }
       }
 
+      // C2. The little car — click it and Happy drives to the City!
+      const carHits = raycaster.intersectObject(this.carGroup, true);
+      if (carHits.length > 0) {
+        this.startCarRideToCity();
+        return;
+      }
+
       // D. Check Ground Lawn Click -> Walk to spot!
       if (this.groundMesh) {
         const groundHits = raycaster.intersectObject(this.groundMesh, false);
@@ -2493,6 +4291,69 @@ export class ParkScene {
           return;
         }
       }
+    }
+
+    // ================= GALAXY ARCADE interactivity =================
+    if (this.viewMode === "arcade") {
+      const gHits = raycaster.intersectObject(this.galaxyGroup, true);
+      if (gHits.length > 0) {
+        let o: THREE.Object3D | null = gHits[0].object;
+        let clickKind = "";
+        let gameId = "";
+        while (o) {
+          const ty = (o.userData as { type?: string; gameId?: string }).type;
+          if (ty === "arcadeGame" || ty === "arcadeExit" || ty === "arcade_floor") {
+            clickKind = ty;
+            gameId = (o.userData as { gameId?: string }).gameId || "";
+            break;
+          }
+          o = o.parent;
+        }
+        if (clickKind === "arcadeGame" && gameId) {
+          if (this.onArcadeGameSelected) this.onArcadeGameSelected(gameId);
+          return;
+        }
+        if (clickKind === "arcadeExit") {
+          if (this.onArcadeExitClicked) this.onArcadeExitClicked();
+          return;
+        }
+        if (clickKind === "arcade_floor") {
+          this.walkTo(gHits[0].point);
+          return;
+        }
+      }
+      return;
+    }
+
+    // ================= CITY MODE interactivity =================
+    if (this.viewMode === "city") {
+      // Supermarket -> shopping dash minigame
+      const marketHits = raycaster.intersectObject(this.supermarketGroup, true);
+      if (marketHits.length > 0) {
+        if (this.onSupermarketClicked) this.onSupermarketClicked();
+        return;
+      }
+      // Gym -> doggy workout minigame
+      const gymHits = raycaster.intersectObject(this.gymGroup, true);
+      if (gymHits.length > 0) {
+        if (this.onGymClicked) this.onGymClicked();
+        return;
+      }
+      // The car -> drive back home
+      const carHits = raycaster.intersectObject(this.carGroup, true);
+      if (carHits.length > 0) {
+        this.startCarRideHome();
+        return;
+      }
+      // City ground walk
+      if (this.cityGroundMesh) {
+        const groundHits = raycaster.intersectObject(this.cityGroundMesh, false);
+        if (groundHits.length > 0) {
+          this.walkTo(groundHits[0].point);
+          return;
+        }
+      }
+      return;
     }
   }
 
@@ -2506,6 +4367,23 @@ export class ParkScene {
   };
 
   private updateCameraPosition() {
+    // A zoom tween owns the camera while active (portal into machines)
+    if (this.camTween.active) return;
+    // Side view: the camera rides alongside so you clearly see the
+    // 3D car model driving from the side
+    if (this.sideCam) {
+      const c = this.carGroup.position;
+      this.camera.position.set(c.x + 15, 3.4, c.z);
+      this.camera.lookAt(c.x, 1.0, c.z);
+      return;
+    }
+    // Cinematic chase cam while riding in the car
+    if (this.cinematicCam) {
+      const c = this.carGroup.position;
+      this.camera.position.set(c.x + 4.5, 3.6, c.z + 7.5);
+      this.camera.lookAt(c.x, 0.9, c.z);
+      return;
+    }
     let target: THREE.Vector3;
     if (this.viewMode === "house") {
       target = this.cameraTarget; // Center of room
@@ -2825,6 +4703,13 @@ export class ParkScene {
    * Enter Dog House (Transitions from Park to Living Room Interior)
    */
   public enterHouse() {
+    // Guard: the dog house is NOT directly accessible from the City —
+    // you always return to the park lawn first.
+    if (this.viewMode === "city") {
+      this.exitCityInstant();
+      return;
+    }
+    if (this.viewMode === "highway" || this.viewMode === "arcade") return;
     if (this.viewMode === "house" && this.houseRoom === "living") return;
     this.viewMode = "house";
     this.houseRoom = "living";
@@ -2913,6 +4798,9 @@ export class ParkScene {
     this.kitchenGroup.visible = false;
     this.hallwayGroup.visible = false;
     this.upstairsGroup.visible = false;
+    this.cityGroup.visible = false;
+    this.galaxyGroup.visible = false;
+    this.highwayGroup.visible = false;
   }
 
   /**
@@ -2934,7 +4822,7 @@ export class ParkScene {
     this.walkTarget = null;
     this.walkTargetMarker.visible = false;
 
-    this.spherical.set(4.8, Math.PI / 3.0, 0);
+    this.spherical.set(3.3, Math.PI / 3.0, 0);
     this.cameraTarget.set(0, 0.9, 0);
     this.updateCameraPosition();
 
@@ -2961,7 +4849,7 @@ export class ParkScene {
     this.walkTarget = null;
     this.walkTargetMarker.visible = false;
 
-    this.spherical.set(7.0, Math.PI / 3.1, 0);
+    this.spherical.set(4.8, Math.PI / 3.1, 0);
     this.cameraTarget.set(0, 0.9, 0);
     this.updateCameraPosition();
 
@@ -3385,6 +5273,115 @@ export class ParkScene {
     this.setTimeOfDay(this.timeOfDay);
   }
 
+  // ---------- Seasonal ambient particles (Christmas snow / spring leaves) ----------
+
+  /** (Re)build the ambient seasonal particle field. Called on init + holiday set. */
+  private applySeasonParticles() {
+    const season = getCurrentSeason();
+    const kind: "none" | "snow" | "leaves" =
+      this.holiday === "christmas" ? "snow" : season === "spring" ? "leaves" : "none";
+    if (kind === this.seasonKind && this.seasonPoints) return;
+    this.seasonKind = kind;
+
+    if (this.seasonPoints) {
+      this.scene.remove(this.seasonPoints);
+      this.seasonPoints.geometry.dispose();
+      (this.seasonPoints.material as THREE.Material).dispose();
+      this.seasonPoints = null;
+      this.seasonVel = null;
+    }
+    if (kind === "none") return;
+
+    const count = kind === "snow" ? 420 : 260;
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    this.seasonVel = new Float32Array(count);
+    const color = new THREE.Color();
+    for (let i = 0; i < count; i++) {
+      positions[i * 3] = (Math.random() - 0.5) * 30;
+      positions[i * 3 + 1] = Math.random() * 14;
+      positions[i * 3 + 2] = (Math.random() - 0.5) * 30;
+      // Snow: white sparkle. Spring: fresh-green & pollen-yellow leaves
+      if (kind === "snow") {
+        color.setHSL(0.55, 0.1, 0.95);
+        this.seasonVel[i] = 0.9 + Math.random() * 0.8;
+      } else {
+        const leafColors = [0x4ade80, 0x86efac, 0xfde047, 0xfecaca];
+        color.setHex(leafColors[i % leafColors.length]);
+        this.seasonVel[i] = 0.5 + Math.random() * 0.5; // leaves flutter slowly
+      }
+      colors[i * 3] = color.r;
+      colors[i * 3 + 1] = color.g;
+      colors[i * 3 + 2] = color.b;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    const mat = new THREE.PointsMaterial({
+      size: kind === "snow" ? 0.12 : 0.22,
+      vertexColors: true,
+      transparent: true,
+      opacity: kind === "snow" ? 0.9 : 0.85,
+      depthWrite: false,
+    });
+    this.seasonPoints = new THREE.Points(geom, mat);
+    this.seasonPoints.frustumCulled = false;
+    this.scene.add(this.seasonPoints);
+  }
+
+  private updateSeasonParticles(delta: number, elapsed: number) {
+    if (!this.seasonPoints || this.seasonKind === "none" || !this.seasonVel) return;
+    // Ambient seasons live in the outdoor worlds (park, city & highway)
+    this.seasonPoints.visible =
+      this.viewMode === "park" || this.viewMode === "city" || this.viewMode === "highway";
+    if (!this.seasonPoints.visible) return;
+    // Keep the field centered on the dog
+    this.seasonPoints.position.set(this.dog.group.position.x, 0, this.dog.group.position.z);
+    const pos = this.seasonPoints.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const arr = pos.array as Float32Array;
+    for (let i = 0; i < this.seasonVel.length; i++) {
+      const v = this.seasonVel[i];
+      arr[i * 3 + 1] -= v * delta;
+      if (this.seasonKind === "leaves") {
+        // Fluttering leaf/pollen drift
+        arr[i * 3] += Math.sin(elapsed * 1.2 + i * 1.3) * delta * 0.7;
+        arr[i * 3 + 2] += Math.cos(elapsed * 0.9 + i * 2.1) * delta * 0.5;
+      } else {
+        // Gentle snow sway
+        arr[i * 3] += Math.sin(elapsed * 0.8 + i * 1.7) * delta * 0.3;
+      }
+      if (arr[i * 3 + 1] < 0) {
+        arr[i * 3 + 1] = 14;
+        arr[i * 3] = (Math.random() - 0.5) * 30;
+        arr[i * 3 + 2] = (Math.random() - 0.5) * 30;
+      }
+    }
+    pos.needsUpdate = true;
+  }
+
+  /**
+   * Ground tint = weather base color, gradually whitened by snowCoverage.
+   * While it snows the lawn blankets over ~90s; it melts back in ~45s.
+   */
+  private applyGroundTint() {
+    const groundMat = this.groundMesh?.material as THREE.MeshStandardMaterial | undefined;
+    if (!groundMat) return;
+    const base = this.weather === "rainy" ? this.GRASS_RAINY : this.GRASS_SUNNY;
+    groundMat.color.copy(base).lerp(this.SNOW_COLOR, this.snowCoverage);
+  }
+
+  private updateSnowCoverage(delta: number) {
+    const prev = this.snowCoverage;
+    if (this.weather === "snowy") {
+      this.snowCoverage = Math.min(1, this.snowCoverage + delta / 90);
+    } else if (this.snowCoverage > 0) {
+      this.snowCoverage = Math.max(0, this.snowCoverage - delta / 45);
+    }
+    if (this.snowCoverage !== prev) {
+      this.applyGroundTint();
+    }
+  }
+
   /** Sky / fog / light overlay for the current weather (base comes from time of day). */
   private applyWeatherOverlay() {
     const groundMat = this.groundMesh?.material as THREE.MeshStandardMaterial | undefined;
@@ -3399,7 +5396,8 @@ export class ParkScene {
         this.setSkyGradient("#5b7a94", "#a9bfae");
         this.scene.fog = new THREE.FogExp2(0x9db3bd, 0.028);
       }
-      groundMat?.color.setHex(0x9fb3a8); // damp, darker grass
+      // damp, darker grass (snow coverage still fades out on top)
+      this.applyGroundTint();
     } else if (this.weather === "snowy") {
       this.sunLight.intensity *= 0.7;
       if (night) {
@@ -3409,9 +5407,10 @@ export class ParkScene {
         this.setSkyGradient("#6ea8dc", "#dceef5");
         this.scene.fog = new THREE.FogExp2(0xdce8f2, 0.022);
       }
-      groundMat?.color.setHex(0xe8eef7); // snow-dusted lawn
+      // snow blankets the lawn gradually — see updateSnowCoverage()
+      this.applyGroundTint();
     } else {
-      groundMat?.color.setHex(0xffffff);
+      this.applyGroundTint();
     }
   }
 
@@ -3451,8 +5450,8 @@ export class ParkScene {
 
   private updatePrecipitationMotion(delta: number, elapsed: number) {
     if (!this.precipPoints || this.precipKind === "none") return;
-    // Storms stay outside — never rain inside the dog house
-    this.precipPoints.visible = this.viewMode === "park";
+    // Storms stay outside — never rain inside the dog house (highway counts as outside)
+    this.precipPoints.visible = this.viewMode === "park" || this.viewMode === "highway";
     if (!this.precipPoints.visible) return;
     // Keep the storm centered on the dog
     this.precipPoints.position.set(this.dog.group.position.x, 0, this.dog.group.position.z);
@@ -3513,22 +5512,36 @@ export class ParkScene {
   }
 
   private clampForRoom(x: number, z: number): { x: number; z: number } {
+    if (this.viewMode === "arcade") {
+      // Stay on the neon platform
+      const r = Math.hypot(x, z - 0.5);
+      if (r <= 11.5) return { x, z };
+      const k = 11.5 / r;
+      return { x: x * k, z: 0.5 + (z - 0.5) * k };
+    }
+    if (this.viewMode === "city") {
+      return {
+        x: THREE.MathUtils.clamp(x, -12.0, 13.0),
+        z: THREE.MathUtils.clamp(z, -13.0, 15.0),
+      };
+    }
     if (this.houseRoom === "hallway") {
       return {
-        x: THREE.MathUtils.clamp(x, -1.9, 1.9),
-        z: THREE.MathUtils.clamp(z, -3.9, 3.9),
+        x: THREE.MathUtils.clamp(x, -2.6, 2.6),
+        z: THREE.MathUtils.clamp(z, -5.2, 5.2),
       };
     }
     if (this.houseRoom === "upstairs") {
       return {
         x: THREE.MathUtils.clamp(x, -5.2, 5.2),
-        z: THREE.MathUtils.clamp(z, -2.7, 2.7),
+        z: THREE.MathUtils.clamp(z, -3.6, 3.6),
       };
     }
     if (this.viewMode === "house") {
+      // Living / kitchen rooms are now a comfy 10x10
       return {
-        x: THREE.MathUtils.clamp(x, -3.2, 3.2),
-        z: THREE.MathUtils.clamp(z, -3.2, 3.2),
+        x: THREE.MathUtils.clamp(x, -4.2, 4.2),
+        z: THREE.MathUtils.clamp(z, -4.2, 4.2),
       };
     }
     return {
@@ -3707,6 +5720,12 @@ export class ParkScene {
       // Stair-climb animation
       this.updateClimb(delta);
 
+      // Cinematic camera zooms (arcade portals)
+      this.updateCameraTween(delta);
+
+      // Car ride cinematic (park <-> city)
+      this.updateCarRide(delta);
+
       // Physics & Fetch AI
       this.updatePhysics(delta);
 
@@ -3721,6 +5740,12 @@ export class ParkScene {
 
       // Rain / snow weather particles
       this.updatePrecipitationMotion(delta, elapsed);
+
+      // Snow slowly blankets the lawn white while it snows
+      this.updateSnowCoverage(delta);
+
+      // Seasonal ambience: ❄️ Christmas snowfall / 🍃 spring leaves & pollen
+      this.updateSeasonParticles(delta, elapsed);
 
       // Kitchen pot steam + soup bubble animation
       if (this.kitchenGroup.visible) {

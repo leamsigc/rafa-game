@@ -67,6 +67,9 @@ export class Dog3D {
   private backRightLeg!: THREE.Group;
   private frontLeftPaw!: THREE.Mesh;
   private frontRightPaw!: THREE.Mesh;
+  // Holiday Easter-egg hats (Santa at Christmas, party hat at New Year...)
+  private holidayHatGroup: THREE.Group | null = null;
+  private currentHolidayHat: string = "none";
 
   // Segmented tail
   private tailBase!: THREE.Group;
@@ -479,6 +482,46 @@ export class Dog3D {
 
     if (this.currentAccessoryId) {
       this.setAccessory(this.currentAccessoryId);
+    }
+
+    // Rebuild the holiday hat after a breed change (headMesh was recreated)
+    this.holidayHatGroup = null;
+    if (this.currentHolidayHat !== "none") {
+      this.setHolidayHat(this.currentHolidayHat as "santa");
+    }
+  }
+
+  /**
+   * Holiday Easter-egg hat: a bobbling Santa hat at Christmas
+   * ("santa") — hidden otherwise ("none").
+   */
+  public setHolidayHat(kind: "santa" | "none") {
+    this.currentHolidayHat = kind;
+    if (!this.holidayHatGroup && kind === "santa") {
+      this.holidayHatGroup = new THREE.Group();
+      const redMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.5 });
+      const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
+      // Droopy cone cap
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.5, 14), redMat);
+      cone.position.y = 0.22;
+      cone.rotation.z = 0.28;
+      cone.castShadow = true;
+      this.holidayHatGroup.add(cone);
+      // Furry brim
+      const brim = new THREE.Mesh(new THREE.TorusGeometry(0.24, 0.07, 10, 18), whiteMat);
+      brim.rotation.x = Math.PI / 2;
+      brim.position.y = -0.03;
+      this.holidayHatGroup.add(brim);
+      // Pompom on the tip
+      const pompom = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 10), whiteMat);
+      pompom.position.set(0.14, 0.44, 0);
+      this.holidayHatGroup.add(pompom);
+      this.holidayHatGroup.position.set(0, 0.48, 0.05);
+      this.holidayHatGroup.rotation.z = 0.3;
+      this.headMesh.add(this.holidayHatGroup);
+    }
+    if (this.holidayHatGroup) {
+      this.holidayHatGroup.visible = kind === "santa";
     }
   }
 
