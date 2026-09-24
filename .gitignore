@@ -7,3 +7,4 @@ coverage/
 .env*
 !.env.example
 doghouse_scoreboard.json
+.playwright-mcp
