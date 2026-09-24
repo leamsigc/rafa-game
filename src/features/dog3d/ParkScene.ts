@@ -2533,13 +2533,16 @@ export class ParkScene {
       g.receiveShadow = true;
       hw.add(g);
     });
-    // Dense forest for the first stretch, thinning toward the city
-    for (let i = 0; i < 56; i++) {
+    // Dense forest for the first stretch, thinning toward the city.
+    // The +x side stays CLEAR — the tracking camera rides there.
+    for (let i = 0; i < 64; i++) {
       const side = i % 2 ? 1 : -1;
       const t = this.makeOneTree(0.8 + ((i * 29) % 30) / 100, i % 3 === 0);
       const z = 120 - i * 3.4 - Math.random() * 3;
       if (z < -30) continue; // no trees once the city starts
-      t.position.set(side * (7 + Math.random() * 20), 0, z);
+      // West side (-x): thick forest in the background behind the car.
+      // East side (+x, camera side): trees pushed well behind the camera.
+      t.position.set(side < 0 ? -7 - Math.random() * 20 : 17 + Math.random() * 10, 0, z);
       hw.add(t);
     }
     // City outskirts at the far (north) end: buildings rise along the road
@@ -3004,7 +3007,9 @@ export class ParkScene {
       c.userData = { type: "car" };
     });
     this.carGroup = car;
-    this.parkGroup.add(car);
+    // Scene root (NOT parkGroup): the car stays visible while the world
+    // chunks swap during the park → highway → city ride cinematic.
+    this.scene.add(car);
   }
 
   /** Click the parked car: Happy walks over, hops in, and the drive begins. */
@@ -4370,11 +4375,11 @@ export class ParkScene {
     // A zoom tween owns the camera while active (portal into machines)
     if (this.camTween.active) return;
     // Side view: the camera rides alongside so you clearly see the
-    // 3D car model driving from the side
+    // 3D car model driving from the side — close enough to enjoy it!
     if (this.sideCam) {
       const c = this.carGroup.position;
-      this.camera.position.set(c.x + 15, 3.4, c.z);
-      this.camera.lookAt(c.x, 1.0, c.z);
+      this.camera.position.set(c.x + 10.5, 3.0, c.z + 2.5);
+      this.camera.lookAt(c.x, 0.9, c.z);
       return;
     }
     // Cinematic chase cam while riding in the car
@@ -4801,6 +4806,9 @@ export class ParkScene {
     this.cityGroup.visible = false;
     this.galaxyGroup.visible = false;
     this.highwayGroup.visible = false;
+    // The car only makes sense in the outdoor worlds
+    this.carGroup.visible =
+      this.viewMode === "park" || this.viewMode === "highway" || this.viewMode === "city";
   }
 
   /**
@@ -5335,8 +5343,10 @@ export class ParkScene {
     this.seasonPoints.visible =
       this.viewMode === "park" || this.viewMode === "city" || this.viewMode === "highway";
     if (!this.seasonPoints.visible) return;
-    // Keep the field centered on the dog
-    this.seasonPoints.position.set(this.dog.group.position.x, 0, this.dog.group.position.z);
+    // Center the field on the dog — or on the car while riding (dog's inside!)
+    const riding = this.carRide.phase !== "none" && !this.dog.group.visible;
+    const center = riding ? this.carGroup.position : this.dog.group.position;
+    this.seasonPoints.position.set(center.x, 0, center.z);
     const pos = this.seasonPoints.geometry.getAttribute("position") as THREE.BufferAttribute;
     const arr = pos.array as Float32Array;
     for (let i = 0; i < this.seasonVel.length; i++) {
@@ -5763,8 +5773,8 @@ export class ParkScene {
         }
       }
 
-      // Camera follow
-      if (this.followDog) {
+      // Camera follow (and always track during car-ride cinematics)
+      if (this.followDog || this.sideCam || this.cinematicCam) {
         this.updateCameraPosition();
       }
 
