@@ -33,6 +33,8 @@ import {
   Focus,
   BookOpen,
   Flame,
+  Activity,
+  Milk,
 } from "lucide-react";
 import { DogAction, HolidayId, PetStats, HouseRoom, HouseViewMode } from "../../types/pet";
 import { DogEmotion, getEmotionMeta } from "../emotions/emotion";
@@ -40,6 +42,7 @@ import { TimeOfDay, WeatherType } from "../dog3d/ParkScene";
 import { WeatherWidget } from "./WeatherWidget";
 import dogAvatar from "../../assets/images/dog_avatar_1788547305164.jpg";
 import { SKILL_NODES } from "../skills/skillTreeData";
+import { getIllness, healthBandColor } from "../health/healthData";
 
 interface PetActionButtonsProps {
   stats: PetStats;
@@ -82,6 +85,16 @@ interface PetActionButtonsProps {
   onOpenBreedJournal?: () => void;
   /** Consecutive login days (shows the 🔥 streak chip). */
   streakDays?: number;
+  /** Opens the health system readout + medicine cabinet. */
+  onOpenHealth?: () => void;
+  /** Upstairs only: settle under the blanket with a bowl of chocolate milk. */
+  onOpenCozyRoom?: () => void;
+  /** Galaxy Arcade: reopen the on-screen game list. */
+  onOpenArcadeMenu?: () => void;
+  /** Upstairs only: enter the Galaxy Arcade from the bedroom cabinet. */
+  onOpenArcade?: () => void;
+  health?: number;
+  illnessId?: string | null;
 }
 
 interface TrickItem {
@@ -145,6 +158,12 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   onOpenPhotoMode,
   onOpenBreedJournal,
   streakDays = 1,
+  onOpenHealth,
+  onOpenCozyRoom,
+  onOpenArcadeMenu,
+  onOpenArcade,
+  health = 100,
+  illnessId = null,
 }) => {
   const unlockedSet = new Set(stats.unlockedSkills || []);
   const hasAxe = (stats.ownedTools || []).includes("axe");
@@ -154,6 +173,7 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   const isAway = isCity || isArcade; // away-from-home worlds (city & galaxy arcade)
   const isKitchen = isHouse && houseRoom === "kitchen";
   const isHallway = isHouse && houseRoom === "hallway";
+  const isBedroom = isHouse && houseRoom === "upstairs";
   const roomLabel = isArcade
     ? "🌌 Galaxy Arcade"
     : isCity
@@ -257,7 +277,7 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             </div>
 
             {/* Vitality Meters */}
-            <div className="mt-2 grid grid-cols-3 gap-2">
+            <div className="mt-2 grid grid-cols-4 gap-2">
               {/* Energy */}
               <div title={`Energy: ${stats.energy}%`}>
                 <div className="flex items-center justify-between text-[10px] font-bold text-[#386641]/90 mb-0.5">
@@ -308,6 +328,37 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
                   />
                 </div>
               </div>
+
+              {/* Health — the health system readout */}
+              <button
+                onClick={onOpenHealth}
+                title={`Health: ${Math.round(health)}%${illnessId ? " — sick, tap for medicine" : ""}`}
+                className="text-left cursor-pointer transition-opacity hover:opacity-80 disabled:cursor-default"
+                disabled={!onOpenHealth}
+              >
+                <div className="flex items-center justify-between text-[10px] font-bold text-[#386641]/90 mb-0.5">
+                  <span className="flex items-center gap-0.5">
+                    {illnessId ? (
+                      <span className="leading-none animate-pulse">
+                        {getIllness(illnessId)?.emoji}
+                      </span>
+                    ) : (
+                      <Activity className="w-2.5 h-2.5 text-[#6A994E]" />
+                    )}
+                    Health
+                  </span>
+                  <span>{Math.round(health)}%</span>
+                </div>
+                <div className="w-full h-1.5 bg-[#386641]/15 rounded-full overflow-hidden">
+                  <div
+                    className="h-full transition-all duration-300"
+                    style={{
+                      width: `${Math.max(0, Math.min(100, health))}%`,
+                      backgroundColor: healthBandColor(health),
+                    }}
+                  />
+                </div>
+              </button>
             </div>
           </div>
         </div>
@@ -677,7 +728,7 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             <ChevronDown className="w-4 h-4" />
           </button>
         </div>
-        <div className="bg-[#F2E8CF]/95 backdrop-blur-md border border-[#386641]/20 rounded-3xl p-2 sm:p-2.5 shadow-2xl shadow-[#386641]/20 grid grid-cols-3 sm:grid-cols-6 gap-2">
+        <div className="bg-[#F2E8CF]/95 backdrop-blur-md border border-[#386641]/20 rounded-3xl p-2 sm:p-2.5 shadow-2xl shadow-[#386641]/20 grid grid-cols-4 sm:grid-cols-8 gap-1.5 sm:gap-2">
           {/* 1. Feed */}
           <button
             onClick={onFeedClick}
@@ -788,17 +839,61 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
 
           {/* 6. Bed Sleep (in House) or Mini-Games (in Park) */}
           {isHouse ? (
+            isBedroom ? (
+              /* Upstairs is his room: the arcade and the cozy blanket live here. */
+              <>
+                <button
+                  id="house-bottom-arcade-button"
+                  onClick={onOpenArcade}
+                  title="Play in the Galaxy Arcade"
+                  className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-[#7c3aed] hover:bg-[#6d28d9] active:bg-[#5b21b6] text-white border border-[#a78bfa]/50 rounded-2xl shadow-md transition-all active:scale-95 group cursor-pointer"
+                >
+                  <div className="w-8 h-8 rounded-xl bg-white/20 group-hover:bg-white/30 text-white flex items-center justify-center transition-colors">
+                    <Gamepad2 className="w-4 h-4" />
+                  </div>
+                  <span className="text-xs font-black text-white">Arcade</span>
+                  <span className="text-[9px] font-bold text-purple-200 -mt-0.5">5 Games</span>
+                </button>
+                <button
+                  id="house-bottom-cozy-button"
+                  onClick={onOpenCozyRoom}
+                  title="Curl up under the blanket with a bowl of chocolate milk"
+                  className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-purple-700 hover:bg-purple-800 text-white border border-purple-500 rounded-2xl shadow-md transition-all active:scale-95 group cursor-pointer"
+                >
+                  <div className="w-8 h-8 rounded-xl bg-white/20 group-hover:bg-white/30 text-white flex items-center justify-center transition-colors">
+                    <Milk className="w-4 h-4" />
+                  </div>
+                  <span className="text-xs font-black text-white">Cozy</span>
+                  <span className="text-[9px] font-bold text-purple-200 -mt-0.5">Chocolate Milk</span>
+                </button>
+              </>
+            ) : (
+              <button
+                id="house-bottom-sleep-button"
+                onClick={onGoToBed}
+                title="Put dog to sleep in the bed for a fresh day with 100% energy"
+                className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-indigo-600 hover:bg-indigo-700 text-white border border-indigo-500 rounded-2xl shadow-md transition-all active:scale-95 group cursor-pointer"
+              >
+                <div className="w-8 h-8 rounded-xl bg-white/20 group-hover:bg-white/30 text-white flex items-center justify-center transition-colors">
+                  <Bed className="w-4 h-4" />
+                </div>
+                <span className="text-xs font-black text-white">Sleep</span>
+                <span className="text-[9px] font-bold text-indigo-200 -mt-0.5">Full Energy</span>
+              </button>
+            )
+          ) : isArcade ? (
+            /* In the Galaxy Arcade: reopen the always-available game list. */
             <button
-              id="house-bottom-sleep-button"
-              onClick={onGoToBed}
-              title="Put dog to sleep in the bed for a fresh day with 100% energy"
-              className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-indigo-600 hover:bg-indigo-700 text-white border border-indigo-500 rounded-2xl shadow-md transition-all active:scale-95 group cursor-pointer"
+              id="arcade-menu-button"
+              onClick={onOpenArcadeMenu}
+              title="Open the Galaxy Arcade game list"
+              className="flex flex-col items-center justify-center gap-1 py-2.5 px-2 bg-[#7c3aed] hover:bg-[#6d28d9] active:bg-[#5b21b6] text-white border border-[#a78bfa]/50 rounded-2xl shadow-md transition-all active:scale-95 group cursor-pointer"
             >
               <div className="w-8 h-8 rounded-xl bg-white/20 group-hover:bg-white/30 text-white flex items-center justify-center transition-colors">
-                <Bed className="w-4 h-4" />
+                <Gamepad2 className="w-4 h-4" />
               </div>
-              <span className="text-xs font-black text-white">Sleep</span>
-              <span className="text-[9px] font-bold text-indigo-200 -mt-0.5">Full Energy</span>
+              <span className="text-xs font-black text-white">Games</span>
+              <span className="text-[9px] font-bold text-purple-200 -mt-0.5">Arcade List</span>
             </button>
           ) : (
             <button

@@ -18,7 +18,7 @@ const HOLIDAYS: Record<Exclude<HolidayId, "none">, HolidayMeta> = {
     chatInstruction:
       "Today is HALLOWEEN! Start your reply with a playful 'Trick or treat!' and mention spooky pumpkin fun.",
     chatGreeting:
-      "*bounces excitedly in a tiny pumpkin-orange bandana* Trick or treat! 🎃 Woof! Happy Halloween, best friend! Got any yummy treats for a very good spooky pup?",
+      "Trick or treat! 🎃 Woof! I'm {name}! Happy Halloween! Do you have any crunchy bone treats for my trick-or-treat bucket?",
   },
   christmas: {
     id: "christmas",

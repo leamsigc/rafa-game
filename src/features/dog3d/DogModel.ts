@@ -79,6 +79,12 @@ export class Dog3D {
   // Ball attachment in mouth for fetch
   public ballInMouth!: THREE.Mesh;
 
+  /**
+   * 0 = settled and looking ahead, 1 = head fully down at the milk bowl.
+   * Driven by the cozy-room scene; read by `animateCozy`.
+   */
+  public cozySip = 0;
+
   // Visual Accessories (Bowtie, Hat, Crown, Sunglasses, Scarf, Bell)
   private accessories: Map<string, THREE.Object3D> = new Map();
   private currentAccessoryId?: string;
@@ -480,6 +486,33 @@ export class Dog3D {
     this.neckMesh.add(bellGroup);
     this.accessories.set("bell", bellGroup);
 
+    // 7. Witch Hat (Halloween special — granted free every spooky season)
+    const witchGroup = new THREE.Group();
+    witchGroup.position.set(0, 0.5, 0.05);
+    const witchMat = new THREE.MeshStandardMaterial({ color: 0x4c1d95, roughness: 0.55 });
+    const witchBrim = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.46, 0.05, 20), witchMat);
+    witchGroup.add(witchBrim);
+    const witchCone = new THREE.Mesh(new THREE.ConeGeometry(0.27, 0.62, 16), witchMat);
+    witchCone.position.y = 0.32;
+    witchCone.rotation.z = 0.18;
+    witchCone.castShadow = true;
+    witchGroup.add(witchCone);
+    const witchBand = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.29, 0.29, 0.08, 16),
+      new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.5 })
+    );
+    witchBand.position.y = 0.05;
+    witchGroup.add(witchBand);
+    const buckle = new THREE.Mesh(
+      new THREE.BoxGeometry(0.12, 0.12, 0.04),
+      new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.8, roughness: 0.25 })
+    );
+    buckle.position.set(0, 0.05, 0.29);
+    witchGroup.add(buckle);
+    witchGroup.visible = false;
+    this.headMesh.add(witchGroup);
+    this.accessories.set("witchhat", witchGroup);
+
     if (this.currentAccessoryId) {
       this.setAccessory(this.currentAccessoryId);
     }
@@ -666,6 +699,9 @@ export class Dog3D {
         break;
       case "howl":
         this.animateHowl(elapsed);
+        break;
+      case "cozy":
+        this.animateCozy(elapsed);
         break;
       default:
         this.animateIdle(elapsed);
@@ -862,6 +898,48 @@ export class Dog3D {
     const wag = Math.sin(time * 7) * 0.5;
     this.tailBase.rotation.set(0.8, wag, 0);
     this.tailMid.rotation.y = wag * 0.5;
+  }
+
+  /**
+   * The blanket pose: sitting upright and facing the camera, wrapped in a
+   * blanket so only the head, chest and front paws show. `cozySip` (0→1)
+   * lowers the head to the bowl and works the jaw for lapping.
+   */
+  private animateCozy(time: number) {
+    const sip = THREE.MathUtils.clamp(this.cozySip, 0, 1);
+    // Ease the dip so the head settles onto the milk instead of snapping.
+    const dip = sip * sip * (3 - 2 * sip);
+    const breath = Math.sin(time * 1.6);
+
+    // Upright sit, low so the blanket clears the shoulders
+    this.bodyMesh.position.y = 0.60 + breath * 0.012 - dip * 0.05;
+    this.bodyMesh.rotation.x = -0.05;
+    this.torsoMesh.scale.set(1 + breath * 0.02, 1, 1);
+
+    // Head: looking at whoever is in front of him, dropping to the bowl as he
+    // sips. Rotating +x about the head pitches the muzzle DOWN, so the dip has
+    // to increase the angle, not decrease it.
+    this.neckMesh.rotation.set(-0.14 + dip * 0.72, 0, 0);
+    this.headMesh.rotation.set(0.02 + dip * 0.26, 0, Math.sin(time * 0.7) * 0.03 * (1 - dip));
+
+    // Jaw: relaxed, then a lapping chew at the bowl
+    const lap = dip > 0.6 ? Math.abs(Math.sin(time * 11)) * 0.09 * dip : 0;
+    this.jawMesh.position.y = -0.25 - dip * 0.05 - lap;
+    this.tongueMesh.visible = dip > 0.25;
+    this.tongueMesh.position.z = 0.46 + dip * 0.04;
+
+    // Front legs braced straight under the blanket
+    this.frontLeftLeg.rotation.set(0.5, 0, 0.05);
+    this.frontRightLeg.rotation.set(0.5, 0, -0.05);
+
+    // Hind legs folded
+    this.backLeftLeg.rotation.set(1.45, 0.2, 0);
+    this.backRightLeg.rotation.set(1.45, -0.2, 0);
+
+    // Content, slow tail swish against the floor
+    const wag = Math.sin(time * 2.4) * 0.3;
+    this.tailBase.rotation.set(0.18, wag, 0);
+    this.tailMid.rotation.y = wag * 0.6;
   }
 
   private animateHandshake(time: number) {

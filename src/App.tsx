@@ -27,6 +27,7 @@ import { PetActionButtons } from "./features/hud/PetActionButtons";
 import { TreatsTray } from "./features/treats/TreatsTray";
 import { PetChatModal } from "./features/chat/PetChatModal";
 import { MiniGameSelectorModal } from "./features/minigames/MiniGameSelectorModal";
+import { ArcadeMenu } from "./features/minigames/ArcadeMenu";
 import { AgilityMiniGame } from "./features/minigames/AgilityMiniGame";
 import { TreatCatchMiniGame } from "./features/minigames/TreatCatchMiniGame";
 import { FetchMiniGame } from "./features/minigames/FetchMiniGame";
@@ -55,6 +56,27 @@ import { getCurrentHoliday, holidayBlurb } from "./features/seasonal/holidays";
 import { logDayEvent, bumpLifetime, getLifetime } from "./features/journal/dayJournal";
 import { ACHIEVEMENTS, evaluateAchievements } from "./features/achievements/achievementsData";
 import { getBoneBalance } from "./features/bonerush/boneRushData";
+import { MainMenu } from "./features/menu/MainMenu";
+import { LanguagePicker } from "./features/i18n/LanguagePicker";
+import { loadLanguage, saveLanguage, translate, type LanguageId } from "./features/i18n/i18n";
+import {
+  clampHealth,
+  getIllness,
+  getMedicine,
+  MEDICINES,
+  medicineForIllness,
+  NATURAL_HEAL_RATE,
+  rollIllness,
+  type IllnessDef,
+  type MedicineDef,
+} from "./features/health/healthData";
+import { HealthPanel } from "./features/health/HealthPanel";
+import { CozyRoom } from "./features/cozy/CozyRoom";
+import { StoryBook, type Story } from "./features/cozy/StoryBook";
+import { TabletopMenu } from "./features/tabletop/TabletopMenu";
+import { TabletopPlayView } from "./features/tabletop/TabletopPlayView";
+import type { TabletopGameId } from "./features/tabletop/tabletopData";
+import { WardrobeModal } from "./features/wardrobe/WardrobeModal";
 import { sound } from "./utils/audio";
 
 const LAYOUT_STORAGE_KEY = "doghouse_layout_v1";
@@ -118,6 +140,9 @@ const DEFAULT_STATS: PetStats = {
   energy: 85,
   happiness: 95,
   hunger: 20,
+  health: 100,
+  illness: null,
+  medicines: {},
   level: 1,
   xp: 45,
   coins: 150, // ample starting coins to explore shop, accessories & bed colors
@@ -169,6 +194,9 @@ export default function App() {
             houseToy: parsed.houseToy || DEFAULT_STATS.houseToy,
             lastInteractionAt: parsed.lastInteractionAt ?? Date.now(),
             trickProgress: parsed.trickProgress || {},
+            health: typeof parsed.health === "number" ? parsed.health : DEFAULT_STATS.health,
+            illness: parsed.illness ?? null,
+            medicines: parsed.medicines || {},
             ownedTools: parsed.ownedTools || [],
             ingredientsInventory: {
               ...DEFAULT_INGREDIENTS,
@@ -201,6 +229,8 @@ export default function App() {
   // New modals
   const [showBreedJournal, setShowBreedJournal] = useState<boolean>(false);
   const [showScoreboard, setShowScoreboard] = useState<boolean>(false);
+  // Galaxy Arcade: the on-screen game list, open by default on arrival.
+  const [showArcadeMenu, setShowArcadeMenu] = useState<boolean>(false);
   const [showBoneRushStore, setShowBoneRushStore] = useState<boolean>(false);
   const [boneRushTick, setBoneRushTick] = useState<number>(0);
   // Achievements re-evaluation tick (bumped whenever lifetime counters change)
@@ -296,6 +326,27 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimeoutRef = useRef<number | null>(null);
 
+  // Title screen: the menu shows until Start is pressed.
+  const [started, setStarted] = useState<boolean>(false);
+  const [showLanguagePicker, setShowLanguagePicker] = useState<boolean>(false);
+  const [language, setLanguage] = useState<LanguageId>(() => loadLanguage());
+
+  // Health system panel & the blanket / chocolate-milk room
+  const [showHealthPanel, setShowHealthPanel] = useState<boolean>(false);
+  const [cozyOpen, setCozyOpen] = useState<boolean>(false);
+  const [showStoryBook, setShowStoryBook] = useState<boolean>(false);
+  const [story, setStory] = useState<Story | null>(null);
+
+  // Overworld tabletop games (round table) + bedroom wardrobe (closet)
+  const [showTabletopMenu, setShowTabletopMenu] = useState<boolean>(false);
+  const [tabletopGame, setTabletopGame] = useState<TabletopGameId | null>(null);
+  const [showWardrobe, setShowWardrobe] = useState<boolean>(false);
+
+  const handleSelectLanguage = (lang: LanguageId) => {
+    setLanguage(lang);
+    saveLanguage(lang);
+  };
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
@@ -306,6 +357,64 @@ export default function App() {
 
   // Passive Bonuses Helper
   const hasSkill = (skillId: string) => stats.unlockedSkills?.includes(skillId);
+
+  /**
+   * Enter the Galaxy Arcade from the bedroom. Used by the 3D cabinet press and
+   * by the HUD button (the cabinet is off-screen from the default bedroom
+   * camera, so the button is the reliable route).
+   */
+  const handleOpenArcade = () => {
+    const scene = parkSceneRef.current;
+    if (!scene) return;
+    sound.playButtonTap();
+    scene.pulseBedroomArcade();
+    scene.zoomToBedroomArcade(() => {
+      playCartoonTransition(
+        "Zooming into the Galaxy Arcade... 🌌",
+        () => {
+          scene.enterArcadeWorld("upstairs");
+          // React must follow the scene, or the HUD keeps showing "Upstairs".
+          setViewMode("arcade");
+          setShowArcadeMenu(true);
+        },
+        "🌌 Welcome to the Galaxy Arcade! Pick a game below, or tap a cabinet in 3D!"
+      );
+    });
+  };
+
+  // ===== Galaxy Arcade: launching a game and leaving the world =====
+  // Both the 3D cabinets and the always-on ArcadeMenu route through these, so
+  // every game is reachable in one tap no matter how the player gets there.
+  const handleArcadeGameSelected = (gameId: string) => {
+    const scene = parkSceneRef.current;
+    if (!scene) return;
+    scene.zoomToArcadeGame(gameId, () => {
+      setActiveMiniGame(gameId as MiniGameType);
+      setShowArcadeMenu(false);
+      stampInteraction();
+    });
+  };
+
+  const handleArcadeExit = () => {
+    const scene = parkSceneRef.current;
+    if (!scene) return;
+    setShowArcadeMenu(false);
+    scene.zoomToObject(scene.dog.group.position.clone().set(0, 1.6, 3.6), () => {
+      playCartoonTransition(
+        "Heading home from the arcade... 🐾",
+        () => {
+          scene.exitArcadeWorld();
+          if (scene.viewMode === "house") {
+            setViewMode("house");
+            setHouseRoom("upstairs");
+          } else {
+            setViewMode("park");
+          }
+        },
+        "Back from the arcade! 🐾"
+      );
+    });
+  };
 
   // Initialize looping park ambient audio on first user gesture (gentle breeze & soft singing birds)
   useEffect(() => {
@@ -446,11 +555,53 @@ export default function App() {
           hunger: newHunger,
           energy: newEnergy,
           happiness: neglected ? Math.max(0, prev.happiness - 4) : prev.happiness,
+          ...tickHealth(prev, neglected),
         };
       });
     }, 45000);
     return () => clearInterval(timer);
   }, []);
+
+  /**
+   * Health drift for one metabolism tick: a neglected, empty, sick pup gets
+   * worse; a well-cared-for healthy one heals back toward 100.
+   */
+  const tickHealth = (prev: PetStats, neglected: boolean): Partial<PetStats> => {
+    const health = prev.health ?? 100;
+    const illness = getIllness(prev.illness);
+
+    if (illness) {
+      return {
+        health: clampHealth(health - illness.healthDrain * (neglected ? 1.6 : 1)),
+        energy: Math.max(10, prev.energy - illness.energyDrain),
+        happiness: Math.max(0, prev.happiness - illness.joyDrain),
+      };
+    }
+
+    // Well and looked after: slow natural recovery, capped at 100.
+    const wellFed = prev.hunger < 70;
+    const heal = wellFed && !neglected ? NATURAL_HEAL_RATE : 0;
+    if (heal === 0 && health >= 100) return {};
+    return { health: clampHealth(health + heal) };
+  };
+
+  /** A neglected, low-energy, or hungry pup can pick up a minor ailment. */
+  const maybeCatchIllness = (): IllnessDef | null => {
+    const scene = parkSceneRef.current;
+    // Indoors (his own room) and in bed he stays snug and well.
+    if (scene && scene.viewMode === "house" && scene.houseRoom === "upstairs") return null;
+    if (weatherRef.current === "rainy") return null;
+
+    const health = stats.health ?? 100;
+    const risk =
+      (100 - health) * 0.09 +                        // low health raises risk
+      (100 - Math.min(100, stats.energy)) * 0.04 +   // tired raises risk
+      Math.max(0, stats.hunger - 60) * 0.05 +        // empty belly raises risk
+      1.6;                                            // base chance per tick
+
+    if (Math.random() * 100 > risk) return null;
+    return rollIllness();
+  };
 
   // Persist furniture layout from edit mode
   const saveLayout = () => {
@@ -651,45 +802,13 @@ export default function App() {
     };
 
     // ---- The bedroom ARCADE MACHINE: zoom in & teleport to the Galaxy Arcade ----
-    scene.onArcadeClicked = () => {
-      scene.zoomToBedroomArcade(() => {
-        playCartoonTransition(
-          "Zooming into the Galaxy Arcade... 🌌",
-          () => {
-            scene.enterArcadeWorld("upstairs");
-          },
-          "🌌 Welcome to the Galaxy Arcade! Tap a machine to play — or the 🏠 HOME portal to leave!"
-        );
-      });
-    };
+    scene.onArcadeClicked = handleOpenArcade;
 
     // ---- Arcade machines: zoom into the screen, then the game covers the whole screen ----
-    scene.onArcadeGameSelected = (gameId) => {
-      scene.zoomToArcadeGame(gameId, () => {
-        const game = gameId as MiniGameType;
-        setActiveMiniGame(game);
-        stampInteraction();
-      });
-    };
+    scene.onArcadeGameSelected = handleArcadeGameSelected;
 
     // ---- HOME portal: back to the bedroom (or the park) ----
-    scene.onArcadeExitClicked = () => {
-      scene.zoomToObject(scene.dog.group.position.clone().set(0, 1.6, 3.6), () => {
-        playCartoonTransition(
-          "Heading home from the arcade... 🐾",
-          () => {
-            scene.exitArcadeWorld();
-            if (scene.viewMode === "house") {
-              setViewMode("house");
-              setHouseRoom("upstairs");
-            } else {
-              setViewMode("park");
-            }
-          },
-          "Back from the arcade! 🐾"
-        );
-      });
-    };
+    scene.onArcadeExitClicked = handleArcadeExit;
 
     // ---- Seasonal holiday Easter eggs ----
     scene.setHoliday(holiday);
@@ -747,7 +866,8 @@ export default function App() {
 
     scene.onBedClicked = () => {
       if (!isSleepingRef.current) {
-        handleTriggerSleep();
+        // Upstairs is his own room: the blanket opens the cozy scene first.
+        handleOpenCozyRoom();
       }
     };
 
@@ -757,6 +877,19 @@ export default function App() {
         ...prev,
         happiness: Math.min(100, prev.happiness + 8),
       }));
+    };
+
+    // ---- Overworld tabletop table -> Tabletop Games menu ----
+    scene.onTableClicked = () => {
+      sound.playButtonTap();
+      setShowTabletopMenu(true);
+    };
+
+    // ---- Bedroom closet -> slide the view into the 3D hat wardrobe ----
+    scene.onClosetClicked = () => {
+      sound.playButtonTap();
+      scene.enterWardrobeView();
+      scene.zoomToCloset(() => setShowWardrobe(true));
     };
 
     return () => {
@@ -772,6 +905,43 @@ export default function App() {
       parkSceneRef.current.dog.setCollarColor(stats.collarColor);
     }
   }, [stats.breed, stats.collarColor]);
+
+  // While the tabletop MENU or the wardrobe overlay is on top, gate the 3D
+  // scene's click handler so taps never leak into the world. During an active
+  // in-world board game the gate stays OPEN (the scene handles board taps).
+  useEffect(() => {
+    const blocked = showTabletopMenu || showWardrobe;
+    if (parkSceneRef.current) parkSceneRef.current.inputEnabled = !blocked;
+    return () => {
+      if (parkSceneRef.current) parkSceneRef.current.inputEnabled = true;
+    };
+  }, [showTabletopMenu, showWardrobe]);
+
+  /**
+   * Halloween Easter egg: on Halloween the Witch Hat is granted + equipped
+   * automatically, and saved to the wardrobe (ownedAccessories) so it can be
+   * changed into later. Granted once per year so it never clobbers a choice
+   * the player already made.
+   */
+  useEffect(() => {
+    if (holiday !== "halloween") return;
+    const year = new Date().getFullYear();
+    const flag = `doghouse_witchhat_${year}`;
+    try {
+      if (localStorage.getItem(flag)) return;
+      localStorage.setItem(flag, "1");
+    } catch {
+      // ignore
+    }
+    setStats((prev) => {
+      const owned = prev.ownedAccessories || [];
+      if (owned.includes("witchhat")) return prev;
+      return { ...prev, ownedAccessories: [...owned, "witchhat"], equippedAccessory: "witchhat" };
+    });
+    parkSceneRef.current?.dog.setAccessory("witchhat");
+    showToast("🎃 Happy Halloween! Happy is wearing a Witch Hat — saved to your Wardrobe!");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holiday]);
 
   const anyModalOpen =
     showTreatsTray ||
@@ -791,7 +961,15 @@ export default function App() {
     showBoneRushStore ||
     !!activeSecretCode ||
     !!reviewPhoto ||
-    isSleeping;
+    showHealthPanel ||
+    cozyOpen ||
+    isSleeping ||
+    showTabletopMenu ||
+    !!tabletopGame ||
+    showWardrobe;
+
+  // The title screen covers the whole app until the player hits Start.
+  const menuVisible = !started;
 
   // Keep the 3D scene's axe flag in sync with the shop purchase
   useEffect(() => {
@@ -1642,6 +1820,40 @@ export default function App() {
     }
   };
 
+  // Equip a hat from inside the bedroom closet wardrobe (with preview).
+  const handleWardrobeEquip = (accessoryId: string | undefined) => {
+    setStats((prev) => ({
+      ...prev,
+      equippedAccessory: accessoryId,
+    }));
+    parkSceneRef.current?.dog.setAccessory(accessoryId || null);
+    parkSceneRef.current?.exitWardrobeView();
+    setShowWardrobe(false);
+    showToast(
+      accessoryId
+        ? `👜 ${stats.name} is now wearing that from the closet!`
+        : `👜 Took the hat off — simple and stylish.`
+    );
+  };
+
+  // Live 3D preview while browsing the closet wardrobe (no commit).
+  const handleWardrobePreview = (accessoryId: string | undefined) => {
+    parkSceneRef.current?.dog.setAccessory(accessoryId || null);
+  };
+
+  // Step out of the closet without committing — revert to the saved hat.
+  const handleWardrobeClose = () => {
+    parkSceneRef.current?.dog.setAccessory(stats.equippedAccessory || null);
+    parkSceneRef.current?.exitWardrobeView();
+    setShowWardrobe(false);
+  };
+
+  // Leave the tabletop table entirely (close the menu AND any open game).
+  const handleLeaveTabletop = () => {
+    setShowTabletopMenu(false);
+    setTabletopGame(null);
+  };
+
   const handleBuyToy = (toy: "bone" | "duck" | "bear" | "ball", cost: number) => {
     if (cost > 0 && stats.coins < cost) {
       showToast("Not enough coins!");
@@ -1796,6 +2008,65 @@ export default function App() {
   // ===== Bone Rush store refresh helper =====
   const refreshBoneRush = () => setBoneRushTick((t) => t + 1);
 
+  // ===== Health system =====
+
+  const currentIllness = getIllness(stats.illness);
+  const health = stats.health ?? 100;
+
+  const handleUseMedicine = (medicine: MedicineDef) => {
+    const owned = stats.medicines?.[medicine.id] || 0;
+    if (owned <= 0) {
+      showToast(`No ${medicine.name} in the cabinet — buy one first. 💊`);
+      return;
+    }
+    const illness = getIllness(stats.illness);
+    const cures = illness ? medicine.cures.includes(illness.id) : false;
+    setStats((prev) => ({
+      ...prev,
+      medicines: { ...(prev.medicines || {}), [medicine.id]: owned - 1 },
+      health: clampHealth((prev.health ?? 100) + medicine.healthRestore),
+      energy: Math.min(100, prev.energy + medicine.energyRestore),
+      illness: cures ? null : prev.illness,
+      lastInteractionAt: Date.now(),
+    }));
+    sound.playCrunch();
+    stampInteraction();
+    showToast(
+      cures
+        ? `${medicine.emoji} ${medicine.name}! ${stats.name} is feeling better.`
+        : `${medicine.emoji} ${medicine.name} — health topped up.`
+    );
+  };
+
+  const handleBuyMedicine = (medicine: MedicineDef) => {
+    if (stats.coins < medicine.cost) {
+      showToast(`Not enough coins for ${medicine.name} (${medicine.cost}c).`);
+      return;
+    }
+    setStats((prev) => ({
+      ...prev,
+      coins: prev.coins - medicine.cost,
+      medicines: { ...(prev.medicines || {}), [medicine.id]: (prev.medicines?.[medicine.id] || 0) + 1 },
+    }));
+    sound.playButtonTap();
+    showToast(`Bought ${medicine.emoji} ${medicine.name} for ${medicine.cost}c.`);
+  };
+
+  /**
+   * The blanket in his own room: fade the world to black and settle him under
+   * the covers with a bowl of chocolate milk.
+   */
+  const handleOpenCozyRoom = () => {
+    setCozyOpen(true);
+    setStory(null);
+  };
+
+  const handleLeaveCozyRoom = () => {
+    setCozyOpen(false);
+    setShowStoryBook(false);
+    setStats((prev) => ({ ...prev, happiness: Math.min(100, prev.happiness + 6) }));
+  };
+
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#2d4734] font-sans">
       {/* 3D WebGL Canvas Mount Container */}
@@ -1809,7 +2080,7 @@ export default function App() {
 
 
       {/* Edit-mode touch controls (mobile friendly, no keyboard needed) */}
-      {editMode && !anyModalOpen && (
+      {editMode && !anyModalOpen && !menuVisible && (
         <EditModeBar
           selectedName={selectedEditId}
           onMove={handleEditMove}
@@ -1861,8 +2132,55 @@ export default function App() {
         />
       )}
 
+      {/* ===== Galaxy Arcade: every game one tap away ===== */}
+      {viewMode === "arcade" && !menuVisible && showArcadeMenu && !anyModalOpen && (
+        <ArcadeMenu
+          onPlay={handleArcadeGameSelected}
+          onExit={handleArcadeExit}
+          onClose={() => setShowArcadeMenu(false)}
+        />
+      )}
+
+      {/* ===== Overworld tabletop: the round table's board-game menu ===== */}
+      {showTabletopMenu && !menuVisible && (
+        <TabletopMenu
+          dogName={stats.name}
+          onSelect={(game) => {
+            setShowTabletopMenu(false);
+            parkSceneRef.current?.enterTabletopGame(game);
+            setTabletopGame(game);
+          }}
+          onClose={() => setShowTabletopMenu(false)}
+        />
+      )}
+
+      {/* ===== Overworld tabletop: in-world 3D board game ===== */}
+      {tabletopGame && !menuVisible && (
+        <TabletopPlayView
+          scene={parkSceneRef.current}
+          gameId={tabletopGame}
+          dogName={stats.name}
+          onBack={() => {
+            setTabletopGame(null);
+            setShowTabletopMenu(true);
+          }}
+        />
+      )}
+
+      {/* ===== Bedroom closet: 3D wardrobe / hat picker ===== */}
+      {showWardrobe && !menuVisible && (
+        <WardrobeModal
+          dogName={stats.name}
+          equippedAccessory={stats.equippedAccessory}
+          ownedAccessories={stats.ownedAccessories || []}
+          onPreview={handleWardrobePreview}
+          onConfirm={handleWardrobeEquip}
+          onClose={handleWardrobeClose}
+        />
+      )}
+
       {/* Interactive HUD & Actions Layer (hidden during Photo Mode) */}
-      {!photoMode && <PetActionButtons
+      {!photoMode && !menuVisible && <PetActionButtons
         stats={stats}
         emotion={emotion}
         currentAction={currentAction}
@@ -1910,6 +2228,12 @@ export default function App() {
         onOpenPhotoMode={() => { stampInteraction(); setPhotoMode(true); }}
         onOpenBreedJournal={() => setShowBreedJournal(true)}
         streakDays={streakDays}
+        onOpenHealth={() => { stampInteraction(); setShowHealthPanel(true); }}
+        onOpenCozyRoom={handleOpenCozyRoom}
+        onOpenArcadeMenu={() => setShowArcadeMenu(true)}
+        onOpenArcade={handleOpenArcade}
+        health={health}
+        illnessId={stats.illness ?? null}
       />}
 
       {/* Canine Skill Tree Modal */}
@@ -2383,6 +2707,66 @@ export default function App() {
         <SleepOverlay
           dogName={stats.name}
           onWakeUp={handleWakeUp}
+        />
+      )}
+
+      {/* ===== Title screen: "Happy" + splashes + Start + Settings ===== */}
+      {menuVisible && (
+        <MainMenu
+          language={language}
+          dogName={stats.name}
+          onStart={() => {
+            sound.playButtonTap();
+            setStarted(true);
+          }}
+          onOpenSettings={() => {
+            sound.playButtonTap();
+            setShowLanguagePicker(true);
+          }}
+        />
+      )}
+
+      {showLanguagePicker && (
+        <LanguagePicker
+          language={language}
+          onSelect={handleSelectLanguage}
+          onClose={() => setShowLanguagePicker(false)}
+        />
+      )}
+
+      {/* ===== Health system panel ===== */}
+      {showHealthPanel && !menuVisible && (
+        <HealthPanel
+          language={language}
+          health={health}
+          illnessId={stats.illness ?? null}
+          medicines={stats.medicines || {}}
+          coins={stats.coins}
+          onUseMedicine={handleUseMedicine}
+          onBuyMedicine={handleBuyMedicine}
+          onClose={() => setShowHealthPanel(false)}
+        />
+      )}
+
+      {/* ===== Blanket & chocolate milk ===== */}
+      {cozyOpen && (
+        <CozyRoom
+          language={language}
+          dogName={stats.name}
+          breed={stats.breed}
+          collarColor={stats.collarColor}
+          health={health}
+          onLeave={handleLeaveCozyRoom}
+          onReadStory={() => setShowStoryBook(true)}
+        />
+      )}
+
+      {showStoryBook && (
+        <StoryBook
+          language={language}
+          dogName={stats.name}
+          initialStory={story}
+          onClose={() => setShowStoryBook(false)}
         />
       )}
     </div>

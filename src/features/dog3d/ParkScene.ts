@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { Dog3D } from "./DogModel";
 import { DogAction, DogBreed, BedColors, HouseViewMode, HouseRoom } from "../../types/pet";
+import type { TabletopGameId } from "../tabletop/tabletopData";
 import { getCurrentSeason } from "../seasonal/holidays";
 import { sound } from "../../utils/audio";
 
@@ -23,6 +24,9 @@ export interface RoomLayout {
     r: [number, number, number];
   };
 }
+
+/** Living room footprint in world units. Floors must span at least this far. */
+const HOUSE_ROOM_SIZE = 10.0;
 
 export class ParkScene {
   private container: HTMLElement;
@@ -60,6 +64,12 @@ export class ParkScene {
   public onArrivedHome?: () => void;
   public onSupermarketClicked?: () => void;
   public onGymClicked?: () => void;
+  public onMultiplayerMachineClicked?: () => void;
+
+  // The little MULTIPLAYER machine on the path (half-spiral staircase + booth)
+  private multiplayerMachineGroup: THREE.Group = new THREE.Group();
+  private mpMachinePulse: number = 0;
+  private mpScreenMat: THREE.MeshStandardMaterial | null = null;
 
   // City buildings (clickable: supermarket + gym)
   private supermarketGroup: THREE.Group = new THREE.Group();
@@ -83,6 +93,9 @@ export class ParkScene {
   private arcadeExitGroup: THREE.Group = new THREE.Group();
   private arcadeReturnTo: "upstairs" | "park" = "upstairs";
   private arcadeFloorMesh!: THREE.Mesh;
+  /** One-shot bounce/flash when a cabinet is pressed. */
+  private arcadePulse: { target: THREE.Object3D; t: number } | null = null;
+  private arcadePulseScreens: THREE.MeshStandardMaterial[] = [];
   public onArcadeClicked?: () => void;
   public onArcadeGameSelected?: (gameId: string) => void;
   public onArcadeExitClicked?: () => void;
@@ -122,6 +135,36 @@ export class ParkScene {
   private cookBeaconGroup: THREE.Group = new THREE.Group();
   private cookBeaconVisible: boolean = false;
   public onCookBeaconClicked?: () => void;
+  // Overworld tabletop (round table + chess / tic-tac-toe / four-wins packages)
+  private tabletopTableGroup: THREE.Group = new THREE.Group();
+  public onTableClicked?: () => void;
+  // Bedroom closet (wardrobe) — press to open the hat wardrobe
+  private upstairsClosetGroup: THREE.Group = new THREE.Group();
+  public onClosetClicked?: () => void;
+  // When a full-screen React overlay (tabletop games / wardrobe) owns the
+  // screen, scene clicks are gated so board taps never leak into the world.
+  public inputEnabled: boolean = true;
+  // In-world tabletop board games (3D chess / tic-tac-toe / four-wins on the
+  // round table, played in the real garden with live fog, wind & weather).
+  public activeTabletopGame: TabletopGameId | null = null;
+  public onTabletopCell?: (payload: { r: number; c: number; col: number; g: string }) => void;
+  private tabletopBoardGroup = new THREE.Group();
+  private tabletopBoardGroupAdded = false;
+  private tabletopPackageMeshes: THREE.Object3D[] = [];
+  private tabletopChessPieces = new Map<number, THREE.Object3D>();
+  private tabletopEmojiCache = new Map<string, THREE.Texture>();
+  private tabletopTokens: {
+    mesh: THREE.Mesh;
+    vy: number;
+    restY: number;
+    bounces: number;
+    active: boolean;
+  }[] = [];
+  // Bedroom wardrobe: pin the camera on Happy for the 3D hat preview.
+  private wardrobeCamLock = false;
+  private wardrobeBackPanel: THREE.Mesh | null = null;
+  private savedDogPosBeforeTabletop: THREE.Vector3 | null = null;
+  private savedDogRotBeforeTabletop = 0;
   // Weather system (sunny / rainy / snowy)
   public weather: WeatherType = "sunny";
   public weatherSpeedFactor: number = 1.0;
@@ -278,6 +321,10 @@ export class ParkScene {
     initialLayout?: RoomLayout | null
   ) {
     this.container = container;
+
+    if (import.meta.env.DEV) {
+      (window as unknown as { __parkScene?: ParkScene }).__parkScene = this;
+    }
 
     // 1. Scene setup
     this.scene = new THREE.Scene();
@@ -503,6 +550,9 @@ export class ParkScene {
     pathMesh.receiveShadow = true;
     this.parkGroup.add(pathMesh);
 
+    // MULTIPLAYER machine: half a spiral staircase climbing to a little booth
+    this.buildMultiplayerMachine(11.4, 0, 2.5);
+
     // Dog House Exterior
     this.buildDogHouse(-5, 0, -4);
 
@@ -515,11 +565,102 @@ export class ParkScene {
     // Trees & flowering shrubs
     this.buildFlora();
 
+    // Round tabletop table with the chess / tic-tac-toe / four-wins packages
+    this.buildTabletopGames();
+
     // Agility Obstacles (Hurdles & Weave poles)
     this.buildAgilityCourse();
 
     this.parkGroup.add(this.obstaclesGroup);
     this.scene.add(this.particlesGroup);
+  }
+
+  /** Half-spiral staircase rising to a small booth: the MULTIPLAYER machine. */
+  private buildMultiplayerMachine(x: number, y: number, z: number) {
+    const g = new THREE.Group();
+    g.position.set(x, y, z);
+
+    const stepMat = new THREE.MeshStandardMaterial({ color: 0x8b5cf6, roughness: 0.5, metalness: 0.3 });
+    const railMat = new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.4, metalness: 0.5 });
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x64748b, roughness: 0.4, metalness: 0.6 });
+
+    // Central pole
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 2.6, 10), poleMat);
+    pole.position.y = 1.3;
+    pole.castShadow = true;
+    g.add(pole);
+
+    // HALF spiral: steps sweep from angle 0 to PI (only half the circle exists)
+    const radius = 0.85;
+    const steps = 7;
+    for (let i = 0; i < steps; i++) {
+      const t = i / (steps - 1);
+      const angle = Math.PI * t;
+      const step = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.1, 0.35), stepMat);
+      step.position.set(Math.cos(angle) * radius, 0.18 + t * 1.55, Math.sin(angle) * radius);
+      step.rotation.y = -angle;
+      step.castShadow = true;
+      g.add(step);
+      // little rail post on each step
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.32, 6), railMat);
+      post.position.set(Math.cos(angle) * (radius + 0.22), 0.42 + t * 1.55, Math.sin(angle) * (radius + 0.22));
+      g.add(post);
+    }
+    // Outer rail ribbon following the half-arc
+    const railCurve = new THREE.CatmullRomCurve3(
+      Array.from({ length: steps }, (_, i) => {
+        const t = i / (steps - 1);
+        const a = Math.PI * t;
+        return new THREE.Vector3(Math.cos(a) * (radius + 0.22), 0.6 + t * 1.55, Math.sin(a) * (radius + 0.22));
+      })
+    );
+    const rail = new THREE.Mesh(new THREE.TubeGeometry(railCurve, 24, 0.045, 6, false), railMat);
+    g.add(rail);
+
+    // Landing platform at the END of the half spiral (top of the arc)
+    const landing = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.12, 18), stepMat);
+    landing.position.set(-radius * 0.75, 1.85, radius * 0.75);
+    landing.castShadow = true;
+    g.add(landing);
+
+    // The little machine standing on the landing: booth + glowing screen
+    const machine = new THREE.Group();
+    machine.position.set(-radius * 0.75, 1.91, radius * 0.75);
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.5, 0.62, 0.42),
+      new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.4, metalness: 0.4 })
+    );
+    body.position.y = 0.31;
+    body.castShadow = true;
+    machine.add(body);
+    const screenMat = new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0ea5e9,
+      emissiveIntensity: 0.9,
+      roughness: 0.2,
+    });
+    this.mpScreenMat = screenMat;
+    const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.3), screenMat);
+    screen.position.set(0, 0.4, 0.215);
+    machine.add(screen);
+    // "MP" flag pole antenna with a little globe
+    const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.45, 6), poleMat);
+    antenna.position.y = 0.8;
+    machine.add(antenna);
+    const bobbin = new THREE.Mesh(
+      new THREE.SphereGeometry(0.06, 10, 10),
+      new THREE.MeshStandardMaterial({ color: 0xfacc15, emissive: 0xfacc15, emissiveIntensity: 0.5 })
+    );
+    bobbin.position.y = 1.04;
+    machine.add(bobbin);
+    g.add(machine);
+
+    g.userData = { type: "mpMachine" };
+    g.traverse((o) => {
+      o.userData = { type: "mpMachine" };
+    });
+    this.multiplayerMachineGroup = g;
+    this.parkGroup.add(g);
   }
 
   private buildDogHouse(x: number, y: number, z: number) {
@@ -584,6 +725,445 @@ export class ParkScene {
     });
 
     this.parkGroup.add(house);
+  }
+
+  /**
+   * Overworld tabletop: a round pedestal table (one central column that
+   * splits into four splayed legs) with three board-game packages laid on
+   * top — Chess (rectangle), Tic-Tac-Toe (small square) and Four-in-a-Row
+   * (wider rectangle). Clicking it opens the Tabletop Games menu.
+   */
+  private buildTabletopGames() {
+    const g = this.tabletopTableGroup;
+    g.clear();
+    g.position.set(-2.7, 0, -1.7);
+
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.7 });
+    const darkWoodMat = new THREE.MeshStandardMaterial({ color: 0x7c2d12, roughness: 0.7 });
+
+    // Round tabletop
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(0.78, 0.76, 0.1, 28), woodMat);
+    top.position.y = 1.02;
+    top.castShadow = true;
+    top.receiveShadow = true;
+    g.add(top);
+
+    // Central column running down from the middle of the top
+    const column = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.11, 0.72, 14), darkWoodMat);
+    column.position.y = 0.6;
+    column.castShadow = true;
+    g.add(column);
+
+    // The column splits into four splayed legs at the bottom
+    const strut = (dx: number, dz: number) => {
+      const a = new THREE.Vector3(0, 0.34, 0);
+      const b = new THREE.Vector3(dx, 0, dz);
+      const dir = new THREE.Vector3().subVectors(b, a);
+      const len = dir.length();
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.05, len, 10), darkWoodMat);
+      leg.position.copy(a).addScaledVector(dir, 0.5);
+      leg.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+      leg.castShadow = true;
+      g.add(leg);
+      // Little foot pad where the leg meets the ground
+      const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.05, 10), woodMat);
+      foot.position.set(dx, 0.02, dz);
+      g.add(foot);
+    };
+    strut(0.42, 0.42);
+    strut(-0.42, 0.42);
+    strut(0.42, -0.42);
+    strut(-0.42, -0.42);
+
+    // --- The three board-game packages on the tabletop ---
+    const surf = 1.07; // tabletop surface height
+    const addPackage = (
+      w: number,
+      d: number,
+      h: number,
+      x: number,
+      z: number,
+      color: number,
+      accent: number
+    ) => {
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.5 })
+      );
+      body.position.set(x, surf + h / 2, z);
+      body.castShadow = true;
+      g.add(body);
+      const lid = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.86, 0.02, d * 0.86),
+        new THREE.MeshStandardMaterial({ color: accent, roughness: 0.4 })
+      );
+      lid.position.set(x, surf + h + 0.012, z);
+      lid.rotation.y = 0.02;
+      g.add(lid);
+      this.tabletopPackageMeshes.push(body, lid);
+    };
+
+    // 1. Chess — a rectangle box
+    addPackage(0.5, 0.36, 0.1, -0.22, 0.04, 0x334155, 0xe2e8f0);
+    // 2. Tic-Tac-Toe — a small square box
+    addPackage(0.26, 0.26, 0.08, 0.18, 0.3, 0xf59e0b, 0xfffbeb);
+    // 3. Four-in-a-Row — a bigger rectangle, a touch longer than it is wide
+    addPackage(0.52, 0.4, 0.11, 0.04, -0.34, 0x2563eb, 0xfde68a);
+
+    // Tag the whole table (top + column + legs + packages) as one clickable.
+    g.userData = { type: "tabletopgames" };
+    g.traverse((c) => (c.userData = { type: "tabletopgames" }));
+    this.parkGroup.add(g);
+  }
+
+  /** Bedroom wardrobe: the closet that opens into the hat wardrobe view. */
+  private buildUpstairsCloset() {
+    const g = this.upstairsClosetGroup;
+    g.clear();
+    g.position.set(-5.7, 0, 2.3);
+
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x78350f, roughness: 0.65 });
+    const doorMat = new THREE.MeshStandardMaterial({ color: 0xa16207, roughness: 0.55 });
+
+    // Carcass + cornice
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.62, 2.3, 1.3), bodyMat);
+    body.position.y = 1.15;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const cornice = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.1, 1.42), bodyMat);
+    cornice.position.y = 2.35;
+    g.add(cornice);
+
+    // Two front doors that face into the room (+X), with golden handles
+    [-0.34, 0.34].forEach((dz) => {
+      const door = new THREE.Mesh(new THREE.BoxGeometry(0.06, 2.0, 0.6), doorMat);
+      door.position.set(0.34, 1.15, dz);
+      door.castShadow = true;
+      g.add(door);
+      const handle = new THREE.Mesh(
+        new THREE.SphereGeometry(0.05, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.8, roughness: 0.25 })
+      );
+      handle.position.set(0.38, 1.15, dz - (dz > 0 ? -0.22 : 0.22));
+      g.add(handle);
+    });
+
+    // Tag the closet as a single clickable wardrobe.
+    g.userData = { type: "closet" };
+    g.traverse((c) => (c.userData = { type: "closet" }));
+    this.upstairsGroup.add(g);
+  }
+
+  // =====================================================================
+  //  In-world tabletop games — 3D boards laid on the round table, played in
+  //  the live garden (real fog, wind & weather). You stand on the near side
+  //  (invisible), Happy waits across the table.
+  // =====================================================================
+  private readonly TT_TABLE = new THREE.Vector3(-2.7, 0, -1.7);
+  private readonly TT_CAM_POS = new THREE.Vector3(-2.7, 1.75, 0.85);
+  private readonly TT_CAM_LOOK = new THREE.Vector3(-2.7, 0.9, -3.0);
+  private readonly TT_HAPPY = new THREE.Vector3(-2.7, 0, -3.15);
+
+  /** Render an emoji / glyph to a canvas texture for 3D board pieces. */
+  private emojiTexture(char: string, tint = ""): THREE.Texture {
+    const key = char + tint;
+    const cached = this.tabletopEmojiCache.get(key);
+    if (cached) return cached;
+    const size = 128;
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext("2d")!;
+    ctx.clearRect(0, 0, size, size);
+    ctx.font = `${tint} ${size * 0.8}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(char, size / 2, size * 0.54);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    this.tabletopEmojiCache.set(key, tex);
+    return tex;
+  }
+
+  private ttPiecePlane(char: string, w: number): THREE.Mesh {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, w),
+      new THREE.MeshBasicMaterial({ map: this.emojiTexture(char), transparent: true })
+    );
+    m.rotation.x = -Math.PI / 2; // lie flat, face up toward the player
+    return m;
+  }
+
+  private ttFlatCell(w: number, d: number, color: number, extra = 0.02): THREE.Mesh {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, d),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.6 })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.position.y += extra;
+    return m;
+  }
+
+  private clearTabletopBoard() {
+    const g = this.tabletopBoardGroup;
+    g.clear();
+    this.tabletopChessPieces.clear();
+    this.tabletopTokens.length = 0;
+  }
+
+  private setTabletopPackagesVisible(v: boolean) {
+    this.tabletopPackageMeshes.forEach((m) => (m.visible = v));
+  }
+
+  /** Enter an in-world tabletop game: build the board, seat Happy, focus cam. */
+  public enterTabletopGame(gameId: TabletopGameId, onReady?: () => void) {
+    this.activeTabletopGame = gameId;
+    if (!this.savedDogPosBeforeTabletop) {
+      this.savedDogPosBeforeTabletop = this.dog.group.position.clone();
+      this.savedDogRotBeforeTabletop = this.dog.group.rotation.y;
+    }
+    if (!this.tabletopBoardGroupAdded) {
+      this.parkGroup.add(this.tabletopBoardGroup);
+      this.tabletopBoardGroupAdded = true;
+    }
+    this.tabletopBoardGroup.position.set(this.TT_TABLE.x, 1.07, this.TT_TABLE.z);
+    this.tabletopBoardGroup.visible = true;
+    this.setTabletopPackagesVisible(false);
+    this.clearTabletopBoard();
+
+    // Seat Happy across the table, facing the player side (+Z).
+    this.dog.group.position.copy(this.TT_HAPPY);
+    this.dog.group.rotation.y = 0;
+    this.dog.group.scale.setScalar(1);
+
+    if (gameId === "tictactoe") this.buildTicTacToe3D();
+    else if (gameId === "chess") this.buildChess3D();
+    else this.buildConnectFour3D();
+
+    setTimeout(() => onReady && onReady(), 2000);
+  }
+
+  public exitTabletopGame() {
+    this.activeTabletopGame = null;
+    this.tabletopBoardGroup.visible = false;
+    this.clearTabletopBoard();
+    this.setTabletopPackagesVisible(true);
+    this.onTabletopCell = undefined;
+    if (this.savedDogPosBeforeTabletop) {
+      this.dog.group.position.copy(this.savedDogPosBeforeTabletop);
+      this.dog.group.rotation.y = this.savedDogRotBeforeTabletop;
+      this.dog.setAction("idle", 0.5);
+      this.savedDogPosBeforeTabletop = null;
+    }
+  }
+
+  private buildTicTacToe3D() {
+    const g = this.tabletopBoardGroup;
+    const slab = new THREE.Mesh(
+      new THREE.BoxGeometry(0.74, 0.03, 0.74),
+      new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.7 })
+    );
+    slab.position.y = 0.015;
+    slab.receiveShadow = true;
+    g.add(slab);
+    for (let r = 0; r < 3; r++)
+      for (let c = 0; c < 3; c++) {
+        const pad = this.ttFlatCell(0.2, 0.2, (r + c) % 2 ? 0xfde68a : 0xfef3c7, 0.03);
+        pad.position.set((c - 1) * 0.225, 0, (r - 1) * 0.225);
+        pad.userData = { type: "tabletopCell", g: "ttt", r, c, col: c };
+        g.add(pad);
+      }
+  }
+
+  public tttPlace(r: number, c: number, who: 0 | 1, you: string, happy: string) {
+    const mesh = this.ttPiecePlane(who === 0 ? you : happy, 0.24);
+    mesh.position.set((c - 1) * 0.225, 0.075, (r - 1) * 0.225);
+    mesh.userData = { tabletopPiece: true, r, c };
+    (mesh.material as THREE.MeshBasicMaterial).opacity = 0;
+    this.tabletopBoardGroup.add(mesh);
+    // rise-in as Happy "builds" it
+    let t = 0;
+    const rise = () => {
+      t += 0.06;
+      const s = Math.min(1, t);
+      mesh.scale.setScalar(0.4 + s * 0.6);
+      (mesh.material as THREE.MeshBasicMaterial).opacity = s;
+      if (s < 1) requestAnimationFrame(rise);
+    };
+    rise();
+  }
+
+  private buildChess3D() {
+    const g = this.tabletopBoardGroup;
+    const slab = new THREE.Mesh(
+      new THREE.BoxGeometry(0.94, 0.03, 0.94),
+      new THREE.MeshStandardMaterial({ color: 0x5b3a1e, roughness: 0.7 })
+    );
+    slab.position.y = 0.015;
+    slab.receiveShadow = true;
+    g.add(slab);
+    const size = 0.1125;
+    for (let r = 0; r < 8; r++)
+      for (let c = 0; c < 8; c++) {
+        const sq = this.ttFlatCell(size, size, (r + c) % 2 ? 0x8d5524 : 0xf0d9b5, 0.03);
+        sq.position.set((c - 3.5) * (size + 0.004), 0, (r - 3.5) * (size + 0.004));
+        sq.userData = { type: "tabletopCell", g: "chess", r, c, col: c };
+        g.add(sq);
+      }
+    const back: string[] = ["r", "n", "b", "q", "k", "b", "n", "r"];
+    const glyphsW: Record<string, string> = { r: "♖", n: "♘", b: "♗", q: "♕", k: "♔", p: "♙" };
+    const glyphsB: Record<string, string> = { r: "♜", n: "♞", b: "♝", q: "♛", k: "♚", p: "♟" };
+    const put = (r: number, c: number, t: string, who: 0 | 1) => {
+      const mesh = this.ttPiecePlane(who === 0 ? glyphsW[t] : glyphsB[t], 0.13);
+      mesh.position.set((c - 3.5) * (size + 0.004), 0.075, (r - 3.5) * (size + 0.004));
+      mesh.userData = { tabletopPiece: true, r, c };
+      g.add(mesh);
+      this.tabletopChessPieces.set(r * 8 + c, mesh);
+    };
+    for (let c = 0; c < 8; c++) {
+      put(0, c, back[c], 1);
+      put(1, c, "p", 1);
+      put(6, c, "p", 0);
+      put(7, c, back[c], 0);
+    }
+  }
+
+  /** chessMove: move a piece (optionally capturing the one on `to`). */
+  public chessMove(frR: number, frC: number, toR: number, toC: number, captured: boolean) {
+    const frIdx = frR * 8 + frC;
+    const toIdx = toR * 8 + toC;
+    const mesh = this.tabletopChessPieces.get(frIdx);
+    if (!mesh) return;
+    if (captured) {
+      const capMesh = this.tabletopChessPieces.get(toIdx);
+      if (capMesh) {
+        this.tabletopBoardGroup.remove(capMesh);
+        this.tabletopChessPieces.delete(toIdx);
+      }
+    }
+    const size = 0.1125;
+    mesh.position.set((toC - 3.5) * (size + 0.004), 0.075, (toR - 3.5) * (size + 0.004));
+    (mesh.userData as { r: number; c: number }).r = toR;
+    (mesh.userData as { r: number; c: number }).c = toC;
+    this.tabletopChessPieces.delete(frIdx);
+    this.tabletopChessPieces.set(toIdx, mesh);
+  }
+
+  private buildConnectFour3D() {
+    const g = this.tabletopBoardGroup;
+    const slab = new THREE.Mesh(
+      new THREE.BoxGeometry(0.98, 0.04, 0.72),
+      new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.5 })
+    );
+    slab.position.y = 0.02;
+    slab.receiveShadow = true;
+    g.add(slab);
+    for (let r = 0; r < 6; r++)
+      for (let c = 0; c < 7; c++) {
+        const hole = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.05, 0.05, 0.05, 14),
+          new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.9 })
+        );
+        hole.position.set((c - 3) * 0.125, 0.03, (r - 2.5) * 0.1);
+        hole.userData = { type: "tabletopCell", g: "c4", r, c, col: c };
+        g.add(hole);
+      }
+  }
+
+  /** Drop a connect-four token with a gravity fall + little bounce. */
+  public c4Drop(col: number, row: number, who: 0 | 1) {
+    const geo = new THREE.CylinderGeometry(0.055, 0.055, 0.05, 18);
+    const mat = new THREE.MeshStandardMaterial({
+      color: who === 0 ? 0xef4444 : 0xfacc15,
+      roughness: 0.35,
+      emissive: who === 0 ? 0x7f1d1d : 0x854d0e,
+      emissiveIntensity: 0.2,
+    });
+    const disc = new THREE.Mesh(geo, mat);
+    disc.castShadow = true;
+    const restY = 0.085;
+    disc.position.set((col - 3) * 0.125, 0.95, (row - 2.5) * 0.1);
+    disc.userData = { tabletopPiece: true, r: row, c: col };
+    this.tabletopBoardGroup.add(disc);
+    this.tabletopTokens.push({ mesh: disc, vy: 0, restY, bounces: 0, active: true });
+  }
+
+  private updateTabletopTokens(delta: number) {
+    for (const t of this.tabletopTokens) {
+      if (!t.active) continue;
+      t.vy -= 9.5 * delta;
+      t.mesh.position.y += t.vy * delta;
+      if (t.mesh.position.y <= t.restY) {
+        t.mesh.position.y = t.restY;
+        if (Math.abs(t.vy) > 1.1) {
+          t.vy = -t.vy * 0.42; // bounce
+          t.bounces += 1;
+        } else {
+          t.vy = 0;
+          t.active = false;
+          t.mesh.position.y = t.restY;
+        }
+        if (t.bounces > 3) {
+          t.vy = 0;
+          t.active = false;
+          t.mesh.position.y = t.restY;
+        }
+      }
+    }
+  }
+
+  /** Flash the winning line of pieces across the board. */
+  public tabletopHighlight(cells: { r: number; c: number }[]) {
+    const set = new Set(cells.map(({ r, c }) => `${r}-${c}`));
+    this.tabletopBoardGroup.children.forEach((ch) => {
+      const ud = ch.userData as { tabletopPiece?: boolean; r?: number; c?: number };
+      if (ud.tabletopPiece && ud.r != null && ud.c != null) {
+        const mat = (ch as THREE.Mesh).material as THREE.MeshStandardMaterial;
+        if (mat && set.has(`${ud.r}-${ud.c}`) && mat.emissive) {
+          mat.emissive = new THREE.Color(0xffffff);
+          mat.emissiveIntensity = 0.7;
+        }
+      }
+    });
+  }
+
+  // ===== Bedroom wardrobe: live 3D dog preview via the real model =====
+  private wardSavedDogPos = new THREE.Vector3();
+  private wardSavedCamPos = new THREE.Vector3();
+  private wardSavedLook = new THREE.Vector3();
+
+  public enterWardrobeView(onReady?: () => void) {
+    this.wardrobeCamLock = true;
+    this.wardSavedDogPos.copy(this.dog.group.position);
+    this.wardSavedCamPos.copy(this.camera.position);
+    // Stand Happy just in front of the open closet, facing the room.
+    this.dog.group.position.set(-4.5, 0, 2.3);
+    this.dog.group.rotation.y = Math.PI / 2; // face +X (out of the closet)
+    this.dog.setAction("idle", 0.5);
+    // Blue back-panel so the closet interior reads blue behind Happy.
+    if (!this.wardrobeBackPanel) {
+      this.wardrobeBackPanel = new THREE.Mesh(
+        new THREE.PlaneGeometry(3, 3),
+        new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 1 })
+      );
+      this.wardrobeBackPanel.rotation.y = Math.PI / 2;
+      this.upstairsGroup.add(this.wardrobeBackPanel);
+    }
+    this.wardrobeBackPanel.position.set(-5.9, 1.5, 2.3);
+    this.wardrobeBackPanel.visible = true;
+    setTimeout(() => onReady && onReady(), 700);
+  }
+
+  public exitWardrobeView() {
+    this.wardrobeCamLock = false;
+    if (this.wardrobeBackPanel) this.wardrobeBackPanel.visible = false;
+    this.dog.group.position.copy(this.wardSavedDogPos);
+    this.dog.setAction("idle", 0.5);
+  }
+
+  public wardrobeViewReady() {
+    return this.wardrobeCamLock;
   }
 
   private buildBowls(x: number, y: number, z: number) {
@@ -848,7 +1428,9 @@ export class ParkScene {
     this.houseGroup.clear();
 
     // 1. Hardwood Flooring
-    const floorGeom = new THREE.PlaneGeometry(8.4, 8.4);
+    // Sized to the room and pushed slightly under the walls, otherwise the
+    // sky shows through the gap at the skirting and reads as a white void.
+    const floorGeom = new THREE.PlaneGeometry(HOUSE_ROOM_SIZE + 0.6, HOUSE_ROOM_SIZE + 0.6);
     floorGeom.rotateX(-Math.PI / 2);
     const floorCanvas = document.createElement("canvas");
     floorCanvas.width = 512;
@@ -901,8 +1483,8 @@ export class ParkScene {
     // Bigger, cozier rooms with solid walls (DoubleSide so nothing ever
     // looks see-through when the camera grazes a wall).
     const wallHeight = 4.0;
-    const roomWidth = 10.0;
-    const roomDepth = 10.0;
+    const roomWidth = HOUSE_ROOM_SIZE;
+    const roomDepth = HOUSE_ROOM_SIZE;
 
     const wallMat = new THREE.MeshStandardMaterial({
       color: 0xfef3c7,
@@ -2253,6 +2835,9 @@ export class ParkScene {
     // The dog bed lives upstairs now
     this.setupDogBed();
 
+    // Wardrobe closet (opens the hat wardrobe from inside the closet)
+    this.buildUpstairsCloset();
+
     // Little dresser with drawers — grouped so edit mode can move it
     this.upstairsDresserGroup = new THREE.Group();
     this.upstairsDresserGroup.position.set(4.9, 0, -4.05);
@@ -2790,9 +3375,20 @@ export class ParkScene {
       const mz = -Math.cos(angle) * radius * 0.75 - 2.2;
       machine.position.set(mx, 0.4, mz);
       machine.rotation.y = Math.atan2(-mx, -mz) + Math.PI;
+      machine.userData = { type: "arcadeGame", gameId: game.id, baseY: 0.4 };
       this.arcadeMachines.push(machine);
       this.arcadeMachinePos[game.id] = new THREE.Vector3(mx, 1.4, mz);
       galaxy.add(machine);
+
+      // Generous invisible hit proxy so the cabinet is easy to press even
+      // from a distance or at a grazing camera angle.
+      const proxy = new THREE.Mesh(
+        new THREE.BoxGeometry(3.2, 4.4, 3.2),
+        new THREE.MeshBasicMaterial({ visible: false })
+      );
+      proxy.position.y = 1.9;
+      proxy.userData = { type: "arcadeGame", gameId: game.id };
+      machine.add(proxy);
     });
 
     // ---- HOME portal (exit pedestal) ----
@@ -2836,6 +3432,14 @@ export class ParkScene {
     this.arcadeExitGroup.traverse((c) => {
       c.userData = { type: "arcadeExit" };
     });
+    // Fat invisible hit area so the HOME portal is easy to grab.
+    const exitProxy = new THREE.Mesh(
+      new THREE.BoxGeometry(4.2, 4.6, 4.2),
+      new THREE.MeshBasicMaterial({ visible: false })
+    );
+    exitProxy.position.y = 1.9;
+    exitProxy.userData = { type: "arcadeExit" };
+    this.arcadeExitGroup.add(exitProxy);
     galaxy.add(this.arcadeExitGroup);
 
     // ---- Neon lighting ----
@@ -2903,6 +3507,66 @@ export class ParkScene {
     sound.playLightSwitch();
   }
 
+  /**
+   * The bedroom cabinet sits against the right-hand wall, which puts it
+   * off-screen from the default bedroom camera — so the HUD button has to be
+   * able to trigger it too. Bounce + flash it so the press is acknowledged
+   * whichever way the player entered.
+   */
+  public pulseBedroomArcade() {
+    this.pulseArcadeCabinet(this.bedroomArcadeGroup);
+  }
+
+  /** True while the camera is close enough to the bedroom cabinet to click it. */
+  public isBedroomArcadeOnScreen(): boolean {
+    return this.viewMode === "house" && this.houseRoom === "upstairs";
+  }
+
+  /**
+   * Give an arcade cabinet a visible "you pressed me" reaction: the cabinet
+   * hops and its screen flashes. Without this the press reads as a no-op.
+   */
+  public pulseArcadeCabinet(machine: THREE.Object3D | null | undefined) {
+    if (!machine) return;
+    const baseY = machine.userData?.baseY;
+    if (typeof baseY !== "number") {
+      machine.userData.baseY = machine.position.y;
+    }
+    this.arcadePulse = { target: machine, t: 0 };
+    const screens = this.findEmissiveScreens(machine);
+    for (const s of screens) s.emissiveIntensity = 3.4;
+    this.arcadePulseScreens = screens;
+  }
+
+  private findEmissiveScreens(machine: THREE.Object3D): THREE.MeshStandardMaterial[] {
+    const out: THREE.MeshStandardMaterial[] = [];
+    machine.traverse((c) => {
+      const mesh = c as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      if (mat && mat.emissive && mat.emissiveIntensity > 0.5) out.push(mat);
+    });
+    return out;
+  }
+
+  private updateArcadePulse(delta: number) {
+    if (!this.arcadePulse) return;
+    this.arcadePulse.t += delta;
+    const k = Math.min(1, this.arcadePulse.t / 0.55);
+    const { target } = this.arcadePulse;
+    const baseY = typeof target.userData?.baseY === "number" ? target.userData.baseY : target.position.y;
+    // A quick two-hop bounce that settles back down.
+    const hop = Math.sin(k * Math.PI * 2) * (1 - k) * 0.28;
+    target.position.y = baseY + hop;
+    for (const s of this.arcadePulseScreens) s.emissiveIntensity = 1.4 + (1 - k) * 2.0;
+    if (k >= 1) {
+      target.position.y = baseY;
+      for (const s of this.arcadePulseScreens) s.emissiveIntensity = 1.4;
+      this.arcadePulse = null;
+      this.arcadePulseScreens = [];
+    }
+  }
+
   /** Smooth cinematic zoom toward a point in the world (portal effect). */
   public zoomToObject(target: THREE.Vector3, onDone?: () => void) {
     const dir = new THREE.Vector3().subVectors(this.camera.position, target);
@@ -2922,6 +3586,14 @@ export class ParkScene {
 
   public zoomToBedroomArcade(onDone?: () => void) {
     this.zoomToObject(new THREE.Vector3(4.55, 1.5, 2.2), onDone);
+  }
+
+  /** Zoom the camera up to the bedroom closet for the wardrobe. */
+  public zoomToCloset(onDone?: () => void) {
+    const p = this.upstairsClosetGroup.position.clone();
+    p.y = 1.3;
+    p.x += 0.4; // nudge toward the room so the camera isn't inside the wall
+    this.zoomToObject(p, onDone);
   }
 
   public zoomToArcadeGame(gameId: string, onDone?: () => void) {
@@ -3992,6 +4664,8 @@ export class ParkScene {
   private handleSceneClick(clientX: number, clientY: number) {
     // The highway ride is a pure cinematic — no world interaction mid-drive
     if (this.viewMode === "highway") return;
+    // A full-screen React overlay (tabletop games / wardrobe) is on top.
+    if (!this.inputEnabled) return;
     const dom = this.renderer.domElement;
     const rect = dom.getBoundingClientRect();
     const mouse = new THREE.Vector2(
@@ -4001,6 +4675,28 @@ export class ParkScene {
 
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, this.camera);
+
+    // In-world tabletop play: only board cells respond — tapping empty space
+    // or Happy across the table must NOT walk / pet during a game.
+    if (this.activeTabletopGame) {
+      const cellHits = raycaster.intersectObject(this.tabletopBoardGroup, true);
+      for (const hit of cellHits) {
+        let o: THREE.Object3D | null = hit.object;
+        while (o) {
+          const ud = o.userData as {
+            type?: string; r?: number; c?: number; col?: number; g?: string; tabletopPiece?: boolean;
+          };
+          if (ud.r != null && ud.c != null && (ud.type === "tabletopCell" || ud.tabletopPiece)) {
+            if (this.onTabletopCell) {
+              this.onTabletopCell({ r: ud.r, c: ud.c, col: ud.col ?? ud.c, g: ud.g || "" });
+            }
+            return;
+          }
+          o = o.parent;
+        }
+      }
+      return; // swallow the click during tabletop play
+    }
 
     // 1. Check Dog Click (Petting with heart particles)
     const dogIntersects = raycaster.intersectObject(this.dog.group, true);
@@ -4091,7 +4787,16 @@ export class ParkScene {
           let clickKind = "";
           while (o) {
             const ty = (o.userData as { type?: string }).type;
-            if (ty === "bedlamp" || ty === "clock" || ty === "slippers" || ty === "arcade") {
+            // The bedroom cabinet is built by makeArcadeMachine(), so it carries
+            // "arcadeGame" — accept both tags or the click silently does nothing.
+            if (
+              ty === "bedlamp" ||
+              ty === "clock" ||
+              ty === "slippers" ||
+              ty === "closet" ||
+              ty === "arcade" ||
+              ty === "arcadeGame"
+            ) {
               clickKind = ty;
               break;
             }
@@ -4113,7 +4818,13 @@ export class ParkScene {
             this.spawnHeartParticles(this.dog.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)));
             return;
           }
-          if (clickKind === "arcade") {
+          if (clickKind === "closet") {
+            // Open the hat wardrobe — React focuses the closet then shows it.
+            if (this.onClosetClicked) this.onClosetClicked();
+            return;
+          }
+          if (clickKind === "arcade" || clickKind === "arcadeGame") {
+            this.pulseArcadeCabinet(this.bedroomArcadeGroup);
             if (this.onArcadeClicked) this.onArcadeClicked();
             return;
           }
@@ -4227,8 +4938,9 @@ export class ParkScene {
           return;
         }
       }
-    } else {
-      // 3. Park Mode Interactivity
+    } else if (this.viewMode === "park") {
+      // 3. Park Mode Interactivity — scoped to the overworld ONLY so city &
+      // galaxy taps can never interact with (e.g. hit) the shared park trees.
       // Edit mode in the park: tap trees / bowls / hurdles to move them
       if (this.editMode) {
         const picked = this.pickEditable(mouse);
@@ -4259,20 +4971,18 @@ export class ParkScene {
           return;
         }
       }
-      // B. Choppable trees (needs the axe from the shop)
-      const treeHits = raycaster.intersectObjects(this.treeGroups.filter((_, i) => this.treeData[i]?.alive), true);
-      if (treeHits.length > 0) {
-        let o: THREE.Object3D | null = treeHits[0].object;
-        while (o) {
-          const tid = (o.userData as { treeId?: string }).treeId;
-          if (tid) {
-            this.chopTree(tid);
-            return;
-          }
-          o = o.parent;
-        }
+      // B. Trees are now pure scenery — they can no longer be chopped down
+      // (neither here in the overworld nor anywhere else; hidden park trees
+      // can never be hit from the city/galaxy since this block is now
+      // scoped to the overworld only).
+      // C. The tabletop games table — checked FIRST: it sits just in front of
+      // the dog house, so its roof would otherwise swallow the tap.
+      const tableHits = raycaster.intersectObject(this.tabletopTableGroup, true);
+      if (tableHits.length > 0) {
+        if (this.onTableClicked) this.onTableClicked();
+        return;
       }
-      // C. Check Doghouse Exterior Click -> Enter house!
+      // C2. Check Doghouse Exterior Click -> Enter house!
       if (this.dogHouseExteriorGroup) {
         const houseHits = raycaster.intersectObject(this.dogHouseExteriorGroup, true);
         if (houseHits.length > 0) {
@@ -4281,10 +4991,18 @@ export class ParkScene {
         }
       }
 
-      // C2. The little car — click it and Happy drives to the City!
+      // C3. The little car — click it and Happy drives to the City!
       const carHits = raycaster.intersectObject(this.carGroup, true);
       if (carHits.length > 0) {
         this.startCarRideToCity();
+        return;
+      }
+
+      // C5. The MULTIPLAYER machine (half-spiral staircase booth on the path)
+      const mpHits = raycaster.intersectObject(this.multiplayerMachineGroup, true);
+      if (mpHits.length > 0) {
+        this.mpMachinePulse = 1;
+        if (this.onMultiplayerMachineClicked) this.onMultiplayerMachineClicked();
         return;
       }
 
@@ -4302,19 +5020,38 @@ export class ParkScene {
     if (this.viewMode === "arcade") {
       const gHits = raycaster.intersectObject(this.galaxyGroup, true);
       if (gHits.length > 0) {
-        let o: THREE.Object3D | null = gHits[0].object;
+        // Scan every hit, not just the closest one: the platform disc is huge
+        // and routinely sits in front of a cabinet, which used to swallow the
+        // press and leave the player unable to start a game.
         let clickKind = "";
         let gameId = "";
-        while (o) {
-          const ty = (o.userData as { type?: string; gameId?: string }).type;
-          if (ty === "arcadeGame" || ty === "arcadeExit" || ty === "arcade_floor") {
-            clickKind = ty;
-            gameId = (o.userData as { gameId?: string }).gameId || "";
+        let floorPoint: THREE.Vector3 | null = null;
+
+        for (const hit of gHits) {
+          let o: THREE.Object3D | null = hit.object;
+          let kind = "";
+          let id = "";
+          while (o) {
+            const ud = o.userData as { type?: string; gameId?: string };
+            if (ud.type === "arcadeGame" || ud.type === "arcadeExit" || ud.type === "arcade_floor") {
+              kind = ud.type;
+              id = ud.gameId || "";
+              break;
+            }
+            o = o.parent;
+          }
+          if (!kind) continue;
+          // A cabinet or the exit portal always wins over the floor.
+          if (kind === "arcadeGame" || kind === "arcadeExit") {
+            clickKind = kind;
+            gameId = id;
             break;
           }
-          o = o.parent;
+          if (!floorPoint) floorPoint = hit.point;
         }
+
         if (clickKind === "arcadeGame" && gameId) {
+          this.pulseArcadeCabinet(this.arcadeMachines.find((m) => m.userData?.gameId === gameId));
           if (this.onArcadeGameSelected) this.onArcadeGameSelected(gameId);
           return;
         }
@@ -4322,8 +5059,8 @@ export class ParkScene {
           if (this.onArcadeExitClicked) this.onArcadeExitClicked();
           return;
         }
-        if (clickKind === "arcade_floor") {
-          this.walkTo(gHits[0].point);
+        if (floorPoint) {
+          this.walkTo(floorPoint);
           return;
         }
       }
@@ -4374,6 +5111,17 @@ export class ParkScene {
   private updateCameraPosition() {
     // A zoom tween owns the camera while active (portal into machines)
     if (this.camTween.active) return;
+    // Tabletop play & wardrobe pin the camera to a curated view of Happy/board.
+    if (this.activeTabletopGame) {
+      this.camera.position.lerp(this.TT_CAM_POS, 0.05);
+      this.camera.lookAt(this.TT_CAM_LOOK);
+      return;
+    }
+    if (this.wardrobeCamLock) {
+      this.camera.position.set(-3.0, 1.25, 3.1);
+      this.camera.lookAt(-4.4, 0.8, 2.3);
+      return;
+    }
     // Side view: the camera rides alongside so you clearly see the
     // 3D car model driving from the side — close enough to enjoy it!
     if (this.sideCam) {
@@ -5745,6 +6493,9 @@ export class ParkScene {
       // Tree regrowth + soup-ready beacon bob
       this.updateTreeRespawns();
 
+      // Tabletop four-wins tokens falling + bouncing on the board
+      this.updateTabletopTokens(delta);
+
       // Floating marker over the grabbed edit-mode object
       this.updateSelectionMarker(elapsed);
 
@@ -5756,6 +6507,16 @@ export class ParkScene {
 
       // Seasonal ambience: ❄️ Christmas snowfall / 🍃 spring leaves & pollen
       this.updateSeasonParticles(delta, elapsed);
+
+      // Arcade cabinet bounce/flash after being pressed
+      this.updateArcadePulse(delta);
+
+      // Multiplayer machine: idle screen shimmer + click flash
+      if (this.mpScreenMat) {
+        if (this.mpMachinePulse > 0) this.mpMachinePulse = Math.max(0, this.mpMachinePulse - delta * 2);
+        const glow = 0.7 + Math.sin(elapsed * 3.5) * 0.35 + this.mpMachinePulse * 2.2;
+        this.mpScreenMat.emissiveIntensity = glow;
+      }
 
       // Kitchen pot steam + soup bubble animation
       if (this.kitchenGroup.visible) {

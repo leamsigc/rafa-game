@@ -435,6 +435,302 @@ const flushScoreboard = () => {
 setInterval(flushScoreboard, 5000);
 process.on("exit", flushScoreboard);
 
+// 6. MULTIPLAYER GROUPS — the little machine on the park path!
+// Rooms are keyed by a tricky code of big letters, small letters and numbers.
+// Members fly into a lobby of blue circles in the void, then the host launches
+// an expedition onto a massive yellow-ringed disc. Live group XP scoreboard;
+// banked XP returns to each player's own account when the group dissolves.
+interface MpProfile {
+  name: string;
+  dogName: string;
+  breed: string;
+  collarColor: string;
+  balance: number;
+  health: number;
+  level: number;
+  mostPlayed: string;
+  achievements: number;
+  googleVerified: boolean;
+}
+interface MpMember {
+  id: string;
+  profile: MpProfile;
+  isHost: boolean;
+}
+interface MpRoom {
+  code: string;
+  hostId: string;
+  members: Map<string, { ws: WebSocket; member: MpMember }>;
+  started: boolean;
+  xp: Map<string, number>;
+}
+const mpRooms = new Map<string, MpRoom>();
+const mpClients = new Map<WebSocket, { roomCode: string; memberId: string }>();
+
+function makeGroupCode(): string {
+  const big = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+  const small = "abcdefghijkmnopqrstuvwxyz";
+  const digits = "23456789";
+  const pools = [big, small, digits];
+  let code = "";
+  for (let i = 0; i < 8; i++) {
+    const pool = pools[i % 3];
+    code += pool[Math.floor(Math.random() * pool.length)];
+  }
+  return mpRooms.has(code) ? makeGroupCode() : code;
+}
+
+function sanitizeProfile(p: any): MpProfile {
+  return {
+    name: String(p?.name || "Trainer").slice(0, 40),
+    dogName: String(p?.dogName || "Pup").slice(0, 24),
+    breed: String(p?.breed || "golden").slice(0, 24),
+    collarColor: String(p?.collarColor || "#e11d48").slice(0, 16),
+    balance: Number(p?.balance) || 0,
+    health: Number(p?.health) || 100,
+    level: Number(p?.level) || 1,
+    mostPlayed: String(p?.mostPlayed || "Exploring").slice(0, 40),
+    achievements: Number(p?.achievements) || 0,
+    googleVerified: !!p?.googleVerified,
+  };
+}
+
+function roomSnapshot(room: MpRoom) {
+  return {
+    code: room.code,
+    started: room.started,
+    members: [...room.members.values()].map((e) => ({ ...e.member.profile, id: e.member.id, isHost: e.member.isHost })),
+    scores: mpScores(room),
+  };
+}
+
+function mpScores(room: MpRoom) {
+  return [...room.members.values()].map((e) => ({
+    id: e.member.id,
+    name: e.member.profile.name,
+    dogName: e.member.profile.dogName,
+    xp: room.xp.get(e.member.id) ?? 1,
+  }));
+}
+
+function mpBroadcast(room: MpRoom, payload: any, exceptId?: string) {
+  for (const [id, entry] of room.members) {
+    if (exceptId && id === exceptId) continue;
+    if (entry.ws.readyState === WebSocket.OPEN) entry.ws.send(JSON.stringify(payload));
+  }
+}
+
+function mpLeave(ws: WebSocket) {
+  const client = mpClients.get(ws);
+  mpClients.delete(ws);
+  if (!client) return;
+  const room = mpRooms.get(client.roomCode);
+  if (!room) return;
+  room.members.delete(client.memberId);
+  room.xp.delete(client.memberId);
+  if (room.members.size === 0) {
+    mpRooms.delete(client.roomCode);
+    return;
+  }
+  // Reassign host if the creator left, and tell everyone who remains.
+  if (room.hostId === client.memberId) {
+    const nextHost = room.members.keys().next().value as string;
+    room.hostId = nextHost;
+    const next = room.members.get(nextHost);
+    if (next) next.member.isHost = true;
+  }
+  mpBroadcast(room, { type: "member_left", id: client.memberId, snapshot: roomSnapshot(room) });
+}
+
+function setupMultiplayerServer(server: import("http").Server) {
+  const mpWss = new WebSocketServer({ server, path: "/api/mp" });
+
+  mpWss.on("connection", (ws) => {
+    ws.on("message", (rawData) => {
+      try {
+        const msg = JSON.parse(rawData.toString());
+
+        if (msg.type === "create") {
+          const code = makeGroupCode();
+          const id = "m" + Math.random().toString(36).slice(2, 10);
+          const room: MpRoom = { code, hostId: id, members: new Map(), started: false, xp: new Map() };
+          room.members.set(id, { ws, member: { id, profile: sanitizeProfile(msg.profile), isHost: true } });
+          room.xp.set(id, 1);
+          mpRooms.set(code, room);
+          mpClients.set(ws, { roomCode: code, memberId: id });
+          ws.send(JSON.stringify({ type: "joined", ...roomSnapshot(room), you: id }));
+
+        } else if (msg.type === "join") {
+          const code = String(msg.code || "").trim();
+          // The search system hunts for a living room with that exact code.
+          const room = mpRooms.get(code);
+          if (!room) {
+            ws.send(JSON.stringify({ type: "error", message: `No group found with code ${code}. Check the code and try again!` }));
+            return;
+          }
+          if (room.members.size >= 5) {
+            ws.send(JSON.stringify({ type: "error", message: "That group is full (5 pups max)!" }));
+            return;
+          }
+          const id = "m" + Math.random().toString(36).slice(2, 10);
+          room.members.set(id, { ws, member: { id, profile: sanitizeProfile(msg.profile), isHost: false } });
+          room.xp.set(id, 1);
+          mpClients.set(ws, { roomCode: code, memberId: id });
+          ws.send(JSON.stringify({ type: "joined", ...roomSnapshot(room), you: id }));
+          mpBroadcast(room, { type: "member_joined", member: { ...sanitizeProfile(msg.profile), id, isHost: false }, snapshot: roomSnapshot(room) }, id);
+
+        } else if (msg.type === "leave") {
+          mpLeave(ws);
+
+        } else if (msg.type === "start") {
+          const client = mpClients.get(ws);
+          const room = client ? mpRooms.get(client.roomCode) : null;
+          if (!room || !client || room.hostId !== client.memberId) return;
+          room.started = true;
+          mpBroadcast(room, { type: "started", snapshot: roomSnapshot(room) });
+
+        } else if (msg.type === "award_xp") {
+          const client = mpClients.get(ws);
+          const room = client ? mpRooms.get(client.roomCode) : null;
+          if (!room || !client) return;
+          const amount = Math.max(1, Math.min(500, Number(msg.amount) || 1));
+          room.xp.set(client.memberId, (room.xp.get(client.memberId) ?? 1) + amount);
+          mpBroadcast(room, { type: "xp", scores: mpScores(room) });
+
+        } else if (msg.type === "profile_update") {
+          const client = mpClients.get(ws);
+          const room = client ? mpRooms.get(client.roomCode) : null;
+          if (!room || !client) return;
+          const entry = room.members.get(client.memberId);
+          if (entry) {
+            entry.member.profile = sanitizeProfile(msg.profile);
+            mpBroadcast(room, { type: "member_updated", id: client.memberId, profile: entry.member.profile, snapshot: roomSnapshot(room) });
+          }
+        }
+      } catch (e) {
+        console.error("Multiplayer message error:", e);
+      }
+    });
+
+    ws.on("close", () => mpLeave(ws));
+  });
+}
+
+// 7. Storybook: a short illustrated bedtime story about the player's dog.
+// Returns at most `maxPages` (hard-capped at 10) pages, each with a scene key
+// the client draws. Falls back to a hand-written local story when Gemini is
+// unconfigured or out of quota.
+const MAX_STORY_PAGES = 10;
+
+const STORY_SCENES = [
+  "meadow",
+  "forest",
+  "blanket",
+  "milk",
+  "snow",
+  "park",
+  "kitchen",
+  "night",
+];
+
+const STORY_ARCS: string[][] = [
+  [
+    "One evening a little dog sat by the window and watched the sun go down.",
+    "The meadow outside turned gold, and the wind smelled like rain.",
+    "He wrapped his blanket around his shoulders and settled onto the rug.",
+    "A bowl of warm chocolate milk appeared, and he drank it sip by sip.",
+    "Somewhere far away a cart barked, and he answered with one soft awoo.",
+    "The room grew quiet. Only the clock and his breathing filled the house.",
+    "He remembered every walk they had ever taken, all in one single breath.",
+    "Snow began to fall outside, covering the garden in a soft white blanket.",
+    "His eyes grew heavy, and the story folded itself shut.",
+    "He dreamed of a meadow where every dog he ever knew was waiting for him.",
+  ],
+  [
+    "A pup once found a wooden door standing alone in a field, with no house around it.",
+    "The door was warm, so he pushed it open with his nose.",
+    "Behind it was a kitchen that smelled of honey and cinnamon.",
+    "An old cat poured him a bowl of chocolate milk without saying a word.",
+    "Out the window, a whole forest of fireflies blinked in time.",
+    "They showed him the way to a pond where the moon was lying flat on the water.",
+    "He lapped the water carefully, so as not to spill the moon.",
+    "On the walk home, every firefly followed him like a lantern crew.",
+    "At his door, the blanket was waiting, warm from the dryer.",
+    "He slept with the whole night tucked in beside him.",
+  ],
+];
+
+function localStory(name: string, maxPages: number) {
+  const arc = STORY_ARCS[Math.floor(Math.random() * STORY_ARCS.length)];
+  const pages = arc.slice(0, maxPages).map((text, i) => ({
+    text: text.replace(/\ba dog\b/i, name),
+    scene: STORY_SCENES[i % STORY_SCENES.length],
+  }));
+  return { title: `${name} and the Quiet Evening`, pages };
+}
+
+app.post("/api/pet/story", async (req, res) => {
+  try {
+    const { dogName, maxPages } = req.body || {};
+    const name = (typeof dogName === "string" && dogName.trim()) || "Happy";
+    const cap = Math.max(
+      1,
+      Math.min(MAX_STORY_PAGES, typeof maxPages === "number" ? Math.floor(maxPages) : MAX_STORY_PAGES)
+    );
+
+    const ai = getAIClient();
+    if (ai) {
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: `Write a gentle bedtime story about a dog named ${name}, for their owner to read aloud.`,
+          config: {
+            systemInstruction: `You write warm, short bedtime stories about dogs.
+Return STRICT JSON only, no markdown fences, shaped exactly:
+{"title": string, "pages": [{"text": string, "scene": string}]}
+Rules:
+- "pages" must contain at most ${cap} entries.
+- Each "text" is ONE or TWO short sentences, plain prose, suitable for a large-print picture book. No asterisks, no stage directions, no emoji.
+- Each "scene" must be one of: ${STORY_SCENES.join(", ")}.
+- The story should be cosy and hopeful, and end gently.
+- Warm, simple language a child would love.`,
+            temperature: 0.9,
+            responseMimeType: "application/json",
+          },
+        });
+
+        const raw = (response.text || "").trim();
+        const parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.pages) && parsed.pages.length > 0) {
+          const pages = parsed.pages
+            .slice(0, cap)
+            .map((p: any, i: number) => ({
+              text: String(p?.text ?? "").trim(),
+              scene: STORY_SCENES.includes(p?.scene) ? p.scene : STORY_SCENES[i % STORY_SCENES.length],
+            }))
+            .filter((p: any) => p.text.length > 0);
+
+          if (pages.length > 0) {
+            return res.json({
+              title: String(parsed.title || `${name}'s Story`),
+              pages,
+              mode: "gemini",
+            });
+          }
+        }
+        console.warn("Story response had no usable pages; using local story.");
+      } catch (err: any) {
+        console.warn("Story generation failed:", err?.message || err);
+      }
+    }
+
+    return res.json({ ...localStory(name, cap), mode: ai ? "local_fallback" : "local_engine" });
+  } catch (error: any) {
+    console.error("Story endpoint error:", error);
+    return res.json(localStory("Happy", MAX_STORY_PAGES));
+  }
+});
+
 app.get("/api/scoreboard", (_req, res) => {
   const entries = [...scoreboard].sort(
     (a, b) => (b.level || 0) - (a.level || 0) || (b.xp || 0) - (a.xp || 0)
@@ -622,6 +918,8 @@ Understand simple owner commands: if asked to sit, roll over, fetch, dance, spin
       }
     });
   });
+
+  setupMultiplayerServer(server);
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

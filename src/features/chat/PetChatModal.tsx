@@ -63,8 +63,9 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
       id: "initial",
       sender: "dog",
       text:
-        holidayMeta?.chatGreeting ??
-        `*Perks up floppy ears eagerly, smiling with a happy tail wag* Woof! Hey best friend! I'm ${petStats.name}! What are we going to do together today?`,
+        (holidayMeta?.chatGreeting ??
+          `*Perks up floppy ears eagerly, smiling with a happy tail wag* Woof! Hey best friend! I'm ${petStats.name}! What are we going to do together today?`
+        ).replace("{name}", petStats.name),
       timestamp: Date.now(),
     },
   ]);

@@ -17,7 +17,8 @@ export type DogAction =
   | "backflip"
   | "cuddle"
   | "zoomies"
-  | "howl";
+  | "howl"
+  | "cozy";
 
 export interface BedColors {
   cushion: string; // Pillow / sleep surface color
@@ -65,6 +66,12 @@ export interface PetStats {
   energy: number; // 0 - 100
   happiness: number; // 0 - 100
   hunger: number; // 0 - 100 (0 is full, 100 is starving)
+  /** Overall health 0 - 100. Drops while ill, restored by medicine. */
+  health?: number;
+  /** Id of the minor ailment currently being nursed, if any. */
+  illness?: string | null;
+  /** Medicine bag, keyed by medicine id. */
+  medicines?: Record<string, number>;
   level: number;
   xp: number;
   treatsInventory: Record<string, number>;

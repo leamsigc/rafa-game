@@ -76,6 +76,13 @@ const ACCESSORIES_CATALOG: AccessoryItem[] = [
     price: 100,
     icon: "👑",
   },
+  {
+    id: "witchhat",
+    name: "Spooky Witch Hat",
+    description: "A pointed purple witch hat. Granted free every Halloween season — or buy it early!",
+    price: 55,
+    icon: "🧙",
+  },
 ];
 
 const TOYS_CATALOG = [
