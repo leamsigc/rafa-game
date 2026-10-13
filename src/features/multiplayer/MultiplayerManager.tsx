@@ -288,5 +288,3 @@ export const MultiplayerManager: React.FC<MultiplayerManagerProps> = ({
     </>
   );
 };
-
-void client;

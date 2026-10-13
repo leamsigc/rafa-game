@@ -90,7 +90,7 @@ export interface PetStats {
   unlockedBedStyles: string[];
   currentBedStyle: string;
   ingredientsInventory?: Record<string, number>;
-  /** Owned tools (e.g. "axe" for chopping park trees). */
+  /** Owned tool ids (legacy field — the axe / tree-chopping tool was removed). */
   ownedTools?: string[];
   /** Unlocked achievement badge ids. */
   unlockedAchievements?: string[];

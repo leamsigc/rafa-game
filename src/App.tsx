@@ -822,31 +822,8 @@ export default function App() {
       saveLayout();
     };
 
-    // Axe state + tree chopping rewards
-    try {
-      const savedStats = localStorage.getItem("pet_game_stats_v3");
-      scene.hasAxe = savedStats ? (JSON.parse(savedStats).ownedTools || []).includes("axe") : false;
-    } catch {
-      scene.hasAxe = false;
-    }
-    scene.onTreeClickedNoAxe = () => {
-      showToast("That tree needs an axe! Buy the 🪓 Lumberjack Axe in the Shop (Tools, 50 coins).");
-      sound.playBark("low");
-    };
-    scene.onTreeChopped = () => {
-      confetti({ particleCount: 40, spread: 55, origin: { y: 0.7 } });
-      setStats((prev) => ({
-        ...prev,
-        coins: prev.coins + 8,
-        ingredientsInventory: {
-          ...(prev.ingredientsInventory || {}),
-          yellow_acorn: ((prev.ingredientsInventory || {}).yellow_acorn || 0) + 1,
-          red_mushroom: ((prev.ingredientsInventory || {}).red_mushroom || 0) + 1,
-        },
-        xp: prev.xp + 6,
-      }));
-      showToast(`TIMBER! 🪓 +8 coins, +1 Golden Acorn, +1 Red Mushroom!`);
-    };
+    // (Axe / tree-chopping gameplay was removed — park trees are now pure
+    // scenery and can never be interacted with, in any world.)
     scene.onCookBeaconClicked = () => {
       setShowCookingModal(false);
       setShowReadyModal(true);
@@ -970,13 +947,6 @@ export default function App() {
 
   // The title screen covers the whole app until the player hits Start.
   const menuVisible = !started;
-
-  // Keep the 3D scene's axe flag in sync with the shop purchase
-  useEffect(() => {
-    if (parkSceneRef.current) {
-      parkSceneRef.current.hasAxe = (stats.ownedTools || []).includes("axe");
-    }
-  }, [stats.ownedTools]);
 
   // Cooking countdown: tick from 2:00, then the park house glows red + pot
   useEffect(() => {
@@ -1672,24 +1642,8 @@ export default function App() {
     parkSceneRef.current?.setCookBeaconVisible(false);
   };
 
-  // Shop: buy the lumberjack axe (50 coins) for chopping park trees
-  const handleBuyTool = (toolId: string, cost: number) => {
-    if ((stats.ownedTools || []).includes(toolId)) {
-      showToast("You already own that tool!");
-      return;
-    }
-    if (stats.coins < cost) {
-      showToast("Not enough coins! Play mini-games to earn more.");
-      return;
-    }
-    sound.playRewardFanfare();
-    setStats((prev) => ({
-      ...prev,
-      coins: prev.coins - cost,
-      ownedTools: [...(prev.ownedTools || []), toolId],
-    }));
-    showToast(`🪓 Bought the Lumberjack Axe! Tap any park tree to chop it!`);
-  };
+  // (The lumberjack axe shop handler was removed together with the
+  // tree-chopping gameplay — park trees are pure scenery now.)
 
   // Memory Album: snapshot the 3D scene at any time, straight into the gallery
   const handleTakeSnapshot = async () => {
@@ -2609,7 +2563,6 @@ export default function App() {
           onBuyAccessory={handleBuyAccessory}
           onEquipAccessory={handleEquipAccessory}
           onBuyToy={handleBuyToy}
-          onBuyTool={handleBuyTool}
         />
       )}
 

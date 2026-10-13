@@ -27,7 +27,6 @@ import {
   Pencil,
   ChevronUp,
   ChevronDown,
-  Axe,
   Aperture,
   Images,
   Focus,
@@ -166,7 +165,6 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   illnessId = null,
 }) => {
   const unlockedSet = new Set(stats.unlockedSkills || []);
-  const hasAxe = (stats.ownedTools || []).includes("axe");
   const isHouse = viewMode === "house";
   const isCity = viewMode === "city";
   const isArcade = viewMode === "arcade";
@@ -701,13 +699,7 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
       </div>
       )}
 
-      {/* Park axe hint: chop trees when you own the axe */}
-      {!isHouse && hasAxe && !tricksHidden && (
-        <div className="self-end pointer-events-auto flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-900/85 text-emerald-100 text-[11px] font-bold border border-emerald-300/30 shadow-lg">
-          <Axe className="w-3.5 h-3.5" />
-          <span>Tap a 🌲 tree to chop it!</span>
-        </div>
-      )}
+      {/* Park axe hint removed — trees are pure scenery now */}
 
       {/* Primary Action Buttons Bar (Feed, Play/Cook, Pet, Train, Dog Chat, Games/Sleep) */}
       {bottomHidden ? (

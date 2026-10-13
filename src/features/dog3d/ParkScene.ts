@@ -1,5 +1,7 @@
 import * as THREE from "three";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { Dog3D } from "./DogModel";
+import { polishScene } from "./renderPolish";
 import { DogAction, DogBreed, BedColors, HouseViewMode, HouseRoom } from "../../types/pet";
 import type { TabletopGameId } from "../tabletop/tabletopData";
 import { getCurrentSeason } from "../seasonal/holidays";
@@ -124,13 +126,11 @@ export class ParkScene {
   private treatMesh!: THREE.Mesh;
   private obstaclesGroup: THREE.Group = new THREE.Group();
   private particlesGroup: THREE.Group = new THREE.Group();
-  // Choppable park trees (axe gameplay) + distant forest treeline
+  // Park trees (pure scenery — see buildFlora) + distant forest treeline.
+  // Trees are never interactive: they cannot be chopped or picked in ANY
+  // world, and hidden copies in the City / Galaxy Arcade are unreachable.
   private treeGroups: THREE.Group[] = [];
-  private treeData: { id: string; alive: boolean; respawnAt: number; baseScale: number }[] = [];
   private forestBorderGroup: THREE.Group = new THREE.Group();
-  public onTreeChopped?: (treeId: string) => void;
-  public onTreeClickedNoAxe?: () => void;
-  public hasAxe: boolean = false;
   // Cooking-ready beacon above the dog house (red highlight + pot icon)
   private cookBeaconGroup: THREE.Group = new THREE.Group();
   private cookBeaconVisible: boolean = false;
@@ -343,10 +343,25 @@ export class ParkScene {
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
+
+    // Image-based lighting: a soft indoor "room" environment is baked once and
+    // fed to every MeshStandardMaterial in the game (dog, furniture, houses,
+    // city, arcade). This is what stops plain primitives from looking flat —
+    // they now pick up subtle reflections and colour bleed from their surroundings.
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    try {
+      const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
+      this.scene.environment = envRT.texture;
+      this.scene.environmentIntensity = 0.45;
+    } catch {
+      // Environment lighting is a nicety — the scene still renders without it.
+    }
+    pmrem.dispose();
 
     // 4. Lights & Sky
     this.setupLighting();
@@ -427,6 +442,14 @@ export class ParkScene {
 
     // 11. Event listeners for Orbit & Click Interactions
     this.setupInputEvents();
+
+    // 12. Visual polish pass (runs LAST, after every builder + the dog):
+    // every box / cylinder / sphere / cone primitive in the finished scene
+    // graph is upgraded in place — rounded corners, smoother silhouettes,
+    // richer material response — so the whole world reads as sculpted 3D
+    // models instead of raw primitives. It never touches positions, scales,
+    // userData or hierarchy, so all game logic keeps working unchanged.
+    polishScene(this.scene);
 
     // Start loop
     this.start();
@@ -663,58 +686,199 @@ export class ParkScene {
     this.parkGroup.add(g);
   }
 
+  /** Cedar plank texture used on the dog house walls. */
+  private cedarPlankTexture(base: string, dark: string): THREE.CanvasTexture {
+    const c = document.createElement("canvas");
+    c.width = 256;
+    c.height = 256;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = base;
+    ctx.fillRect(0, 0, 256, 256);
+    // Horizontal planks with grain + shadow line between them
+    for (let y = 0; y < 256; y += 32) {
+      ctx.fillStyle = "rgba(0,0,0,0.16)";
+      ctx.fillRect(0, y, 256, 2);
+      for (let i = 0; i < 26; i++) {
+        ctx.strokeStyle = i % 2 ? "rgba(255,255,255,0.05)" : dark;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        const gy = y + 4 + Math.random() * 24;
+        ctx.moveTo(0, gy);
+        ctx.bezierCurveTo(64, gy + (Math.random() - 0.5) * 3, 192, gy + (Math.random() - 0.5) * 3, 256, gy);
+        ctx.stroke();
+      }
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(2, 2);
+    return tex;
+  }
+
+  /** Scalloped roof-shingle texture for the dog house roof. */
+  private shingleTexture(base: string, shade: string): THREE.CanvasTexture {
+    const c = document.createElement("canvas");
+    c.width = 128;
+    c.height = 128;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = shade;
+    ctx.fillRect(0, 0, 128, 128);
+    const rowH = 22;
+    for (let y = 0; y < 128; y += rowH) {
+      for (let x = -16; x < 128; x += 32) {
+        const off = (y / rowH) % 2 ? 16 : 0;
+        ctx.fillStyle = base;
+        ctx.beginPath();
+        ctx.roundRect(x + off + 1, y + 1, 30, rowH - 3, 6);
+        ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.06)";
+        ctx.fillRect(x + off + 3, y + 2, 26, 3);
+      }
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(3, 2);
+    return tex;
+  }
+
   private buildDogHouse(x: number, y: number, z: number) {
     const house = new THREE.Group();
     house.position.set(x, y, z);
 
-    // Walls (warm cedar wood)
+    // ---- Stone foundation the house sits on ----
+    const foundation = new THREE.Mesh(
+      new THREE.BoxGeometry(2.65, 0.22, 3.05),
+      new THREE.MeshStandardMaterial({ color: 0x9ca3af, roughness: 0.95 })
+    );
+    foundation.position.y = 0.11;
+    foundation.receiveShadow = true;
+    foundation.castShadow = true;
+    house.add(foundation);
+
+    // ---- Cedar plank walls (real plank + grain texture) ----
     const wallGeom = new THREE.BoxGeometry(2.4, 1.8, 2.8);
-    const wallMat = new THREE.MeshStandardMaterial({ color: 0x9a3412, roughness: 0.8 });
+    const wallMat = new THREE.MeshStandardMaterial({
+      map: this.cedarPlankTexture("#9a3412", "rgba(60,25,10,0.35)"),
+      color: 0xffffff,
+      roughness: 0.82,
+    });
     const walls = new THREE.Mesh(wallGeom, wallMat);
-    walls.position.y = 0.9;
+    walls.position.y = 1.0;
     walls.castShadow = true;
     walls.receiveShadow = true;
     house.add(walls);
 
-    // Doorway opening
-    const doorGeom = new THREE.CylinderGeometry(0.55, 0.55, 0.1, 16);
+    // ---- Corner trim posts (lighter wood framing) ----
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0xd6b38a, roughness: 0.75 });
+    [
+      [-1.21, -1.41], [1.21, -1.41], [-1.21, 1.41], [1.21, 1.41],
+    ].forEach(([px, pz]) => {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.13, 1.82, 0.13), trimMat);
+      post.position.set(px, 1.0, pz);
+      post.castShadow = true;
+      house.add(post);
+    });
+
+    // ---- Doorway opening (arched) ----
+    const doorGeom = new THREE.CylinderGeometry(0.55, 0.55, 0.1, 24);
     doorGeom.rotateX(Math.PI / 2);
     const doorMat = new THREE.MeshBasicMaterial({ color: 0x1f140e });
     const door = new THREE.Mesh(doorGeom, doorMat);
-    door.position.set(0, 0.8, 1.41);
+    door.position.set(0, 0.9, 1.41);
     house.add(door);
 
     const doorLowerGeom = new THREE.BoxGeometry(1.1, 0.8, 0.1);
     const doorLower = new THREE.Mesh(doorLowerGeom, doorMat);
-    doorLower.position.set(0, 0.4, 1.41);
+    doorLower.position.set(0, 0.5, 1.41);
     house.add(doorLower);
 
-    // Roof (red gable roof)
+    // Door frame trim
+    const frameMat = new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.6 });
+    [-0.62, 0.62].forEach((dx) => {
+      const jamb = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.0, 0.12), frameMat);
+      jamb.position.set(dx, 0.7, 1.43);
+      jamb.castShadow = true;
+      house.add(jamb);
+    });
+
+    // ---- Little front porch step ----
+    const step = new THREE.Mesh(
+      new THREE.BoxGeometry(1.5, 0.12, 0.55),
+      new THREE.MeshStandardMaterial({ color: 0xb5885a, roughness: 0.85 })
+    );
+    step.position.set(0, 0.16, 1.75);
+    step.castShadow = true;
+    step.receiveShadow = true;
+    house.add(step);
+
+    // ---- Shingled red gable roof ----
     const roofGeom = new THREE.ConeGeometry(2.2, 1.2, 4);
     roofGeom.rotateY(Math.PI / 4);
     roofGeom.scale(1.2, 1, 1.4);
-    const roofMat = new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.7 });
+    const roofMat = new THREE.MeshStandardMaterial({
+      map: this.shingleTexture("#b91c1c", "#7f1212"),
+      color: 0xffffff,
+      roughness: 0.72,
+    });
     const roof = new THREE.Mesh(roofGeom, roofMat);
-    roof.position.y = 2.3;
+    roof.position.y = 2.5;
     roof.castShadow = true;
     house.add(roof);
 
-    // Warm lantern hanging on doghouse
-    const lanternGeom = new THREE.CylinderGeometry(0.12, 0.16, 0.35, 8);
+    // Ridge cap + eaves so the roof silhouette reads as a real roof
+    const ridge = new THREE.Mesh(
+      new THREE.BoxGeometry(0.16, 0.1, 3.35),
+      new THREE.MeshStandardMaterial({ color: 0x7f1212, roughness: 0.7 })
+    );
+    ridge.position.y = 3.1;
+    ridge.castShadow = true;
+    house.add(ridge);
+
+    // ---- Warm lantern hanging by the door ----
+    const lanternGroup = new THREE.Group();
     const lanternMat = new THREE.MeshStandardMaterial({
       color: 0xfbbf24,
       emissive: 0xf59e0b,
-      emissiveIntensity: 0.6,
+      emissiveIntensity: 0.7,
+      roughness: 0.35,
     });
-    const lantern = new THREE.Mesh(lanternGeom, lanternMat);
-    lantern.position.set(1.1, 1.4, 1.45);
-    house.add(lantern);
+    const lanternGlass = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.11, 0.14, 0.3, 12),
+      lanternMat
+    );
+    lanternGroup.add(lanternGlass);
+    const lanternCap = new THREE.Mesh(
+      new THREE.ConeGeometry(0.17, 0.12, 12),
+      new THREE.MeshStandardMaterial({ color: 0x78350f, metalness: 0.5, roughness: 0.4 })
+    );
+    lanternCap.position.y = 0.2;
+    lanternGroup.add(lanternCap);
+    lanternGroup.position.set(1.1, 1.5, 1.45);
+    house.add(lanternGroup);
 
-    // Bone sign with "BUDDY"
+    // ---- Bone sign with "BUDDY" ----
+    const signCanvas = document.createElement("canvas");
+    signCanvas.width = 256;
+    signCanvas.height = 72;
+    const sctx = signCanvas.getContext("2d")!;
+    sctx.fillStyle = "#fef08a";
+    sctx.fillRect(0, 0, 256, 72);
+    sctx.fillStyle = "#7c2d12";
+    sctx.font = "bold 40px sans-serif";
+    sctx.textAlign = "center";
+    sctx.textBaseline = "middle";
+    sctx.fillText("🐾 BUDDY", 128, 38);
     const signGeom = new THREE.BoxGeometry(1.2, 0.35, 0.06);
-    const signMat = new THREE.MeshStandardMaterial({ color: 0xfef08a });
+    const signMat = new THREE.MeshStandardMaterial({
+      map: new THREE.CanvasTexture(signCanvas),
+      color: 0xffffff,
+      roughness: 0.6,
+    });
     const sign = new THREE.Mesh(signGeom, signMat);
-    sign.position.set(0, 1.6, 1.43);
+    sign.position.set(0, 1.72, 1.43);
     house.add(sign);
 
     // Tag entire exterior house for clicking
@@ -861,8 +1025,8 @@ export class ParkScene {
   //  (invisible), Happy waits across the table.
   // =====================================================================
   private readonly TT_TABLE = new THREE.Vector3(-2.7, 0, -1.7);
-  private readonly TT_CAM_POS = new THREE.Vector3(-2.7, 1.75, 0.85);
-  private readonly TT_CAM_LOOK = new THREE.Vector3(-2.7, 0.9, -3.0);
+  private readonly TT_CAM_POS = new THREE.Vector3(-2.7, 1.9, 1.7);
+  private readonly TT_CAM_LOOK = new THREE.Vector3(-2.7, 0.85, -2.7);
   private readonly TT_HAPPY = new THREE.Vector3(-2.7, 0, -3.15);
 
   /** Render an emoji / glyph to a canvas texture for 3D board pieces. */
@@ -932,7 +1096,7 @@ export class ParkScene {
     this.setTabletopPackagesVisible(false);
     this.clearTabletopBoard();
 
-    // Seat Happy across the table, facing the player side (+Z).
+    // Seat Happy across the table, facing the player side (+Z, toward camera).
     this.dog.group.position.copy(this.TT_HAPPY);
     this.dog.group.rotation.y = 0;
     this.dog.group.scale.setScalar(1);
@@ -1228,6 +1392,13 @@ export class ParkScene {
       picket.position.set(i + 0.9, 0.55, -12);
       picket.castShadow = true;
       fenceGroup.add(picket);
+
+      // Pointed picket cap (classic white picket fence silhouette)
+      const cap = new THREE.Mesh(new THREE.ConeGeometry(0.145, 0.16, 4), postMat);
+      cap.position.set(i + 0.9, 1.18, -12);
+      cap.rotation.y = Math.PI / 4;
+      cap.castShadow = true;
+      fenceGroup.add(cap);
     }
 
     // Fence rails
@@ -1246,36 +1417,121 @@ export class ParkScene {
   }
 
   private makeOneTree(scale: number, tall: boolean): THREE.Group {
-    const treeMat = new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 });
+    // A more detailed procedural tree: tapering trunk with roots, a few
+    // branching limbs, and layered canopy clusters instead of three flat
+    // spheres -- reads as a real tree under the engine's lighting/shadows.
+    const barkMat = new THREE.MeshStandardMaterial({
+      color: 0x5c4033,
+      roughness: 0.92,
+      metalness: 0.02,
+    });
     const leafMats = [
-      new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.8 }),
-      new THREE.MeshStandardMaterial({ color: 0x388e3c, roughness: 0.8 }),
-      new THREE.MeshStandardMaterial({ color: 0x43a047, roughness: 0.8 }),
+      new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.78, flatShading: false }),
+      new THREE.MeshStandardMaterial({ color: 0x388e3c, roughness: 0.82 }),
+      new THREE.MeshStandardMaterial({ color: 0x43a047, roughness: 0.76 }),
+      new THREE.MeshStandardMaterial({ color: 0x245c29, roughness: 0.85 }),
     ];
     const tree = new THREE.Group();
-    const trunkH = tall ? 3.6 : 2.9;
-    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.48, trunkH, 8), treeMat);
-    trunk.position.y = trunkH / 2;
-    trunk.castShadow = true;
-    tree.add(trunk);
-    const canopy1 = new THREE.Mesh(new THREE.SphereGeometry(1.7, 12, 12), leafMats[0]);
-    canopy1.position.set(0, trunkH + 0.5, 0);
-    canopy1.castShadow = true;
-    tree.add(canopy1);
-    const canopy2 = new THREE.Mesh(new THREE.SphereGeometry(1.3, 10, 10), leafMats[1]);
-    canopy2.position.set(0.6, trunkH + 1.1, 0.4);
-    canopy2.castShadow = true;
-    tree.add(canopy2);
-    const canopy3 = new THREE.Mesh(new THREE.SphereGeometry(0.95, 9, 9), leafMats[2]);
-    canopy3.position.set(-0.55, trunkH + 0.9, -0.3);
-    canopy3.castShadow = true;
-    tree.add(canopy3);
+    const trunkH = (tall ? 3.6 : 2.9);
+
+    // Slightly displaced multi-segment trunk for a natural taper.
+    const segs = 6;
+    let prev = new THREE.Vector3(0, 0, 0);
+    for (let i = 1; i <= segs; i++) {
+      const t = i / segs;
+      const h = (trunkH / segs) * (0.9 + 0.1 * i);
+      const r0 = (0.48 - 0.18 * t) * (tall ? 1.15 : 1);
+      const r1 = (0.48 - 0.18 * (t + 0.16 / segs)) * (tall ? 1.15 : 1);
+      const cyl = new THREE.Mesh(
+        new THREE.CylinderGeometry(Math.max(0.08, r1), r0, h, 16),
+        barkMat
+      );
+      cyl.position.set(0, prev.y + h / 2, 0);
+      cyl.castShadow = true;
+      cyl.receiveShadow = true;
+      tree.add(cyl);
+      prev.y += h;
+    }
+
+    // Surface roots spreading at the base for depth.
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2 + 0.3;
+      const root = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.045, 0.09, 0.75, 8),
+        barkMat
+      );
+      root.position.set(Math.cos(a) * 0.32, 0.2, Math.sin(a) * 0.32);
+      root.rotation.x = Math.PI / 2.6;
+      root.rotation.y = a;
+      root.castShadow = true;
+      tree.add(root);
+    }
+
+    // Primary branches reaching out.
+    const branches = tall ? 5 : 4;
+    for (let i = 0; i < branches; i++) {
+      const a = (i / branches) * Math.PI * 2 + 0.5;
+      const branch = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.06, 0.12, 1.5, 10),
+        barkMat
+      );
+      branch.position.set(Math.cos(a) * 0.45, trunkH * 0.72, Math.sin(a) * 0.45);
+      branch.rotation.z = (Math.PI / 2) * 0.55;
+      branch.rotation.y = a;
+      branch.castShadow = true;
+      tree.add(branch);
+    }
+
+    // Layered canopy: a core sphere plus several offset clusters.
+    const canopyCore = new THREE.Mesh(
+      new THREE.SphereGeometry(1.85, 20, 20),
+      leafMats[0]
+    );
+    canopyCore.position.set(0, trunkH + 0.7, 0);
+    canopyCore.castShadow = true;
+    tree.add(canopyCore);
+
+    const clusterPositions = [
+      [0.9, trunkH + 1.25, 0.6],
+      [-0.75, trunkH + 1.15, -0.45],
+      [0.0, trunkH + 1.9, -0.1],
+      [-0.95, trunkH + 0.85, 0.5],
+      [0.55, trunkH + 0.9, -0.85],
+      [-0.1, trunkH + 1.55, 0.85],
+    ];
+    clusterPositions.forEach(([x, y, z], i) => {
+      const r = 0.95 + (i % 3) * 0.15;
+      const blob = new THREE.Mesh(
+        new THREE.SphereGeometry(r, 16, 16),
+        leafMats[(i + 1) % leafMats.length]
+      );
+      blob.position.set(x, y, z);
+      blob.castShadow = true;
+      tree.add(blob);
+    });
+
+    // Small hanging accent spheres to break the silhouette.
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const hang = new THREE.Mesh(
+        new THREE.SphereGeometry(0.18, 10, 10),
+        leafMats[2]
+      );
+      hang.position.set(Math.cos(a) * 1.5, trunkH + 0.15, Math.sin(a) * 1.5);
+      hang.castShadow = true;
+      tree.add(hang);
+    }
+
     tree.scale.setScalar(scale);
     return tree;
   }
 
   private buildFlora() {
-    // ---- Choppable park trees: plenty of them, spread around the lawn ----
+    // ---- Park trees: pure scenery (NOT interactive) ----
+    // Trees used to be choppable with an axe, which let a stray tap in the
+    // City / Galaxy Arcade dimension fell an invisible overworld tree. They
+    // are now scenery-only: never registered as editables, never raycast as
+    // targets, and never chopped anywhere.
     const treePositions: [number, number, number][] = [
       [-10, 0, -8],
       [11, 0, -8],
@@ -1292,20 +1548,19 @@ export class ParkScene {
     ];
 
     this.treeGroups = [];
-    this.treeData = [];
     treePositions.forEach(([x, y, z], i) => {
       const baseScale = 0.9 + ((i * 37) % 30) / 100;
       const tree = this.makeOneTree(baseScale, i % 3 === 0);
       tree.position.set(x, y, z);
       const id = `tree${i}`;
-      tree.userData = { type: "tree", treeId: id };
+      tree.userData = { type: "scenery" };
       tree.traverse((c) => {
-        c.userData = { type: "tree", treeId: id };
+        c.userData = { type: "scenery" };
       });
       this.parkGroup.add(tree);
       this.treeGroups.push(tree);
-      this.treeData.push({ id, alive: true, respawnAt: 0, baseScale });
-      this.registerEditable(id, tree);
+      // NOTE: intentionally NOT registered as editable and NOT tagged as a
+      // "tree" hit target — trees are decoration only.
     });
 
     // ---- Distant forest border: little trees ringing the back + sides ----
@@ -5671,7 +5926,14 @@ export class ParkScene {
   private pickEditable(mouse: THREE.Vector2): string | null {
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, this.camera);
-    const hits = raycaster.intersectObjects([...this.editables.values()], true);
+    // Only ever consider editables that are actually visible in the CURRENT
+    // world. Objects that belong to another world (e.g. the park trees while
+    // you're in the City or the Galaxy Arcade) are hidden but still sit in the
+    // scene graph — THREE's raycaster does NOT skip invisible meshes, so
+    // without this guard a tap in another dimension could hit an invisible
+    // park object. This keeps hidden trees/props completely inaccessible.
+    const candidates = [...this.editables.values()].filter((o) => o.visible);
+    const hits = raycaster.intersectObjects(candidates, true);
     for (const h of hits) {
       let o: THREE.Object3D | null = h.object;
       while (o) {
@@ -5819,66 +6081,11 @@ export class ParkScene {
     if (this.onEditChanged) this.onEditChanged(this.selectedEditId);
   }
 
-  // ---------- Axe gameplay: chop down park trees ----------
+  // ---------- Cooking-ready beacon: red highlight + pot over the house ----------
 
-  /** Chop a tree if the player owns an axe. Falls over, hides, respawns later. */
-  public chopTree(treeId: string): boolean {
-    const idx = this.treeData.findIndex((t) => t.id === treeId);
-    if (idx < 0) return false;
-    const data = this.treeData[idx];
-    if (!data.alive) return false;
-    if (!this.hasAxe) {
-      if (this.onTreeClickedNoAxe) this.onTreeClickedNoAxe();
-      return false;
-    }
-    data.alive = false;
-    data.respawnAt = performance.now() + 60000;
-    const tree = this.treeGroups[idx];
-    // Falling timber animation: tip over + sink slightly
-    const startRot = tree.rotation.z;
-    const startY = tree.position.y;
-    const t0 = performance.now();
-    const fall = () => {
-      const k = Math.min(1, (performance.now() - t0) / 700);
-      tree.rotation.z = startRot + k * 1.35;
-      tree.position.y = startY - k * 0.4;
-      if (k < 1) {
-        requestAnimationFrame(fall);
-      } else {
-        tree.visible = false;
-        tree.rotation.z = startRot;
-        tree.position.y = startY;
-      }
-    };
-    requestAnimationFrame(fall);
-    sound.playChop();
-    this.spawnHeartParticles(tree.position.clone().add(new THREE.Vector3(0, 2.2, 0)));
-    // If it was selected in edit mode, deselect
-    if (this.selectedEditId === treeId) this.selectEditable(null);
-    if (this.onTreeChopped) this.onTreeChopped(treeId);
-    return true;
-  }
-
-  private updateTreeRespawns() {
+  /** Idle bob for the soup-ready beacon above the dog house. */
+  private updateCookBeaconBob() {
     const now = performance.now();
-    this.treeData.forEach((data, i) => {
-      if (!data.alive && now >= data.respawnAt) {
-        data.alive = true;
-        const tree = this.treeGroups[i];
-        tree.visible = true;
-        tree.scale.setScalar(0.01);
-        // Grow back to the tree's original size
-        const t0 = performance.now();
-        const target = data.baseScale || 1;
-        const grow = () => {
-          const k = Math.min(1, (performance.now() - t0) / 1200);
-          tree.scale.setScalar(Math.max(0.01, k * target));
-          if (k < 1) requestAnimationFrame(grow);
-          else tree.scale.setScalar(target);
-        };
-        requestAnimationFrame(grow);
-      }
-    });
     // Gentle badge bob + pulse above the dog house when soup is ready
     if (this.cookBeaconVisible) {
       const t = now / 1000;
@@ -6490,8 +6697,8 @@ export class ParkScene {
       // Particle system
       this.updateParticles(delta);
 
-      // Tree regrowth + soup-ready beacon bob
-      this.updateTreeRespawns();
+      // Soup-ready beacon bob above the dog house
+      this.updateCookBeaconBob();
 
       // Tabletop four-wins tokens falling + bouncing on the board
       this.updateTabletopTokens(delta);
