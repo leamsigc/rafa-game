@@ -1,0 +1,71 @@
+name: Build & Push Docker Image
+
+# Builds the Docker image and publishes it to GitHub Container Registry (GHCR)
+# so it can be pulled straight from Coolify:
+#   ghcr.io/<owner>/<repo>:latest
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+# Long-lived builds need write access to push packages + read the repo.
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Lowercase owner/repo — GHCR requires the image name to be lowercase.
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # QEMU is only needed for multi-arch (arm64) builds — enable the platforms
+      # line below if you want Apple Silicon / ARM servers to pull a native image.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Log in to GHCR with the built-in GITHUB_TOKEN — no extra secrets needed.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derives image tags + labels automatically:
+      #   - branch push  -> :latest, :main, :sha-<short>
+      #   - tag v1.2.3   -> :1.2.3, :1.2, :1, :latest
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      # Build and push in one step. The image is pushed to GHCR and tagged with
+      # everything produced by docker/metadata-action above. GHA layer caching
+      # keeps rebuilds fast.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,7 +1,10 @@
 services:
   dog-game:
-    build: .
-    image: 3d-dog-companion-game:latest
+    # Pull the pre-built image pushed to GHCR by the GitHub Actions workflow
+    # (.github/workflows/docker.yml). To build locally instead, comment out
+    # `image:` and uncomment `build: .` below.
+    image: ghcr.io/leamsigc/rafa-game:latest
+    # build: .
     ports:
       - "3000:3000"
     env_file:
@@ -9,7 +12,8 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      # GEMINI_API_KEY is optional — game falls back to local_engine without it.
+      # GEMINI_API_KEY is optional — the game falls back to a local dialogue
+      # engine without it. Set it via .env or your orchestrator's env vars.
       # GEMINI_API_KEY: ${GEMINI_API_KEY:-}
     restart: unless-stopped
     healthcheck:
