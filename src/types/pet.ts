@@ -37,7 +37,7 @@ export interface PetAccessory {
 
 export type HouseViewMode = "park" | "house" | "city" | "arcade" | "highway";
 
-export type HouseRoom = "living" | "hallway" | "kitchen" | "upstairs";
+export type HouseRoom = "living" | "hallway" | "kitchen" | "upstairs" | "bathroom";
 
 /** Seasonal holiday detection (drives Easter eggs: hats, pumpkins, flags...). */
 export type HolidayId = "none" | "halloween" | "christmas" | "july4" | "valentines" | "newyear";

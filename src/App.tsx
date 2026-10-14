@@ -83,6 +83,44 @@ const LAYOUT_STORAGE_KEY = "doghouse_layout_v1";
 const ALBUM_STORAGE_KEY = "doghouse_memory_album_v1";
 const MAX_ALBUM_PHOTOS = 30;
 const SNAP_MAX_DIM = 480;
+
+// ---------------------------------------------------------------------------
+//  Global save reset
+//
+//  Bump SAVE_RESET_VERSION to wipe EVERY player's progress back to zero. The
+//  marker makes it run exactly once per browser: on the next visit the old
+//  save is deleted before any state is read, so everyone starts fresh.
+//  Account linking, audio settings and the language choice are preserved.
+// ---------------------------------------------------------------------------
+const SAVE_RESET_VERSION = "reset-1";
+const SAVE_RESET_MARKER = "doghouse_save_reset_v1";
+const PRESERVED_KEYS = new Set([
+  SAVE_RESET_MARKER,
+  "doghouse_account_v1",
+  "doghouse_language_v1",
+  "pet_audio_settings_v1",
+]);
+
+function applyGlobalSaveReset() {
+  try {
+    if (localStorage.getItem(SAVE_RESET_MARKER) === SAVE_RESET_VERSION) return;
+    const doomed: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (!key || PRESERVED_KEYS.has(key)) continue;
+      if (key.startsWith("pet_") || key.startsWith("doghouse_") || key.startsWith("bonerush_")) {
+        doomed.push(key);
+      }
+    }
+    doomed.forEach((key) => localStorage.removeItem(key));
+    localStorage.setItem(SAVE_RESET_MARKER, SAVE_RESET_VERSION);
+  } catch {
+    // Private mode / storage disabled — nothing to reset.
+  }
+}
+
+// Runs on import, i.e. before any useState initialiser reads the old save.
+applyGlobalSaveReset();
 // Weather rotates to a new condition every few hours
 const WEATHER_STORAGE_KEY = "doghouse_weather_v1";
 const WEATHER_ROTATE_MS = 3 * 60 * 60 * 1000;
@@ -720,9 +758,11 @@ export default function App() {
       if (room === "kitchen") {
         showToast("Welcome to the Kitchen! Click the big pot in the middle to cook! 🍲");
       } else if (room === "hallway") {
-        showToast("The hallway! Doors to every room — and stairs going up... 👀");
+        showToast("The hallway! Black doorways to every room — and stairs going up... 👀");
       } else if (room === "upstairs") {
         showToast("The upstairs bedroom! Shhh... the bed is up here. 🛏️");
+      } else if (room === "bathroom") {
+        showToast("The bathroom! Click the shower to see Happy sitting in the bathtub. 🛁");
       }
     };
 
@@ -736,14 +776,30 @@ export default function App() {
       );
     };
 
-    scene.onDescendClicked = () => {
+    // Every room exit is a black doorway: Happy physically walks into the
+    // black wall panel, then we swap rooms and announce where he's going.
+    scene.onDoorWalkedThrough = (room, label) => {
+      setViewMode("house");
+      setHouseRoom(room);
       playCartoonTransition(
-        "Back downstairs... 🐾",
+        `${stats.name} is walking into the ${label}… 🐾`,
         () => {
-          scene.enterHallway();
+          if (room === "kitchen") scene.enterKitchen();
+          else if (room === "hallway") scene.enterHallway();
+          else if (room === "upstairs") scene.enterUpstairs();
+          else if (room === "bathroom") scene.enterBathroom();
+          else scene.enterLivingRoom();
         },
-        "Back down in the hallway! 🐾"
+        `Arrived in the ${label}! 🐾`
       );
+    };
+
+    // Bath-time guidance: nudge the player through the tub routine.
+    scene.onBathEvent = (step) => {
+      if (step === "soap") showToast("🧴 Press the bottle to squeeze the shampoo over Happy!");
+      else if (step === "rub") showToast("🫧 Tap Happy to rub the lather in!");
+      else if (step === "rinse") showToast("🚿 Unclip the shower head and rinse the foam off!");
+      else showToast("✨ All clean! Happy is fresh and fluffy!");
     };
 
     // ---- The little car: a fully 3D cinematic ride seen from the side ----
@@ -1506,6 +1562,8 @@ export default function App() {
       parkSceneRef.current.enterHallway();
     } else if (room === "upstairs") {
       parkSceneRef.current.enterUpstairs();
+    } else if (room === "bathroom") {
+      parkSceneRef.current.enterBathroom();
     } else {
       parkSceneRef.current.enterLivingRoom();
     }

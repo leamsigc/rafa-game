@@ -171,6 +171,7 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   const isAway = isCity || isArcade; // away-from-home worlds (city & galaxy arcade)
   const isKitchen = isHouse && houseRoom === "kitchen";
   const isHallway = isHouse && houseRoom === "hallway";
+  const isBathroom = isHouse && houseRoom === "bathroom";
   const isBedroom = isHouse && houseRoom === "upstairs";
   const roomLabel = isArcade
     ? "🌌 Galaxy Arcade"
@@ -184,7 +185,9 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
         ? "🚪 Hallway"
         : houseRoom === "upstairs"
           ? "🛏️ Upstairs"
-          : "🛋️ Living Room";
+          : houseRoom === "bathroom"
+            ? "🛁 Bathroom"
+            : "🛋️ Living Room";
 
   // Mobile-friendly collapsible panels: little arrows hide/show each
   // control group (top, tricks, bottom). Tap ▼ to slide down, ▲ to bring up.
@@ -595,6 +598,15 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
             }`}
           >
             🍳 Kitchen
+          </button>
+          <button
+            onClick={() => onSwitchRoom("bathroom")}
+            title="Go to Bathroom (shower + bathtub)"
+            className={`px-3.5 py-1.5 rounded-full text-xs font-black transition-all cursor-pointer ${
+              isBathroom ? "bg-sky-500 text-white shadow" : "text-white/80 hover:text-white hover:bg-white/10"
+            }`}
+          >
+            🛁 Bath
           </button>
           {onOpenCooking && (
             <button

@@ -414,10 +414,26 @@ Rules: 3 to 5 sentences, warm and cozy, sprinkle ONE short *stage action* in ast
 // dev server never reloads the page on writes (that caused a reload loop),
 // and it only flushes when an entry actually changed.
 const SCOREBOARD_FILE = path.join(os.tmpdir(), "doghouse_scoreboard.json");
+/**
+ * Scoreboard save version. Bump this to wipe every stored trainer entry back
+ * to zero once on the next deploy — the file is re-seeded empty when the
+ * loaded data is a legacy shape or carries an older version.
+ */
+const SCOREBOARD_VERSION = 2;
 let scoreboard: Array<Record<string, any>> = [];
 try {
   if (fs.existsSync(SCOREBOARD_FILE)) {
-    scoreboard = JSON.parse(fs.readFileSync(SCOREBOARD_FILE, "utf-8"));
+    const raw = JSON.parse(fs.readFileSync(SCOREBOARD_FILE, "utf-8"));
+    if (Array.isArray(raw)) {
+      // Legacy format (a bare array) → treat as pre-reset data.
+      console.log("[scoreboard] legacy save detected — resetting all entries to zero.");
+      scoreboard = [];
+    } else if (raw && raw.version === SCOREBOARD_VERSION && Array.isArray(raw.entries)) {
+      scoreboard = raw.entries;
+    } else {
+      console.log("[scoreboard] save version changed — resetting all entries to zero.");
+      scoreboard = [];
+    }
   }
 } catch {
   // fresh scoreboard
@@ -427,7 +443,10 @@ const flushScoreboard = () => {
   if (!scoreboardDirty) return;
   scoreboardDirty = false;
   try {
-    fs.writeFileSync(SCOREBOARD_FILE, JSON.stringify(scoreboard));
+    fs.writeFileSync(
+      SCOREBOARD_FILE,
+      JSON.stringify({ version: SCOREBOARD_VERSION, entries: scoreboard })
+    );
   } catch {
     // ignore
   }
@@ -542,8 +561,12 @@ function mpLeave(ws: WebSocket) {
   mpBroadcast(room, { type: "member_left", id: client.memberId, snapshot: roomSnapshot(room) });
 }
 
-function setupMultiplayerServer(server: import("http").Server) {
-  const mpWss = new WebSocketServer({ server, path: "/api/mp" });
+// NOTE: created with `noServer` and upgraded manually in startServer().
+// Two WebSocketServers attached to the same HTTP server with `path` set do NOT
+// coexist: each one aborts any upgrade whose path it doesn't match with a 400,
+// so the first server (/api/live) killed every /api/mp upgrade request.
+function setupMultiplayerServer() {
+  const mpWss = new WebSocketServer({ noServer: true });
 
   mpWss.on("connection", (ws) => {
     ws.on("message", (rawData) => {
@@ -614,6 +637,8 @@ function setupMultiplayerServer(server: import("http").Server) {
 
     ws.on("close", () => mpLeave(ws));
   });
+
+  return mpWss;
 }
 
 // 7. Storybook: a short illustrated bedtime story about the player's dog.
@@ -835,7 +860,9 @@ async function startServer() {
   const server = http.createServer(app);
 
   // 3. Setup Gemini Live API WebSocket Server
-  const wss = new WebSocketServer({ server, path: "/api/live" });
+  // Both WebSocket endpoints share ONE 'upgrade' listener that routes by path
+  // (see setupMultiplayerServer's note for why `path:` can't be used here).
+  const wss = new WebSocketServer({ noServer: true });
 
   wss.on("connection", async (clientWs: WebSocket) => {
     console.log("Gemini Live client connected");
@@ -919,7 +946,17 @@ Understand simple owner commands: if asked to sit, roll over, fetch, dance, spin
     });
   });
 
-  setupMultiplayerServer(server);
+  const mpWss = setupMultiplayerServer();
+
+  server.on("upgrade", (req, socket, head) => {
+    const pathname = (req.url || "").split("?")[0];
+    const target = pathname === "/api/live" ? wss : pathname === "/api/mp" ? mpWss : null;
+    if (!target) {
+      socket.destroy();
+      return;
+    }
+    target.handleUpgrade(req, socket, head, (ws) => target.emit("connection", ws, req));
+  });
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

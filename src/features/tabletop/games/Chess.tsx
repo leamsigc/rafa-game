@@ -12,6 +12,27 @@ export const inB = (r: number, c: number) => r >= 0 && r < N && c >= 0 && c < N;
 
 export const PIECE_VALUE: Record<PieceType, number> = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 1000 };
 
+// ---------------------------------------------------------------------------
+//  Difficulty (Elo). Happy gets stronger the higher the rating: at 500 he
+//  plays loose and often wanders, at 1,000 he punishes free material, and at
+//  3,000 he searches several plies ahead with alpha-beta pruning.
+// ---------------------------------------------------------------------------
+
+export type Elo = 500 | 1000 | 3000;
+
+export interface EloLevel {
+  elo: Elo;
+  label: string;
+  emoji: string;
+  blurb: string;
+}
+
+export const ELO_LEVELS: EloLevel[] = [
+  { elo: 500, label: "Beginner", emoji: "🐶", blurb: "500 Elo · plays loose and wanders" },
+  { elo: 1000, label: "Advanced", emoji: "🎓", blurb: "1,000 Elo · punishes free pieces" },
+  { elo: 3000, label: "Grandmaster", emoji: "👑", blurb: "3,000 Elo · thinks several moves ahead" },
+];
+
 export function initialBoard(): Board {
   const b: Board = Array(N * N).fill(null);
   const back: PieceType[] = ["r", "n", "b", "q", "k", "b", "n", "r"];
@@ -94,21 +115,127 @@ export function applyOn(board: Board, fr: { r: number; c: number }, to: Mv): Boa
   return nb;
 }
 
-export function aiPick(board: Board): { from: { r: number; c: number }; to: Mv } | null {
-  const moves = allMovesFor(board, 1);
-  if (!moves.length) return null;
+/** Mild positional taste: central files and advanced pawns are worth a bit. */
+const CENTER_BONUS = [0, 0.05, 0.1, 0.16, 0.16, 0.1, 0.05, 0];
+
+/** Static evaluation from Happy's (black's) point of view. */
+function evaluate(board: Board): number {
+  let s = 0;
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      const p = board[chessAt(r, c)];
+      if (!p) continue;
+      let v = PIECE_VALUE[p.t];
+      if (p.t !== "k") {
+        v += CENTER_BONUS[c] * 0.6;
+        if (p.t === "p") v += r * 0.06;
+      }
+      s += p.c === 1 ? v : -v;
+    }
+  }
+  return s;
+}
+
+/** Cheap move ordering (captures first) — makes alpha-beta prune much more. */
+function orderMoves(board: Board, moves: { from: { r: number; c: number }; to: Mv }[]) {
+  return moves
+    .map((m) => {
+      const victim = m.to.cap ? board[chessAt(m.to.r, m.to.c)] : null;
+      return { m, s: victim ? PIECE_VALUE[victim.t] : 0 };
+    })
+    .sort((a, b) => b.s - a.s)
+    .map((x) => x.m);
+}
+
+/** Negamax with alpha-beta. Returns the score for the side to move. */
+function negamax(
+  board: Board,
+  depth: number,
+  alpha: number,
+  beta: number,
+  color: Color
+): number {
+  const moves = allMovesFor(board, color);
+  if (!moves.length) return color === 1 ? -90000 : 90000;
+
+  // Taking the king ends the game — always worth more than anything else.
+  for (const m of moves) {
+    if (board[chessAt(m.to.r, m.to.c)]?.t === "k") return 100000;
+  }
+  if (depth === 0) {
+    const e = evaluate(board);
+    return color === 1 ? e : -e;
+  }
+
+  let best = -Infinity;
+  for (const m of orderMoves(board, moves)) {
+    const nb = applyOn(board, m.from, m.to);
+    const score = -negamax(nb, depth - 1, -beta, -alpha, color === 0 ? 1 : 0);
+    if (score > best) best = score;
+    if (best > alpha) alpha = best;
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+
+/** The old one-ply greedy grab, used by the beginner level. */
+function greedyPick(board: Board, moves: { from: { r: number; c: number }; to: Mv }[]) {
   let best = moves[0];
   let bestScore = -Infinity;
   for (const m of moves) {
     let score = Math.random() * 0.4;
     if (m.to.cap) {
       const cap = board[chessAt(m.to.r, m.to.c)];
-      if (cap?.t === "k") return m;
       score += (cap ? PIECE_VALUE[cap.t] : 0) * 10;
     }
     score += m.to.r * 0.1;
     if (m.to.c >= 2 && m.to.c <= 5) score += 0.2;
-    if (score > bestScore) { bestScore = score; best = m; }
+    if (score > bestScore) {
+      bestScore = score;
+      best = m;
+    }
+  }
+  return best;
+}
+
+export function aiPick(
+  board: Board,
+  elo: Elo = 1000
+): { from: { r: number; c: number }; to: Mv } | null {
+  const moves = allMovesFor(board, 1);
+  if (!moves.length) return null;
+
+  // Any level takes a hanging king.
+  for (const m of moves) {
+    if (board[chessAt(m.to.r, m.to.c)]?.t === "k") return m;
+  }
+
+  if (elo <= 500) {
+    // Beginner: mostly wanders around, occasionally notices a free piece.
+    if (Math.random() < 0.5) return moves[Math.floor(Math.random() * moves.length)];
+    return greedyPick(board, moves);
+  }
+
+  // 1,000 → two plies (spot a hanging piece and don't give one away).
+  // 3,000 → three plies with alpha-beta (sees short tactics).
+  const depth = elo >= 3000 ? 3 : 2;
+  let best = moves[0];
+  let bestScore = -Infinity;
+  let alpha = -Infinity;
+  for (const m of orderMoves(board, moves)) {
+    const nb = applyOn(board, m.from, m.to);
+    const score = -negamax(nb, depth - 1, -Infinity, -alpha, 0);
+    if (score > bestScore) {
+      bestScore = score;
+      best = m;
+    }
+    if (score > alpha) alpha = score;
+  }
+
+  // Advanced players still slip now and then (but never drop a free capture).
+  if (elo < 3000 && Math.random() < 0.12) {
+    const alt = moves[Math.floor(Math.random() * moves.length)];
+    if (!alt.to.cap) return alt;
   }
   return best;
 }

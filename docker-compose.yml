@@ -7,8 +7,12 @@ services:
     # build: .
     ports:
       - "3000:3000"
+    # Optional: copy .env.example to .env to set GEMINI_API_KEY etc.
+    # Marked required:false so `docker compose up` works without a .env file —
+    # the game falls back to the local dialogue engine when no key is set.
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       NODE_ENV: production
       PORT: 3000

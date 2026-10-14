@@ -7,10 +7,12 @@ import {
 } from "./games/TicTacToe";
 import {
   Board as ChessBoard, Color, Mv, initialBoard, genMoves, applyOn, allMovesFor, aiPick, chessAt,
+  Elo, ELO_LEVELS,
 } from "./games/Chess";
 import {
   CF_Tok, cfIndex, cfWinner, cfDropRow, cfSmartColumn,
 } from "./games/ConnectFour";
+import { sound } from "../../utils/audio";
 
 interface Props {
   scene: ParkScene | null;
@@ -29,6 +31,18 @@ export const TabletopPlayView: React.FC<Props> = ({ scene, gameId, dogName, onBa
   const [phase, setPhase] = useState<"build" | "play" | "over">("build");
   const [turn, setTurn] = useState<0 | 1>(0);
   const [result, setResult] = useState<GameResult | null>(null);
+  // Chess difficulty: how strong Happy plays (and thus how high his Elo is).
+  const [elo, setElo] = useState<Elo>(() => {
+    try {
+      const saved = Number(localStorage.getItem("pet_chess_elo"));
+      if (saved === 500 || saved === 1000 || saved === 3000) return saved;
+    } catch {
+      /* ignore */
+    }
+    return 1000;
+  });
+  const eloRef = useRef(elo);
+  eloRef.current = elo;
 
   // per-game state
   const [ttt, setTtt] = useState<Cell[]>(Array(9).fill(null));
@@ -40,6 +54,11 @@ export const TabletopPlayView: React.FC<Props> = ({ scene, gameId, dogName, onBa
   const tttRef = useRef(ttt); tttRef.current = ttt;
   const chessRef = useRef(chess); chessRef.current = chess;
   const cfRef = useRef(cf); cfRef.current = cf;
+  // The scene's cell handler is installed once, so it must never read state
+  // directly (it would be frozen at the first render — every tap ignored).
+  const phaseRef = useRef(phase); phaseRef.current = phase;
+  const turnRef = useRef<0 | 1>(turn); turnRef.current = turn;
+  const chessSelRef = useRef(chessSel); chessSelRef.current = chessSel;
 
   const endGame = (kind: GameResult["kind"], highlight: { r: number; c: number }[] = []) => {
     setPhase("over");
@@ -101,7 +120,9 @@ export const TabletopPlayView: React.FC<Props> = ({ scene, gameId, dogName, onBa
     setChess(nb); chessRef.current = nb;
     setChessSel(null);
     scene?.chessMove(fr.r, fr.c, to.r, to.c, to.cap);
-    if (captured) return endGame(who === 0 ? "you" : "happy");
+    // King captured = checkmate. Wait for the queen-kick animation to finish
+    // before the result banner slides in.
+    if (captured) return setTimeout(() => endGame(who === 0 ? "you" : "happy"), 2100);
     if (allMovesFor(nb, who === 0 ? 1 : 0).length === 0) return endGame("draw");
     setTurn(who === 0 ? 1 : 0);
   };
@@ -109,12 +130,12 @@ export const TabletopPlayView: React.FC<Props> = ({ scene, gameId, dogName, onBa
   useEffect(() => {
     if (gameId !== "chess" || turn !== 1 || phase !== "play") return;
     const t = setTimeout(() => {
-      const mv = aiPick(chessRef.current);
+      const mv = aiPick(chessRef.current, eloRef.current);
       if (mv) chessMove(mv.from, mv.to, 1);
-    }, 640);
+    }, 1050);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [turn, phase]);
+  }, [turn, phase, elo]);
 
   // ----- CONNECT FOUR -----
   const cfPlay = (col: number, who: 0 | 1) => {
@@ -142,12 +163,13 @@ export const TabletopPlayView: React.FC<Props> = ({ scene, gameId, dogName, onBa
 
   // ----- Cell dispatch -----
   function handleCell(p: { r: number; c: number; col: number }) {
-    if (phase !== "play" || turn !== 0) return;
+    if (phaseRef.current !== "play" || turnRef.current !== 0) return;
+    const sel = chessSelRef.current;
     if (gameId === "tictactoe") {
       if (tttRef.current[tttIndex(p.r, p.c)] == null) tttPlay(tttIndex(p.r, p.c), 0);
     } else if (gameId === "chess") {
-      if (chessSel && genMoves(chessRef.current, chessSel.r, chessSel.c).some((m) => m.r === p.r && m.c === p.c)) {
-        chessMove(chessSel, { r: p.r, c: p.c, cap: !!chessRef.current[chessAt(p.r, p.c)] }, 0);
+      if (sel && genMoves(chessRef.current, sel.r, sel.c).some((m) => m.r === p.r && m.c === p.c)) {
+        chessMove(sel, { r: p.r, c: p.c, cap: !!chessRef.current[chessAt(p.r, p.c)] }, 0);
       } else {
         const piece = chessRef.current[chessAt(p.r, p.c)];
         if (piece && piece.c === 0) setChessSel({ r: p.r, c: p.c });
@@ -201,6 +223,42 @@ export const TabletopPlayView: React.FC<Props> = ({ scene, gameId, dogName, onBa
           <div className="pointer-events-auto px-4 py-2 rounded-full bg-[#7c2d12]/85 border border-[#fbbf24]/30 text-[#ffedd5] text-xs font-black backdrop-blur shadow-lg">
             {statusText}
           </div>
+        </div>
+      )}
+
+      {/* Chess: pick Happy's Elo + a hint that the board can be orbited */}
+      {gameId === "chess" && phase !== "over" && (
+        <div className="flex flex-col items-center gap-1.5 px-4 mt-2">
+          <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-1 p-1 rounded-full bg-black/50 border border-white/15 backdrop-blur">
+            <span className="px-2 text-[10px] font-black uppercase tracking-wider text-[#fed7aa]">
+              Happy's Elo
+            </span>
+            {ELO_LEVELS.map((lvl) => (
+              <button
+                key={lvl.elo}
+                onClick={() => {
+                  sound.playButtonTap();
+                  setElo(lvl.elo);
+                  try {
+                    localStorage.setItem("pet_chess_elo", String(lvl.elo));
+                  } catch {
+                    /* ignore */
+                  }
+                }}
+                title={lvl.blurb}
+                className={`px-3 py-1.5 rounded-full text-[11px] font-black transition-colors cursor-pointer ${
+                  elo === lvl.elo
+                    ? "bg-[#fbbf24] text-[#7c2d12] shadow"
+                    : "text-white/75 hover:text-white hover:bg-white/10"
+                }`}
+              >
+                {lvl.emoji} {lvl.label} · {lvl.elo}
+              </button>
+            ))}
+          </div>
+          <p className="text-[10px] font-bold text-white/70 drop-shadow">
+            Drag to orbit the board · scroll to zoom in and scan the position
+          </p>
         </div>
       )}
 

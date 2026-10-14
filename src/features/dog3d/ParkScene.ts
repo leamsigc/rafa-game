@@ -1,11 +1,27 @@
 import * as THREE from "three";
-import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { Dog3D } from "./DogModel";
-import { polishScene } from "./renderPolish";
 import { DogAction, DogBreed, BedColors, HouseViewMode, HouseRoom } from "../../types/pet";
 import type { TabletopGameId } from "../tabletop/tabletopData";
 import { getCurrentSeason } from "../seasonal/holidays";
 import { sound } from "../../utils/audio";
+
+/**
+ * Optional real "Star" logo. Drop the artwork into the repo as
+ * `src/assets/star-logo.(png|svg|jpg|webp)` and it is picked up automatically
+ * for the third shampoo bottle in the bathroom. Without the file the bottle
+ * falls back to a drawn white star + "Star".
+ */
+const STAR_LOGO_URL = (() => {
+  const mods = import.meta.glob(
+    ["../../assets/star-logo.*", "../../assets/images/star-logo.*"],
+    {
+      eager: true,
+      query: "?url",
+      import: "default",
+    }
+  ) as Record<string, string>;
+  return Object.values(mods)[0];
+})();
 
 export type TimeOfDay = "day" | "sunset" | "night";
 
@@ -45,6 +61,7 @@ export class ParkScene {
   private kitchenGroup: THREE.Group = new THREE.Group();
   private hallwayGroup: THREE.Group = new THREE.Group();
   private upstairsGroup: THREE.Group = new THREE.Group();
+  private bathroomGroup: THREE.Group = new THREE.Group();
   private cityGroup: THREE.Group = new THREE.Group();
 
   // The little car (parked in front of the house — drives to the City!)
@@ -152,6 +169,31 @@ export class ParkScene {
   private tabletopBoardGroupAdded = false;
   private tabletopPackageMeshes: THREE.Object3D[] = [];
   private tabletopChessPieces = new Map<number, THREE.Object3D>();
+  /** In-flight board animation: piece leap/hover/smash, or the queen's kick. */
+  private ttAnim: {
+    phase: "leap" | "hover" | "smash" | "queen" | "kick" | "slide";
+    t: number;
+    dur: number;
+    actor: THREE.Object3D;
+    from: THREE.Vector3;
+    to: THREE.Vector3;
+    hoverY: number;
+    victim: THREE.Object3D | null;
+    victimColor: number;
+    kingCapture: boolean;
+    queen: THREE.Object3D | null;
+    queenFrom: THREE.Vector3;
+    queenTo: THREE.Vector3;
+  } | null = null;
+  /** Flying debris from a smashed piece. */
+  private ttBits: {
+    mesh: THREE.Mesh;
+    vel: THREE.Vector3;
+    spin: THREE.Vector3;
+    life: number;
+  }[] = [];
+  /** Happy's opponent's queen (the white queen) — she delivers the kick. */
+  private ttWhiteQueen: THREE.Object3D | null = null;
   private tabletopEmojiCache = new Map<string, THREE.Texture>();
   private tabletopTokens: {
     mesh: THREE.Mesh;
@@ -190,18 +232,14 @@ export class ParkScene {
   // House Room Interior elements (Living Room)
   private roomFloorMesh!: THREE.Mesh;
   private houseDoorMesh!: THREE.Mesh;
-  private hallwayDoorMesh!: THREE.Mesh;
 
   // Kitchen Room elements (second house room)
   private kitchenFloorMesh!: THREE.Mesh;
-  private kitchenHallDoorMesh!: THREE.Mesh;
   private potGroup: THREE.Group = new THREE.Group();
   private potSteamGroup: THREE.Group = new THREE.Group();
 
   // Hallway elements (connects living <-> kitchen, stairs to upstairs)
   private hallwayFloorMesh!: THREE.Mesh;
-  private hallwayLivingMesh!: THREE.Mesh;
-  private hallwayKitchenMesh!: THREE.Mesh;
   private stairsGroup: THREE.Group = new THREE.Group();
   private stairsMatMesh!: THREE.Mesh;
   private readonly STAIR_BASE = new THREE.Vector3(2.3, 0, 4.1);
@@ -209,7 +247,58 @@ export class ParkScene {
 
   // Upstairs bedroom elements (wider than deep)
   private upstairsFloorMesh!: THREE.Mesh;
-  private descendMesh!: THREE.Mesh;
+
+  // Bathroom (new room off the hallway — shower, toilet, bath + soap shelf)
+  private bathroomFloorMesh!: THREE.Mesh;
+  private bathtubGroup: THREE.Group = new THREE.Group();
+  private toiletGroup: THREE.Group = new THREE.Group();
+  private soapShelfGroup: THREE.Group = new THREE.Group();
+  private readonly BATHTUB_CENTER = new THREE.Vector3(-3.0, 0.14, -3.6);
+  private inBathtub: boolean = false;
+
+  // Bath-time routine: pick a shampoo → squeeze → rub → rinse with the shower.
+  private bathStep: "idle" | "soap" | "lather" | "rinse" = "idle";
+  private bathKind: "mens" | "kids" | "star" = "mens";
+  private bathBottle: THREE.Mesh | null = null;
+  private bathStream: THREE.Mesh | null = null;
+  private foamGroup: THREE.Group = new THREE.Group();
+  private foamBlobs: THREE.Mesh[] = [];
+  private foamBuilt = false;
+  private bathAnim: {
+    kind: "float" | "squeeze" | "rinse";
+    t: number;
+    dur: number;
+    from: THREE.Vector3;
+    to: THREE.Vector3;
+  } | null = null;
+  private showerHeadGroup: THREE.Group = new THREE.Group();
+  private showerGroup: THREE.Group = new THREE.Group();
+  private showerHose: THREE.Mesh | null = null;
+  private showerSpray: THREE.Mesh | null = null;
+  private showerDetached = false;
+  private showerReturnTo = new THREE.Vector3(-2.4, 2.14, -4.35);
+  public onBathEvent?: (step: "soap" | "rub" | "rinse" | "done") => void;
+
+  // Black doorways: every room exit is a black mat + a solid black wall panel  // that Happy walks through, announced per destination room.
+  private doorways: {
+    target: HouseRoom;
+    label: string;
+    mat: THREE.Mesh;
+    panel: THREE.Mesh;
+    /** The room group this doorway belongs to (hidden rooms are skipped). */
+    owner: THREE.Group;
+    /** Unit vector pointing from the panel out into the room (approach axis). */
+    roomDir: THREE.Vector3;
+  }[] = [];
+  private doorWalk: {
+    t: number;
+    dur: number;
+    from: THREE.Vector3;
+    to: THREE.Vector3;
+    target: HouseRoom;
+    label: string;
+  } | null = null;
+  public onDoorWalkedThrough?: (room: HouseRoom, label: string) => void;
 
   // Living-room toy corner (multiple toys + toy box)
   private toyCornerGroup: THREE.Group = new THREE.Group();
@@ -280,6 +369,8 @@ export class ParkScene {
   private fetchState: "idle" | "chasing" | "grabbing" | "returning" = "idle";
   private fetchTargetPos = new THREE.Vector3();
   private fetchReturnPos = new THREE.Vector3(0, 0, 2);
+  /** Grace period after a throw before Happy may pick the ball up. */
+  private fetchGrabDelay = 0;
 
   // Camera control state
   private isDragging: boolean = false;
@@ -343,25 +434,10 @@ export class ParkScene {
     this.renderer.setSize(width, height);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
-    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
-
-    // Image-based lighting: a soft indoor "room" environment is baked once and
-    // fed to every MeshStandardMaterial in the game (dog, furniture, houses,
-    // city, arcade). This is what stops plain primitives from looking flat —
-    // they now pick up subtle reflections and colour bleed from their surroundings.
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    try {
-      const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
-      this.scene.environment = envRT.texture;
-      this.scene.environmentIntensity = 0.45;
-    } catch {
-      // Environment lighting is a nicety — the scene still renders without it.
-    }
-    pmrem.dispose();
 
     // 4. Lights & Sky
     this.setupLighting();
@@ -381,6 +457,7 @@ export class ParkScene {
     this.setupKitchenRoom();
     this.setupHallway();
     this.setupUpstairs();
+    this.setupBathroom();
     this.setupToyCorner();
     this.setupCookBeacon();
     this.setupSelectionMarker();
@@ -417,12 +494,14 @@ export class ParkScene {
     this.scene.add(this.kitchenGroup);
     this.scene.add(this.hallwayGroup);
     this.scene.add(this.upstairsGroup);
+    this.scene.add(this.bathroomGroup);
     this.scene.add(this.cityGroup);
     this.scene.add(this.galaxyGroup);
     this.houseGroup.visible = false; // Initially outdoors
     this.kitchenGroup.visible = false;
     this.hallwayGroup.visible = false;
     this.upstairsGroup.visible = false;
+    this.bathroomGroup.visible = false;
     this.cityGroup.visible = false;
     this.galaxyGroup.visible = false;
 
@@ -442,14 +521,6 @@ export class ParkScene {
 
     // 11. Event listeners for Orbit & Click Interactions
     this.setupInputEvents();
-
-    // 12. Visual polish pass (runs LAST, after every builder + the dog):
-    // every box / cylinder / sphere / cone primitive in the finished scene
-    // graph is upgraded in place — rounded corners, smoother silhouettes,
-    // richer material response — so the whole world reads as sculpted 3D
-    // models instead of raw primitives. It never touches positions, scales,
-    // userData or hierarchy, so all game logic keeps working unchanged.
-    polishScene(this.scene);
 
     // Start loop
     this.start();
@@ -716,169 +787,62 @@ export class ParkScene {
     return tex;
   }
 
-  /** Scalloped roof-shingle texture for the dog house roof. */
-  private shingleTexture(base: string, shade: string): THREE.CanvasTexture {
-    const c = document.createElement("canvas");
-    c.width = 128;
-    c.height = 128;
-    const ctx = c.getContext("2d")!;
-    ctx.fillStyle = shade;
-    ctx.fillRect(0, 0, 128, 128);
-    const rowH = 22;
-    for (let y = 0; y < 128; y += rowH) {
-      for (let x = -16; x < 128; x += 32) {
-        const off = (y / rowH) % 2 ? 16 : 0;
-        ctx.fillStyle = base;
-        ctx.beginPath();
-        ctx.roundRect(x + off + 1, y + 1, 30, rowH - 3, 6);
-        ctx.fill();
-        ctx.fillStyle = "rgba(255,255,255,0.06)";
-        ctx.fillRect(x + off + 3, y + 2, 26, 3);
-      }
-    }
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.wrapS = THREE.RepeatWrapping;
-    tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(3, 2);
-    return tex;
-  }
-
   private buildDogHouse(x: number, y: number, z: number) {
     const house = new THREE.Group();
     house.position.set(x, y, z);
 
-    // ---- Stone foundation the house sits on ----
-    const foundation = new THREE.Mesh(
-      new THREE.BoxGeometry(2.65, 0.22, 3.05),
-      new THREE.MeshStandardMaterial({ color: 0x9ca3af, roughness: 0.95 })
-    );
-    foundation.position.y = 0.11;
-    foundation.receiveShadow = true;
-    foundation.castShadow = true;
-    house.add(foundation);
-
-    // ---- Cedar plank walls (real plank + grain texture) ----
+    // Walls (warm cedar wood — keeps the cedar plank texture)
     const wallGeom = new THREE.BoxGeometry(2.4, 1.8, 2.8);
     const wallMat = new THREE.MeshStandardMaterial({
       map: this.cedarPlankTexture("#9a3412", "rgba(60,25,10,0.35)"),
       color: 0xffffff,
-      roughness: 0.82,
+      roughness: 0.8,
     });
     const walls = new THREE.Mesh(wallGeom, wallMat);
-    walls.position.y = 1.0;
+    walls.position.y = 0.9;
     walls.castShadow = true;
     walls.receiveShadow = true;
     house.add(walls);
 
-    // ---- Corner trim posts (lighter wood framing) ----
-    const trimMat = new THREE.MeshStandardMaterial({ color: 0xd6b38a, roughness: 0.75 });
-    [
-      [-1.21, -1.41], [1.21, -1.41], [-1.21, 1.41], [1.21, 1.41],
-    ].forEach(([px, pz]) => {
-      const post = new THREE.Mesh(new THREE.BoxGeometry(0.13, 1.82, 0.13), trimMat);
-      post.position.set(px, 1.0, pz);
-      post.castShadow = true;
-      house.add(post);
-    });
-
-    // ---- Doorway opening (arched) ----
-    const doorGeom = new THREE.CylinderGeometry(0.55, 0.55, 0.1, 24);
+    // Doorway opening
+    const doorGeom = new THREE.CylinderGeometry(0.55, 0.55, 0.1, 16);
     doorGeom.rotateX(Math.PI / 2);
     const doorMat = new THREE.MeshBasicMaterial({ color: 0x1f140e });
     const door = new THREE.Mesh(doorGeom, doorMat);
-    door.position.set(0, 0.9, 1.41);
+    door.position.set(0, 0.8, 1.41);
     house.add(door);
 
     const doorLowerGeom = new THREE.BoxGeometry(1.1, 0.8, 0.1);
     const doorLower = new THREE.Mesh(doorLowerGeom, doorMat);
-    doorLower.position.set(0, 0.5, 1.41);
+    doorLower.position.set(0, 0.4, 1.41);
     house.add(doorLower);
 
-    // Door frame trim
-    const frameMat = new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.6 });
-    [-0.62, 0.62].forEach((dx) => {
-      const jamb = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.0, 0.12), frameMat);
-      jamb.position.set(dx, 0.7, 1.43);
-      jamb.castShadow = true;
-      house.add(jamb);
-    });
-
-    // ---- Little front porch step ----
-    const step = new THREE.Mesh(
-      new THREE.BoxGeometry(1.5, 0.12, 0.55),
-      new THREE.MeshStandardMaterial({ color: 0xb5885a, roughness: 0.85 })
-    );
-    step.position.set(0, 0.16, 1.75);
-    step.castShadow = true;
-    step.receiveShadow = true;
-    house.add(step);
-
-    // ---- Shingled red gable roof ----
+    // Roof (red gable roof)
     const roofGeom = new THREE.ConeGeometry(2.2, 1.2, 4);
     roofGeom.rotateY(Math.PI / 4);
     roofGeom.scale(1.2, 1, 1.4);
-    const roofMat = new THREE.MeshStandardMaterial({
-      map: this.shingleTexture("#b91c1c", "#7f1212"),
-      color: 0xffffff,
-      roughness: 0.72,
-    });
+    const roofMat = new THREE.MeshStandardMaterial({ color: 0xb91c1c, roughness: 0.7 });
     const roof = new THREE.Mesh(roofGeom, roofMat);
-    roof.position.y = 2.5;
+    roof.position.y = 2.3;
     roof.castShadow = true;
     house.add(roof);
 
-    // Ridge cap + eaves so the roof silhouette reads as a real roof
-    const ridge = new THREE.Mesh(
-      new THREE.BoxGeometry(0.16, 0.1, 3.35),
-      new THREE.MeshStandardMaterial({ color: 0x7f1212, roughness: 0.7 })
-    );
-    ridge.position.y = 3.1;
-    ridge.castShadow = true;
-    house.add(ridge);
-
-    // ---- Warm lantern hanging by the door ----
-    const lanternGroup = new THREE.Group();
+    // Warm lantern hanging on doghouse
+    const lanternGeom = new THREE.CylinderGeometry(0.12, 0.16, 0.35, 8);
     const lanternMat = new THREE.MeshStandardMaterial({
       color: 0xfbbf24,
       emissive: 0xf59e0b,
-      emissiveIntensity: 0.7,
-      roughness: 0.35,
+      emissiveIntensity: 0.6,
     });
-    const lanternGlass = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.11, 0.14, 0.3, 12),
-      lanternMat
-    );
-    lanternGroup.add(lanternGlass);
-    const lanternCap = new THREE.Mesh(
-      new THREE.ConeGeometry(0.17, 0.12, 12),
-      new THREE.MeshStandardMaterial({ color: 0x78350f, metalness: 0.5, roughness: 0.4 })
-    );
-    lanternCap.position.y = 0.2;
-    lanternGroup.add(lanternCap);
-    lanternGroup.position.set(1.1, 1.5, 1.45);
-    house.add(lanternGroup);
+    const lantern = new THREE.Mesh(lanternGeom, lanternMat);
+    lantern.position.set(1.1, 1.4, 1.45);
+    house.add(lantern);
 
-    // ---- Bone sign with "BUDDY" ----
-    const signCanvas = document.createElement("canvas");
-    signCanvas.width = 256;
-    signCanvas.height = 72;
-    const sctx = signCanvas.getContext("2d")!;
-    sctx.fillStyle = "#fef08a";
-    sctx.fillRect(0, 0, 256, 72);
-    sctx.fillStyle = "#7c2d12";
-    sctx.font = "bold 40px sans-serif";
-    sctx.textAlign = "center";
-    sctx.textBaseline = "middle";
-    sctx.fillText("🐾 BUDDY", 128, 38);
+    // Bone sign with "BUDDY"
     const signGeom = new THREE.BoxGeometry(1.2, 0.35, 0.06);
-    const signMat = new THREE.MeshStandardMaterial({
-      map: new THREE.CanvasTexture(signCanvas),
-      color: 0xffffff,
-      roughness: 0.6,
-    });
+    const signMat = new THREE.MeshStandardMaterial({ color: 0xfef08a });
     const sign = new THREE.Mesh(signGeom, signMat);
-    sign.position.set(0, 1.72, 1.43);
+    sign.position.set(0, 1.6, 1.43);
     house.add(sign);
 
     // Tag entire exterior house for clicking
@@ -1028,6 +992,14 @@ export class ParkScene {
   private readonly TT_CAM_POS = new THREE.Vector3(-2.7, 1.9, 1.7);
   private readonly TT_CAM_LOOK = new THREE.Vector3(-2.7, 0.85, -2.7);
   private readonly TT_HAPPY = new THREE.Vector3(-2.7, 0, -3.15);
+  /** Point every tabletop camera shot orbits around (the middle of the board). */
+  private readonly TT_FOCUS = new THREE.Vector3(-2.7, 1.14, -1.7);
+  /** Free orbit while a board game is being played — the player can spin and
+   *  zoom around the board to scan the position (clamped so the board always
+   *  stays in view). */
+  private ttSpherical = new THREE.Spherical(1.9, 1.05, 0);
+  /** Height of the in-world tabletop board surface (pieces stand on this). */
+  private readonly TT_BOARD_TOP = 0.034;
 
   /** Render an emoji / glyph to a canvas texture for 3D board pieces. */
   private emojiTexture(char: string, tint = ""): THREE.Texture {
@@ -1074,6 +1046,10 @@ export class ParkScene {
     g.clear();
     this.tabletopChessPieces.clear();
     this.tabletopTokens.length = 0;
+    // Cancel any in-flight piece animation / debris so a restart is clean.
+    this.ttAnim = null;
+    this.ttBits.length = 0;
+    this.ttWhiteQueen = null;
   }
 
   private setTabletopPackagesVisible(v: boolean) {
@@ -1095,6 +1071,11 @@ export class ParkScene {
     this.tabletopBoardGroup.visible = true;
     this.setTabletopPackagesVisible(false);
     this.clearTabletopBoard();
+    // Start with the board framed from the player's side at a fairly steep
+    // angle (so tall pieces never hide the square behind them); the player can
+    // drag to orbit and scroll to zoom while they study the position.
+    this.ttSpherical.set(2.4, 0.62, 0);
+    this.updateCameraPosition();
 
     // Seat Happy across the table, facing the player side (+Z, toward camera).
     this.dog.group.position.copy(this.TT_HAPPY);
@@ -1134,7 +1115,7 @@ export class ParkScene {
     for (let r = 0; r < 3; r++)
       for (let c = 0; c < 3; c++) {
         const pad = this.ttFlatCell(0.2, 0.2, (r + c) % 2 ? 0xfde68a : 0xfef3c7, 0.03);
-        pad.position.set((c - 1) * 0.225, 0, (r - 1) * 0.225);
+        pad.position.set((c - 1) * 0.225, 0.032, (r - 1) * 0.225);
         pad.userData = { type: "tabletopCell", g: "ttt", r, c, col: c };
         g.add(pad);
       }
@@ -1158,32 +1139,115 @@ export class ParkScene {
     rise();
   }
 
+  /**
+   * One real 3D chess piece (pawn / rook / knight / bishop / queen / king),
+   * built from turned, rounded primitives so the whole set reads as sculpted
+   * models standing on the board — no flat glyph decals.
+   */
+  private makeChessPiece(type: string, white: boolean): THREE.Group {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({
+      color: white ? 0xf3ecdd : 0x25252c,
+      roughness: 0.34,
+      metalness: 0.06,
+    });
+    const cyl = (rt: number, rb: number, h: number) =>
+      new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, 20), mat);
+    const sph = (r: number, seg = 18) => new THREE.Mesh(new THREE.SphereGeometry(r, seg, seg), mat);
+    const cone = (r: number, h: number) => new THREE.Mesh(new THREE.ConeGeometry(r, h, 20), mat);
+    const box = (w: number, h: number, d: number) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    const at = (m: THREE.Mesh, y: number, x = 0, z = 0) => {
+      m.position.set(x, y, z);
+      m.castShadow = true;
+      g.add(m);
+      return m;
+    };
+
+    // Shared turned foot.
+    at(cyl(0.028, 0.031, 0.014), 0.007);
+
+    switch (type) {
+      case "p": // pawn
+        at(cyl(0.014, 0.02, 0.026), 0.027);
+        at(sph(0.0135, 16), 0.05);
+        at(sph(0.0125, 16), 0.069);
+        break;
+      case "r": // rook
+        at(cyl(0.017, 0.021, 0.034), 0.031);
+        at(cyl(0.023, 0.017, 0.014), 0.056);
+        for (let i = 0; i < 4; i++) {
+          const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+          at(box(0.013, 0.013, 0.013), 0.069, Math.cos(a) * 0.015, Math.sin(a) * 0.015);
+        }
+        break;
+      case "n": {
+        // knight — stylised horse head on a collar
+        at(cyl(0.017, 0.021, 0.03), 0.029);
+        const neck = at(cyl(0.012, 0.016, 0.038), 0.058, 0, 0.004);
+        neck.rotation.x = 0.22;
+        const head = at(box(0.026, 0.03, 0.04), 0.082, 0, 0.006);
+        head.rotation.x = 0.5;
+        at(box(0.018, 0.015, 0.026), 0.09, 0, 0.028); // muzzle
+        at(cone(0.006, 0.016), 0.1, -0.009, -0.004); // ears
+        at(cone(0.006, 0.016), 0.1, 0.009, -0.004);
+        break;
+      }
+      case "b": // bishop
+        at(cyl(0.011, 0.019, 0.03), 0.029);
+        at(sph(0.016, 18), 0.055);
+        at(cone(0.014, 0.028), 0.075);
+        at(sph(0.007, 12), 0.092);
+        break;
+      case "q": // queen
+        at(cyl(0.012, 0.02, 0.032), 0.03);
+        at(sph(0.019, 20), 0.058);
+        at(cyl(0.022, 0.013, 0.018), 0.079);
+        [
+          [0.018, 0],
+          [-0.018, 0],
+          [0, 0.018],
+          [0, -0.018],
+        ].forEach(([x, z]) => at(sph(0.0065, 10), 0.093, x, z));
+        at(sph(0.008, 12), 0.098);
+        break;
+      case "k": // king
+      default:
+        at(cyl(0.012, 0.02, 0.032), 0.03);
+        at(sph(0.019, 20), 0.058);
+        at(cyl(0.021, 0.013, 0.02), 0.08);
+        at(box(0.01, 0.03, 0.01), 0.098); // cross
+        at(box(0.024, 0.009, 0.01), 0.102);
+        break;
+    }
+    return g;
+  }
+
   private buildChess3D() {
     const g = this.tabletopBoardGroup;
     const slab = new THREE.Mesh(
-      new THREE.BoxGeometry(0.94, 0.03, 0.94),
+      new THREE.BoxGeometry(0.94, 0.032, 0.94),
       new THREE.MeshStandardMaterial({ color: 0x5b3a1e, roughness: 0.7 })
     );
-    slab.position.y = 0.015;
+    slab.position.y = 0.016;
     slab.receiveShadow = true;
     g.add(slab);
     const size = 0.1125;
+    const stepped = size + 0.004;
     for (let r = 0; r < 8; r++)
       for (let c = 0; c < 8; c++) {
-        const sq = this.ttFlatCell(size, size, (r + c) % 2 ? 0x8d5524 : 0xf0d9b5, 0.03);
-        sq.position.set((c - 3.5) * (size + 0.004), 0, (r - 3.5) * (size + 0.004));
+        const sq = this.ttFlatCell(size, size, (r + c) % 2 ? 0x8d5524 : 0xf0d9b5);
+        sq.position.set((c - 3.5) * stepped, 0.0335, (r - 3.5) * stepped);
         sq.userData = { type: "tabletopCell", g: "chess", r, c, col: c };
         g.add(sq);
       }
     const back: string[] = ["r", "n", "b", "q", "k", "b", "n", "r"];
-    const glyphsW: Record<string, string> = { r: "♖", n: "♘", b: "♗", q: "♕", k: "♔", p: "♙" };
-    const glyphsB: Record<string, string> = { r: "♜", n: "♞", b: "♝", q: "♛", k: "♚", p: "♟" };
     const put = (r: number, c: number, t: string, who: 0 | 1) => {
-      const mesh = this.ttPiecePlane(who === 0 ? glyphsW[t] : glyphsB[t], 0.13);
-      mesh.position.set((c - 3.5) * (size + 0.004), 0.075, (r - 3.5) * (size + 0.004));
-      mesh.userData = { tabletopPiece: true, r, c };
+      const mesh = this.makeChessPiece(t, who === 0);
+      mesh.position.set((c - 3.5) * stepped, this.TT_BOARD_TOP, (r - 3.5) * stepped);
+      mesh.userData = { tabletopPiece: true, r, c, pt: t, wt: who === 0 };
       g.add(mesh);
       this.tabletopChessPieces.set(r * 8 + c, mesh);
+      if (who === 0 && t === "q") this.ttWhiteQueen = mesh;
     };
     for (let c = 0; c < 8; c++) {
       put(0, c, back[c], 1);
@@ -1193,26 +1257,257 @@ export class ParkScene {
     }
   }
 
+  /**
+   * Snap any in-flight board animation to its finished state. Called before a
+   * new move starts so a quick reply can never strand a piece mid-air (or
+   * leave a captured piece sitting on the board).
+   */
+  private flushTtAnim() {
+    const a = this.ttAnim;
+    if (!a) return;
+    a.actor.position.set(a.to.x, this.TT_BOARD_TOP, a.to.z);
+    a.actor.rotation.set(0, 0, 0);
+    if (a.victim && a.victim.parent === this.tabletopBoardGroup) {
+      this.spawnTtBits(a.victim.position.clone(), a.victimColor, 10);
+      this.tabletopBoardGroup.remove(a.victim);
+    }
+    this.ttAnim = null;
+  }
+
   /** chessMove: move a piece (optionally capturing the one on `to`). */
   public chessMove(frR: number, frC: number, toR: number, toC: number, captured: boolean) {
+    this.flushTtAnim();
     const frIdx = frR * 8 + frC;
     const toIdx = toR * 8 + toC;
     const mesh = this.tabletopChessPieces.get(frIdx);
     if (!mesh) return;
-    if (captured) {
-      const capMesh = this.tabletopChessPieces.get(toIdx);
-      if (capMesh) {
-        this.tabletopBoardGroup.remove(capMesh);
-        this.tabletopChessPieces.delete(toIdx);
+
+    const victim = captured ? this.tabletopChessPieces.get(toIdx) ?? null : null;
+
+    // Bookkeeping is immediate so the rules can never desync from the visuals.
+    if (victim) this.tabletopChessPieces.delete(toIdx);
+    this.tabletopChessPieces.set(toIdx, mesh);
+    this.tabletopChessPieces.delete(frIdx);
+    const ud = mesh.userData as { r: number; c: number };
+    ud.r = toR;
+    ud.c = toC;
+
+    const stepped = 0.1125 + 0.004;
+    const to = new THREE.Vector3((toC - 3.5) * stepped, this.TT_BOARD_TOP, (toR - 3.5) * stepped);
+    const from = mesh.position.clone();
+
+    if (!victim) {
+      this.ttAnim = {
+        phase: "slide",
+        t: 0,
+        dur: 0.28,
+        actor: mesh,
+        from,
+        to,
+        hoverY: this.TT_BOARD_TOP,
+        victim: null,
+        victimColor: 0xffffff,
+        kingCapture: false,
+        queen: null,
+        queenFrom: new THREE.Vector3(),
+        queenTo: new THREE.Vector3(),
+      };
+      return;
+    }
+
+    const vU = victim.userData as { pt?: string; wt?: boolean };
+    const kingCapture = vU.pt === "k";
+
+    // The queen delivers the finishing kick — unless SHE made the capture.
+    const queen = kingCapture && this.ttWhiteQueen && this.ttWhiteQueen !== mesh
+      ? this.ttWhiteQueen
+      : null;
+
+    let queenFrom = new THREE.Vector3();
+    let queenTo = new THREE.Vector3();
+    if (queen) {
+      queenFrom = queen.position.clone();
+      // Take up position in front of the doomed king.
+      queenTo = new THREE.Vector3(
+        to.x,
+        this.TT_BOARD_TOP,
+        to.z + (toR < 4 ? stepped * 1.6 : -stepped * 1.6)
+      );
+    }
+
+    this.ttAnim = {
+      phase: "leap",
+      t: 0,
+      dur: 0.38,
+      actor: mesh,
+      from,
+      to,
+      hoverY: this.TT_BOARD_TOP + 0.3,
+      victim,
+      victimColor: vU.wt ? 0xf3ecdd : 0x25252c,
+      kingCapture,
+      queen,
+      queenFrom,
+      queenTo,
+    };
+    sound.playSqueak();
+  }
+
+  /** Tiny cubes that burst out of a smashed piece. */
+  private spawnTtBits(pos: THREE.Vector3, color: number, count: number) {
+    const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.5 });
+    for (let i = 0; i < count; i++) {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(0.013, 0.013, 0.013), mat);
+      m.position.copy(pos);
+      m.position.y += 0.04;
+      this.tabletopBoardGroup.add(m);
+      this.ttBits.push({
+        mesh: m,
+        vel: new THREE.Vector3(
+          (Math.random() - 0.5) * 0.9,
+          0.45 + Math.random() * 0.75,
+          (Math.random() - 0.5) * 0.9
+        ),
+        spin: new THREE.Vector3(Math.random() * 9, Math.random() * 9, Math.random() * 9),
+        life: 0.75 + Math.random() * 0.35,
+      });
+    }
+  }
+
+  private updateTtBits(delta: number) {
+    for (let i = this.ttBits.length - 1; i >= 0; i--) {
+      const b = this.ttBits[i];
+      b.life -= delta;
+      b.vel.y -= 3.4 * delta;
+      b.mesh.position.addScaledVector(b.vel, delta);
+      b.mesh.rotation.x += b.spin.x * delta;
+      b.mesh.rotation.y += b.spin.y * delta;
+      b.mesh.rotation.z += b.spin.z * delta;
+      if (b.life <= 0 || b.mesh.position.y < -0.4) {
+        this.tabletopBoardGroup.remove(b.mesh);
+        this.ttBits.splice(i, 1);
       }
     }
-    const size = 0.1125;
-    mesh.position.set((toC - 3.5) * (size + 0.004), 0.075, (toR - 3.5) * (size + 0.004));
-    (mesh.userData as { r: number; c: number }).r = toR;
-    (mesh.userData as { r: number; c: number }).c = toC;
-    this.tabletopChessPieces.delete(frIdx);
-    this.tabletopChessPieces.set(toIdx, mesh);
   }
+
+  /**
+   * Drives the board choreography:
+   *   leap  → the attacker vaults over to hover above the target
+   *   hover → it pirouettes in the air
+   *   smash → it slams down and the captured piece bursts into bits
+   * and, when a king falls, the queen marches over and kicks him off the table.
+   */
+  private updateTabletopAnim(delta: number) {
+    this.updateTtBits(delta);
+    const a = this.ttAnim;
+    if (!a) return;
+    a.t += delta / a.dur;
+    const t = Math.min(1, a.t);
+
+    if (a.phase === "slide") {
+      const p = a.actor.position;
+      p.x = THREE.MathUtils.lerp(a.from.x, a.to.x, t);
+      p.z = THREE.MathUtils.lerp(a.from.z, a.to.z, t);
+      p.y = this.TT_BOARD_TOP + Math.sin(t * Math.PI) * 0.09;
+      if (t >= 1) {
+        p.set(a.to.x, this.TT_BOARD_TOP, a.to.z);
+        this.ttAnim = null;
+      }
+      return;
+    }
+
+    if (a.phase === "leap") {
+      const p = a.actor.position;
+      p.x = THREE.MathUtils.lerp(a.from.x, a.to.x, t);
+      p.z = THREE.MathUtils.lerp(a.from.z, a.to.z, t);
+      p.y = THREE.MathUtils.lerp(a.from.y, a.hoverY, t) + Math.sin(t * Math.PI) * 0.24;
+      a.actor.rotation.y = t * Math.PI * 0.5;
+      if (t >= 1) {
+        a.phase = "hover";
+        a.t = 0;
+        a.dur = 0.42;
+      }
+      return;
+    }
+
+    if (a.phase === "hover") {
+      a.actor.position.y = a.hoverY + Math.sin(t * Math.PI) * 0.03;
+      a.actor.rotation.y = Math.PI * 0.5 + t * Math.PI * 1.5; // the little turn
+      if (t >= 1) {
+        a.t = 0;
+        if (a.kingCapture && a.queen) {
+          a.phase = "queen";
+          a.dur = 0.45;
+        } else if (a.kingCapture) {
+          // No queen on the board (or the queen made the capture herself) —
+          // boot the king straight off the table.
+          a.phase = "kick";
+          a.dur = 0.8;
+          sound.playRewardFanfare();
+        } else {
+          a.phase = "smash";
+          a.dur = 0.17;
+          // Shatter the captured piece on impact.
+          if (a.victim) {
+            this.spawnTtBits(a.victim.position.clone(), a.victimColor, 12);
+            this.tabletopBoardGroup.remove(a.victim);
+          }
+          sound.playCrunch();
+        }
+      }
+      return;
+    }
+
+    if (a.phase === "queen") {
+      const q = a.queen!;
+      q.position.x = THREE.MathUtils.lerp(a.queenFrom.x, a.queenTo.x, t);
+      q.position.z = THREE.MathUtils.lerp(a.queenFrom.z, a.queenTo.z, t);
+      q.position.y = this.TT_BOARD_TOP + Math.sin(t * Math.PI) * 0.12;
+      if (t >= 1) {
+        a.phase = "kick";
+        a.t = 0;
+        a.dur = 0.8;
+        sound.playRewardFanfare();
+      }
+      return;
+    }
+
+    if (a.phase === "kick") {
+      // The king is booted off the table, tumbling.
+      if (a.victim) {
+        const k = a.victim;
+        k.position.y = this.TT_BOARD_TOP + Math.sin(t * Math.PI) * 1.1 - t * t * 2.2;
+        k.position.z = a.to.z + t * 1.3;
+        k.position.x = a.to.x + t * 0.35;
+        k.rotation.x += delta * 11;
+        k.rotation.z += delta * 7;
+      }
+      // The capturing piece settles down onto the square.
+      const p = a.actor.position;
+      p.x = a.to.x;
+      p.z = a.to.z;
+      p.y = THREE.MathUtils.lerp(a.hoverY, this.TT_BOARD_TOP, Math.min(1, t * 2.2));
+      a.actor.rotation.y = Math.PI * 2 * Math.min(1, t * 2.2);
+      if (t >= 1) {
+        if (a.victim) this.tabletopBoardGroup.remove(a.victim);
+        p.set(a.to.x, this.TT_BOARD_TOP, a.to.z);
+        a.actor.rotation.y = 0;
+        this.ttAnim = null;
+      }
+      return;
+    }
+
+    // "smash" — the attacker slams straight down.
+    const p = a.actor.position;
+    p.y = THREE.MathUtils.lerp(a.hoverY, this.TT_BOARD_TOP, t);
+    a.actor.rotation.y = Math.PI * 2 * t;
+    if (t >= 1) {
+      a.actor.rotation.y = 0;
+      p.set(a.to.x, this.TT_BOARD_TOP, a.to.z);
+      this.ttAnim = null;
+    }
+  }
+
 
   private buildConnectFour3D() {
     const g = this.tabletopBoardGroup;
@@ -1392,13 +1687,6 @@ export class ParkScene {
       picket.position.set(i + 0.9, 0.55, -12);
       picket.castShadow = true;
       fenceGroup.add(picket);
-
-      // Pointed picket cap (classic white picket fence silhouette)
-      const cap = new THREE.Mesh(new THREE.ConeGeometry(0.145, 0.16, 4), postMat);
-      cap.position.set(i + 0.9, 1.18, -12);
-      cap.rotation.y = Math.PI / 4;
-      cap.castShadow = true;
-      fenceGroup.add(cap);
     }
 
     // Fence rails
@@ -1417,111 +1705,30 @@ export class ParkScene {
   }
 
   private makeOneTree(scale: number, tall: boolean): THREE.Group {
-    // A more detailed procedural tree: tapering trunk with roots, a few
-    // branching limbs, and layered canopy clusters instead of three flat
-    // spheres -- reads as a real tree under the engine's lighting/shadows.
-    const barkMat = new THREE.MeshStandardMaterial({
-      color: 0x5c4033,
-      roughness: 0.92,
-      metalness: 0.02,
-    });
+    const treeMat = new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 });
     const leafMats = [
-      new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.78, flatShading: false }),
-      new THREE.MeshStandardMaterial({ color: 0x388e3c, roughness: 0.82 }),
-      new THREE.MeshStandardMaterial({ color: 0x43a047, roughness: 0.76 }),
-      new THREE.MeshStandardMaterial({ color: 0x245c29, roughness: 0.85 }),
+      new THREE.MeshStandardMaterial({ color: 0x2e7d32, roughness: 0.8 }),
+      new THREE.MeshStandardMaterial({ color: 0x388e3c, roughness: 0.8 }),
+      new THREE.MeshStandardMaterial({ color: 0x43a047, roughness: 0.8 }),
     ];
     const tree = new THREE.Group();
-    const trunkH = (tall ? 3.6 : 2.9);
-
-    // Slightly displaced multi-segment trunk for a natural taper.
-    const segs = 6;
-    let prev = new THREE.Vector3(0, 0, 0);
-    for (let i = 1; i <= segs; i++) {
-      const t = i / segs;
-      const h = (trunkH / segs) * (0.9 + 0.1 * i);
-      const r0 = (0.48 - 0.18 * t) * (tall ? 1.15 : 1);
-      const r1 = (0.48 - 0.18 * (t + 0.16 / segs)) * (tall ? 1.15 : 1);
-      const cyl = new THREE.Mesh(
-        new THREE.CylinderGeometry(Math.max(0.08, r1), r0, h, 16),
-        barkMat
-      );
-      cyl.position.set(0, prev.y + h / 2, 0);
-      cyl.castShadow = true;
-      cyl.receiveShadow = true;
-      tree.add(cyl);
-      prev.y += h;
-    }
-
-    // Surface roots spreading at the base for depth.
-    for (let i = 0; i < 4; i++) {
-      const a = (i / 4) * Math.PI * 2 + 0.3;
-      const root = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.045, 0.09, 0.75, 8),
-        barkMat
-      );
-      root.position.set(Math.cos(a) * 0.32, 0.2, Math.sin(a) * 0.32);
-      root.rotation.x = Math.PI / 2.6;
-      root.rotation.y = a;
-      root.castShadow = true;
-      tree.add(root);
-    }
-
-    // Primary branches reaching out.
-    const branches = tall ? 5 : 4;
-    for (let i = 0; i < branches; i++) {
-      const a = (i / branches) * Math.PI * 2 + 0.5;
-      const branch = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.06, 0.12, 1.5, 10),
-        barkMat
-      );
-      branch.position.set(Math.cos(a) * 0.45, trunkH * 0.72, Math.sin(a) * 0.45);
-      branch.rotation.z = (Math.PI / 2) * 0.55;
-      branch.rotation.y = a;
-      branch.castShadow = true;
-      tree.add(branch);
-    }
-
-    // Layered canopy: a core sphere plus several offset clusters.
-    const canopyCore = new THREE.Mesh(
-      new THREE.SphereGeometry(1.85, 20, 20),
-      leafMats[0]
-    );
-    canopyCore.position.set(0, trunkH + 0.7, 0);
-    canopyCore.castShadow = true;
-    tree.add(canopyCore);
-
-    const clusterPositions = [
-      [0.9, trunkH + 1.25, 0.6],
-      [-0.75, trunkH + 1.15, -0.45],
-      [0.0, trunkH + 1.9, -0.1],
-      [-0.95, trunkH + 0.85, 0.5],
-      [0.55, trunkH + 0.9, -0.85],
-      [-0.1, trunkH + 1.55, 0.85],
-    ];
-    clusterPositions.forEach(([x, y, z], i) => {
-      const r = 0.95 + (i % 3) * 0.15;
-      const blob = new THREE.Mesh(
-        new THREE.SphereGeometry(r, 16, 16),
-        leafMats[(i + 1) % leafMats.length]
-      );
-      blob.position.set(x, y, z);
-      blob.castShadow = true;
-      tree.add(blob);
-    });
-
-    // Small hanging accent spheres to break the silhouette.
-    for (let i = 0; i < 6; i++) {
-      const a = (i / 6) * Math.PI * 2;
-      const hang = new THREE.Mesh(
-        new THREE.SphereGeometry(0.18, 10, 10),
-        leafMats[2]
-      );
-      hang.position.set(Math.cos(a) * 1.5, trunkH + 0.15, Math.sin(a) * 1.5);
-      hang.castShadow = true;
-      tree.add(hang);
-    }
-
+    const trunkH = tall ? 3.6 : 2.9;
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.48, trunkH, 8), treeMat);
+    trunk.position.y = trunkH / 2;
+    trunk.castShadow = true;
+    tree.add(trunk);
+    const canopy1 = new THREE.Mesh(new THREE.SphereGeometry(1.7, 12, 12), leafMats[0]);
+    canopy1.position.set(0, trunkH + 0.5, 0);
+    canopy1.castShadow = true;
+    tree.add(canopy1);
+    const canopy2 = new THREE.Mesh(new THREE.SphereGeometry(1.3, 10, 10), leafMats[1]);
+    canopy2.position.set(0.6, trunkH + 1.1, 0.4);
+    canopy2.castShadow = true;
+    tree.add(canopy2);
+    const canopy3 = new THREE.Mesh(new THREE.SphereGeometry(0.95, 9, 9), leafMats[2]);
+    canopy3.position.set(-0.55, trunkH + 0.9, -0.3);
+    canopy3.castShadow = true;
+    tree.add(canopy3);
     tree.scale.setScalar(scale);
     return tree;
   }
@@ -1607,12 +1814,14 @@ export class ParkScene {
       bush.scale.set(1.4, 0.9, 1.2);
       bush.position.set(bx, 0.5, bz);
       bush.castShadow = true;
-      this.scene.add(bush);
+      // Parented to the park (NOT the scene) so bushes never poke through the
+      // walls of the house rooms, which sit at the same world coordinates.
+      this.parkGroup.add(bush);
 
       // Small blossom
       const fl = new THREE.Mesh(new THREE.SphereGeometry(0.12, 6, 6), flowerMat);
       fl.position.set(bx + 0.3, 0.8, bz + 0.2);
-      this.scene.add(fl);
+      this.parkGroup.add(fl);
     });
   }
 
@@ -1981,33 +2190,17 @@ export class ParkScene {
     this.houseDoorMesh.userData = { type: "exit_door" };
     this.houseGroup.add(this.houseDoorMesh);
 
-    // Kitchen doorway mat (click to enter Kitchen room)
-    const kitchenMatGeom = new THREE.PlaneGeometry(1.8, 0.9);
-    kitchenMatGeom.rotateX(-Math.PI / 2);
-    const kCanvas = document.createElement("canvas");
-    kCanvas.width = 256;
-    kCanvas.height = 128;
-    const kCtx = kCanvas.getContext("2d")!;
-    kCtx.fillStyle = "#b45309";
-    kCtx.fillRect(0, 0, 256, 128);
-    kCtx.strokeStyle = "#fde68a";
-    kCtx.lineWidth = 6;
-    kCtx.strokeRect(4, 4, 248, 120);
-    kCtx.fillStyle = "#ffffff";
-    kCtx.font = "bold 26px sans-serif";
-    kCtx.textAlign = "center";
-    kCtx.fillText("🚪 HALLWAY 🚪", 128, 72);
-    this.hallwayDoorMesh = new THREE.Mesh(
-      kitchenMatGeom,
-      new THREE.MeshStandardMaterial({
-        map: new THREE.CanvasTexture(kCanvas),
-        roughness: 0.9,
-      })
+    // Black doorway to the hallway: mat on the floor + a black wall panel on
+    // the right wall that Happy walks through.
+    this.makeBlackDoorway(
+      "hallway",
+      "hallway",
+      this.houseGroup,
+      new THREE.Vector3(4.0, 0.02, 2.6),
+      new THREE.Vector3(roomWidth / 2 - 0.05, 1.15, 2.6),
+      -Math.PI / 2,
+      new THREE.Vector3(-1, 0, 0)
     );
-    this.hallwayDoorMesh.position.set(2.6, 0.02, 1.2);
-    this.hallwayDoorMesh.rotation.y = -0.35;
-    this.hallwayDoorMesh.userData = { type: "hallway_door" };
-    this.houseGroup.add(this.hallwayDoorMesh);
 
     // 4. Ceiling with Wooden Beams
     const ceilingGeom = new THREE.PlaneGeometry(roomWidth, roomDepth);
@@ -2612,29 +2805,16 @@ export class ParkScene {
     label.userData = { type: "pot" };
     this.kitchenGroup.add(label);
 
-    // 5. Back-to-Living door mat (click to return to living room)
-    const liveMatGeom = new THREE.PlaneGeometry(1.8, 0.9);
-    liveMatGeom.rotateX(-Math.PI / 2);
-    const lvCanvas = document.createElement("canvas");
-    lvCanvas.width = 256;
-    lvCanvas.height = 128;
-    const lvCtx = lvCanvas.getContext("2d")!;
-    lvCtx.fillStyle = "#386641";
-    lvCtx.fillRect(0, 0, 256, 128);
-    lvCtx.strokeStyle = "#A7C957";
-    lvCtx.lineWidth = 6;
-    lvCtx.strokeRect(4, 4, 248, 120);
-    lvCtx.fillStyle = "#fff";
-    lvCtx.font = "bold 24px sans-serif";
-    lvCtx.textAlign = "center";
-    lvCtx.fillText("🚪 HALLWAY", 128, 70);
-    this.kitchenHallDoorMesh = new THREE.Mesh(
-      liveMatGeom,
-      new THREE.MeshStandardMaterial({ map: new THREE.CanvasTexture(lvCanvas), roughness: 0.9 })
+    // 5. Black doorway back to the hallway (front wall)
+    this.makeBlackDoorway(
+      "hallway",
+      "hallway",
+      this.kitchenGroup,
+      new THREE.Vector3(0, 0.02, roomDepth / 2 - 1.1),
+      new THREE.Vector3(0, 1.15, roomDepth / 2 - 0.05),
+      0,
+      new THREE.Vector3(0, 0, -1)
     );
-    this.kitchenHallDoorMesh.position.set(0, 0.02, roomDepth / 2 - 0.75);
-    this.kitchenHallDoorMesh.userData = { type: "hallway_door" };
-    this.kitchenGroup.add(this.kitchenHallDoorMesh);
   }
 
   private makeWoodFloorTexture(repeatX: number, repeatY: number): THREE.CanvasTexture {
@@ -2698,6 +2878,51 @@ export class ParkScene {
     mesh.rotation.y = rotY;
     mesh.userData = { type };
     return mesh;
+  }
+
+  /**
+   * A "black doorway" — the shared look for every room exit:
+   *   • a black mat on the floor you press, and
+   *   • a solid black wall panel (a black doorway, not a real door) right
+   *     behind it that Happy physically walks into.
+   * Pressing either one walks the dog through the black panel and then switches
+   * room, announced as "<name> is walking into the <label>".
+   */
+  private makeBlackDoorway(
+    target: HouseRoom,
+    label: string,
+    group: THREE.Group,
+    matPos: THREE.Vector3,
+    panelPos: THREE.Vector3,
+    rotY: number,
+    roomDir: THREE.Vector3
+  ) {
+    const matGeom = new THREE.PlaneGeometry(1.5, 0.85);
+    matGeom.rotateX(-Math.PI / 2);
+    const mat = new THREE.Mesh(
+      matGeom,
+      new THREE.MeshStandardMaterial({ color: 0x0b0b0f, roughness: 0.95 })
+    );
+    mat.position.copy(matPos);
+    mat.rotation.y = rotY;
+    mat.receiveShadow = true;
+    mat.userData = { type: "black_door" };
+    group.add(mat);
+
+    // The black opening itself. Opaque + FrontSide, so the moment Happy steps
+    // inside the box he is swallowed by the black face nearest the camera.
+    const panel = new THREE.Mesh(
+      new THREE.BoxGeometry(1.5, 2.3, 0.5),
+      new THREE.MeshStandardMaterial({ color: 0x000000, roughness: 1, side: THREE.FrontSide })
+    );
+    panel.position.copy(panelPos);
+    panel.rotation.y = rotY;
+    panel.castShadow = false;
+    panel.receiveShadow = false;
+    panel.userData = { type: "black_door" };
+    group.add(panel);
+
+    this.doorways.push({ target, label, mat, panel, owner: group, roomDir: roomDir.clone().normalize() });
   }
 
   private setupHallway() {
@@ -2979,11 +3204,35 @@ export class ParkScene {
     this.stairsMatMesh.userData = { type: "stairs" };
     this.hallwayGroup.add(this.stairsMatMesh);
 
-    // Door mats to living room + kitchen (spread out in the long hall)
-    this.hallwayLivingMesh = this.makeDoorMat("🛋️ LIVING", "#386641", "#A7C957", "living_door", -1.7, 5.1);
-    this.hallwayGroup.add(this.hallwayLivingMesh);
-    this.hallwayKitchenMesh = this.makeDoorMat("🍳 KITCHEN", "#b45309", "#fde68a", "kitchen_door", -1.7, -5.1);
-    this.hallwayGroup.add(this.hallwayKitchenMesh);
+    // Black doorways: living room (+z end), kitchen (-z end) and the new
+    // bathroom — on the left wall, directly opposite the stairs.
+    this.makeBlackDoorway(
+      "living",
+      "living room",
+      this.hallwayGroup,
+      new THREE.Vector3(0, 0.02, 4.9),
+      new THREE.Vector3(0, 1.15, roomD / 2 - 0.05),
+      0,
+      new THREE.Vector3(0, 0, -1)
+    );
+    this.makeBlackDoorway(
+      "kitchen",
+      "kitchen",
+      this.hallwayGroup,
+      new THREE.Vector3(0, 0.02, -4.9),
+      new THREE.Vector3(0, 1.15, -roomD / 2 + 0.05),
+      0,
+      new THREE.Vector3(0, 0, 1)
+    );
+    this.makeBlackDoorway(
+      "bathroom",
+      "bathroom",
+      this.hallwayGroup,
+      new THREE.Vector3(-2.7, 0.02, 0),
+      new THREE.Vector3(-roomW / 2 + 0.05, 1.15, 0),
+      Math.PI / 2,
+      new THREE.Vector3(1, 0, 0)
+    );
   }
 
   private setupUpstairs() {
@@ -3272,9 +3521,476 @@ export class ParkScene {
     this.bedroomArcadeGroup.rotation.y = -Math.PI / 2; // faces into the room
     this.upstairsGroup.add(this.bedroomArcadeGroup);
 
-    // Descend mat back to the hallway stairs
-    this.descendMesh = this.makeDoorMat("⬇ DOWNSTAIRS", "#6d28d9", "#ddd6fe", "stairs_down", 1.55, 2.4);
-    this.upstairsGroup.add(this.descendMesh);
+    // Black doorway back down to the hallway (same look as every doorstep)
+    this.makeBlackDoorway(
+      "hallway",
+      "hallway",
+      this.upstairsGroup,
+      new THREE.Vector3(1.55, 0.02, 3.4),
+      new THREE.Vector3(1.55, 1.15, roomD / 2 - 0.05),
+      0,
+      new THREE.Vector3(0, 0, -1)
+    );
+  }
+
+  // =====================================================================
+  //  Bathroom — the new room off the hallway (opposite the stairs).
+  //  Shower + bathtub (Happy can hop in), toilet, sink, and a shelf with
+  //  Happy's Men's Shampoo, Happy Kids and the Star bottle.
+  // =====================================================================
+
+  /** Ceramic wall/floor tile texture. */
+  private makeTileTexture(base: string, grout: string, repeat = 3): THREE.CanvasTexture {
+    const c = document.createElement("canvas");
+    c.width = 256;
+    c.height = 256;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = grout;
+    ctx.fillRect(0, 0, 256, 256);
+    const n = 4;
+    const s = 256 / n;
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        const shade = (x + y) % 2 ? 0.94 : 1;
+        const col = new THREE.Color(base).multiplyScalar(shade);
+        ctx.fillStyle = `#${col.getHexString()}`;
+        ctx.fillRect(x * s + 3, y * s + 3, s - 6, s - 6);
+        ctx.fillStyle = "rgba(255,255,255,0.22)";
+        ctx.fillRect(x * s + 3, y * s + 3, s - 6, 4);
+      }
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(repeat, repeat);
+    return tex;
+  }
+
+  /**
+   * Front label for the three bathroom shampoo bottles:
+   *   mens → black pack with an orange stripe at the bottom
+   *   kids → green & blue striped "Happy Kids"
+   *   star → black pack with the white Star logo + "Star"
+   */
+  private makeShampooTexture(kind: "mens" | "kids" | "star"): THREE.CanvasTexture {
+    const c = document.createElement("canvas");
+    c.width = 256;
+    c.height = 384;
+    const ctx = c.getContext("2d")!;
+    ctx.textAlign = "center";
+
+    if (kind === "mens") {
+      ctx.fillStyle = "#0d0d10";
+      ctx.fillRect(0, 0, 256, 384);
+      ctx.fillStyle = "#f97316"; // orange stripe at the bottom
+      ctx.fillRect(0, 296, 256, 88);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "italic bold 46px Georgia, serif";
+      ctx.fillText("Happy's", 128, 116);
+      ctx.font = "bold 42px sans-serif";
+      ctx.fillText("Men's", 128, 186);
+      ctx.fillText("Shampoo", 128, 238);
+      ctx.font = "bold 20px sans-serif";
+      ctx.fillStyle = "#0d0d10";
+      ctx.fillText("2 in 1  ·  400 ml", 128, 346);
+    } else if (kind === "kids") {
+      for (let y = 0; y < 384; y += 48) {
+        ctx.fillStyle = (y / 48) % 2 ? "#22c55e" : "#3b82f6";
+        ctx.fillRect(0, y, 256, 48);
+      }
+      ctx.fillStyle = "rgba(255,255,255,0.94)";
+      ctx.fillRect(22, 112, 212, 148);
+      ctx.fillStyle = "#1d4ed8";
+      ctx.font = "bold 54px sans-serif";
+      ctx.fillText("Happy", 128, 178);
+      ctx.fillStyle = "#16a34a";
+      ctx.fillText("Kids", 128, 238);
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 21px sans-serif";
+      ctx.strokeStyle = "rgba(0,0,0,0.25)";
+      ctx.lineWidth = 4;
+      ctx.strokeText("tear-free · 300 ml", 128, 350);
+      ctx.fillText("tear-free · 300 ml", 128, 350);
+    } else {
+      // Star — a black pack carrying the white Star logo.
+      ctx.fillStyle = "#050506";
+      ctx.fillRect(0, 0, 256, 384);
+
+      // Only draw the built-in logo when the real artwork hasn't been dropped in.
+      if (!STAR_LOGO_URL) {
+        // White outlined "tag" shape (chamfered top-left corner)
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 3;
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        ctx.moveTo(34, 126);
+        ctx.lineTo(86, 44);
+        ctx.lineTo(226, 44);
+        ctx.lineTo(226, 278);
+        ctx.lineTo(34, 278);
+        ctx.closePath();
+        ctx.stroke();
+
+        // The logo's name
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 62px Helvetica, Arial, sans-serif";
+        ctx.fillText("Star", 130, 192);
+
+        // Little star outline in the corner of the logo
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const a = -Math.PI / 2 + (i * Math.PI) / 5;
+          const rr = i % 2 ? 11 : 25;
+          const px = 192 + Math.cos(a) * rr;
+          const py = 243 + Math.sin(a) * rr;
+          if (i === 0) ctx.moveTo(px, py);
+          else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      ctx.font = "italic 20px sans-serif";
+      ctx.fillStyle = "#a1a1aa";
+      ctx.fillText("signature shampoo", 128, 340);
+    }
+
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+
+    // Real Star artwork (if dropped into src/assets) — drawn in "screen" blend
+    // so only the white parts of the logo land on the black pack.
+    if (kind === "star" && STAR_LOGO_URL) {
+      const img = new Image();
+      img.onload = () => {
+        const box = 196;
+        const scale = Math.min(box / img.width, box / img.height);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        ctx.fillStyle = "#050506";
+        ctx.fillRect(0, 0, 256, 300);
+        ctx.globalCompositeOperation = "screen";
+        ctx.drawImage(img, 128 - w / 2, 150 - h / 2, w, h);
+        ctx.globalCompositeOperation = "source-over";
+        tex.needsUpdate = true;
+      };
+      img.src = STAR_LOGO_URL;
+    }
+    return tex;
+  }
+
+  /** A single shampoo box: label on the front & back, plain sides. */
+  private makeShampooBox(kind: "mens" | "kids" | "star", w: number, h: number, d: number): THREE.Mesh {
+    const label = this.makeShampooTexture(kind);
+    const sideColor = kind === "kids" ? 0x3b82f6 : 0x111114;
+    const side = new THREE.MeshStandardMaterial({ color: sideColor, roughness: 0.55 });
+    const front = new THREE.MeshStandardMaterial({ map: label, roughness: 0.5 });
+    const cap = new THREE.MeshStandardMaterial({
+      color: kind === "kids" ? 0x16a34a : 0x27272a,
+      roughness: 0.4,
+      metalness: kind === "star" ? 0.5 : 0.1,
+    });
+    // BoxGeometry material order: +X, -X, +Y, -Y, +Z, -Z
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), [
+      side, side, cap, cap, front, front,
+    ]);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.userData = { type: "shampoo", kind };
+    return mesh;
+  }
+
+  private setupBathroom() {
+    const g = this.bathroomGroup;
+    g.clear();
+    const roomW = 12;
+    const roomD = 10;
+    const wallH = 3.6;
+
+    // ---- Tiled floor ----
+    const floorGeom = new THREE.PlaneGeometry(roomW, roomD);
+    floorGeom.rotateX(-Math.PI / 2);
+    this.bathroomFloorMesh = new THREE.Mesh(
+      floorGeom,
+      new THREE.MeshStandardMaterial({
+        map: this.makeTileTexture("#eef4fb", "#a8c4e0", 4),
+        roughness: 0.3,
+      })
+    );
+    this.bathroomFloorMesh.receiveShadow = true;
+    this.bathroomFloorMesh.userData = { type: "floor" };
+    g.add(this.bathroomFloorMesh);
+
+    // ---- Tiled walls ----
+    const wallMat = new THREE.MeshStandardMaterial({
+      map: this.makeTileTexture("#bfdbfe", "#60a5fa", 2),
+      roughness: 0.45,
+      side: THREE.DoubleSide,
+    });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.55 });
+    const mkWall = (w: number, x: number, z: number, rotY: number) => {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(w, wallH, 0.15), wallMat);
+      wall.position.set(x, wallH / 2, z);
+      wall.rotation.y = rotY;
+      wall.receiveShadow = true;
+      g.add(wall);
+      const base = new THREE.Mesh(new THREE.BoxGeometry(w, 0.14, 0.19), trimMat);
+      base.position.set(x, 0.07, z);
+      base.rotation.y = rotY;
+      g.add(base);
+    };
+    mkWall(roomW, 0, -roomD / 2, 0);
+    mkWall(roomW, 0, roomD / 2, 0);
+    mkWall(roomD, -roomW / 2, 0, Math.PI / 2);
+    mkWall(roomD, roomW / 2, 0, Math.PI / 2);
+    [
+      [-roomW / 2, -roomD / 2],
+      [roomW / 2, -roomD / 2],
+      [-roomW / 2, roomD / 2],
+      [roomW / 2, roomD / 2],
+    ].forEach(([x, z]) => {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.3, wallH, 0.3), trimMat);
+      post.position.set(x, wallH / 2, z);
+      g.add(post);
+    });
+
+    // ---- Ceiling + warm light ----
+    const ceil = new THREE.Mesh(
+      new THREE.PlaneGeometry(roomW, roomD),
+      new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.9, side: THREE.DoubleSide })
+    );
+    ceil.geometry.rotateX(Math.PI / 2);
+    ceil.position.y = wallH;
+    g.add(ceil);
+    const light = new THREE.PointLight(0xe0f2fe, 1.5, 15);
+    light.position.set(0, wallH - 0.45, 0);
+    g.add(light);
+    const lamp = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.28, 0.12, 16), trimMat);
+    lamp.position.set(0, wallH - 0.08, 0);
+    g.add(lamp);
+
+    // ---- Bathtub (long side along the back wall) ----
+    const tub = this.bathtubGroup;
+    tub.clear();
+    const tubX = -3.0;
+    const tubZ = -3.6;
+    const tubW = 2.6;
+    const tubD = 1.2;
+    const tubH = 0.78;
+    const tubMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.16, metalness: 0.04 });
+    const tubBottom = new THREE.Mesh(new THREE.BoxGeometry(tubW, 0.14, tubD), tubMat);
+    tubBottom.position.set(tubX, 0.07, tubZ);
+    tub.add(tubBottom);
+    const side = (w: number, h: number, d: number, x: number, y: number, z: number) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), tubMat);
+      m.position.set(x, y, z);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      tub.add(m);
+    };
+    side(tubW, tubH, 0.1, tubX, tubH / 2, tubZ - tubD / 2); // back
+    side(tubW, tubH, 0.1, tubX, tubH / 2, tubZ + tubD / 2); // front
+    side(0.1, tubH, tubD, tubX - tubW / 2, tubH / 2, tubZ); // left
+    side(0.1, tubH, tubD, tubX + tubW / 2, tubH / 2, tubZ); // right
+    // Chrome tap + feet
+    const chrome = new THREE.MeshStandardMaterial({ color: 0xe4e4e7, metalness: 0.45, roughness: 0.32 });
+    const tap = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.22, 12), chrome);
+    tap.position.set(tubX - tubW / 2 + 0.22, tubH + 0.05, tubZ - tubD / 2 + 0.18);
+    tub.add(tap);
+    const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.18, 12), chrome);
+    spout.rotation.z = Math.PI / 2;
+    spout.position.set(tubX - tubW / 2 + 0.32, tubH + 0.14, tubZ - tubD / 2 + 0.18);
+    tub.add(spout);
+    tub.userData = { type: "bathtub" };
+    tub.traverse((o) => (o.userData = { type: "bathtub" }));
+    g.add(tub);
+
+    // ---- Shower: wall rig + a hand head that unclips onto a hose ----
+    const shower = new THREE.Group();
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 2.1, 14), chrome);
+    pole.position.set(-1.9, 1.15, -4.35);
+    shower.add(pole);
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.55, 12), chrome);
+    arm.rotation.z = Math.PI / 2;
+    arm.position.set(-2.15, 2.2, -4.35);
+    shower.add(arm);
+    // Wall water outlet the hand shower clips onto
+    const outlet = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.14, 12), chrome);
+    outlet.rotation.z = Math.PI / 2;
+    outlet.position.set(-2.42, 2.2, -4.35);
+    shower.add(outlet);
+
+    // Detachable hand head (press it to unclip the shower and rinse Happy)
+    const headGroup = this.showerHeadGroup;
+    headGroup.clear();
+    headGroup.position.copy(this.showerReturnTo);
+    const head = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.16, 0.09, 18), chrome);
+    headGroup.add(head);
+    const headFace = new THREE.Mesh(
+      new THREE.CircleGeometry(0.15, 18),
+      new THREE.MeshStandardMaterial({ color: 0xcbd5e1, metalness: 0.6, roughness: 0.35 })
+    );
+    headFace.rotation.x = -Math.PI / 2;
+    headFace.position.y = -0.05;
+    headGroup.add(headFace);
+    const spray = new THREE.Mesh(
+      new THREE.ConeGeometry(0.3, 0.75, 16, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0x93c5fd,
+        transparent: true,
+        opacity: 0.34,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+    );
+    spray.position.y = -0.42;
+    spray.rotation.x = Math.PI;
+    spray.visible = false;
+    headGroup.add(spray);
+    this.showerSpray = spray;
+    headGroup.userData = { type: "shower" };
+    headGroup.traverse((o) => (o.userData = { type: "shower" }));
+    shower.add(headGroup);
+
+    // Hose "branch" that springs to life once the head is unclipped
+    const hoseCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(-2.5, 2.18, -4.35),
+      new THREE.Vector3(-2.72, 1.72, -4.12),
+      new THREE.Vector3(-3.0, 1.62, -3.86),
+      new THREE.Vector3(-3.0, 1.88, -3.62),
+    ]);
+    this.showerHose = new THREE.Mesh(new THREE.TubeGeometry(hoseCurve, 26, 0.028, 8, false), chrome);
+    this.showerHose.visible = false;
+    shower.add(this.showerHose);
+
+    // Glass screen along the front of the tub
+    const glass = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.05, 1.5),
+      new THREE.MeshStandardMaterial({
+        color: 0xcfe8ff,
+        transparent: true,
+        opacity: 0.28,
+        roughness: 0.08,
+        metalness: 0.1,
+        side: THREE.DoubleSide,
+      })
+    );
+    glass.position.set(tubX + 1.0, 0.86, tubZ + tubD / 2 + 0.03);
+    shower.add(glass);
+    shower.userData = { type: "shower" };
+    shower.traverse((o) => (o.userData = { type: "shower" }));
+    this.showerGroup = shower;
+    g.add(shower);
+
+    // ---- Toilet ----
+    const wc = this.toiletGroup;
+    wc.clear();
+    const porcelain = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2 });
+    const pedestal = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.36, 0.5), porcelain);
+    pedestal.position.set(2.6, 0.18, -4.0);
+    wc.add(pedestal);
+    const bowl = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.2, 0.24, 20), porcelain);
+    bowl.position.set(2.6, 0.44, -3.9);
+    wc.add(bowl);
+    const water = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.19, 0.19, 0.03, 20),
+      new THREE.MeshStandardMaterial({ color: 0xbfdbfe, roughness: 0.1 })
+    );
+    water.position.set(2.6, 0.55, -3.9);
+    wc.add(water);
+    const seat = new THREE.Mesh(new THREE.TorusGeometry(0.22, 0.05, 10, 22), porcelain);
+    seat.rotation.x = Math.PI / 2;
+    seat.position.set(2.6, 0.57, -3.9);
+    wc.add(seat);
+    const tank = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.66, 0.22), porcelain);
+    tank.position.set(2.6, 0.85, -4.62);
+    wc.add(tank);
+    const flush = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.06, 0.06, 0.03, 14),
+      new THREE.MeshStandardMaterial({ color: 0xd4d4d8, metalness: 0.8, roughness: 0.25 })
+    );
+    flush.position.set(2.68, 1.19, -4.6);
+    wc.add(flush);
+    wc.userData = { type: "toilet" };
+    wc.traverse((o) => (o.userData = { type: "toilet" }));
+    g.add(wc);
+
+    // ---- Sink + mirror (left wall) ----
+    const sinkMat = new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.3 });
+    const cabinet = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.8, 1.1), new THREE.MeshStandardMaterial({ color: 0xa16207, roughness: 0.6 }));
+    cabinet.position.set(-5.2, 0.4, 1.2);
+    g.add(cabinet);
+    const basin = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.2, 0.18, 20), sinkMat);
+    basin.position.set(-5.15, 0.89, 1.2);
+    g.add(basin);
+    const faucet = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.24, 12), chrome);
+    faucet.position.set(-5.4, 1.03, 1.2);
+    g.add(faucet);
+    const mirror = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.8, 1.05),
+      new THREE.MeshStandardMaterial({ color: 0xbfe6ff, metalness: 0.95, roughness: 0.05 })
+    );
+    mirror.position.set(-5.5, 1.9, 1.2);
+    mirror.rotation.y = Math.PI / 2;
+    g.add(mirror);
+
+    // ---- Soap shelf with the three shampoo bottles ----
+    const shelf = this.soapShelfGroup;
+    shelf.clear();
+    const shelfMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.45 });
+    const plank = new THREE.Mesh(new THREE.BoxGeometry(0.86, 0.05, 0.26), shelfMat);
+    plank.position.set(-1.0, 1.3, -4.85);
+    plank.castShadow = true;
+    plank.receiveShadow = true;
+    shelf.add(plank);
+    [-0.36, 0.36].forEach((dx) => {
+      const bracket = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.16, 0.2), shelfMat);
+      bracket.position.set(-1.0 + dx, 1.2, -4.87);
+      shelf.add(bracket);
+    });
+    const kinds: ("mens" | "kids" | "star")[] = ["mens", "kids", "star"];
+    kinds.forEach((kind, i) => {
+      const box = this.makeShampooBox(kind, 0.15, 0.22, 0.09);
+      box.position.set(-1.3 + i * 0.3, 1.435, -4.85);
+      box.rotation.y = -0.14 + i * 0.14;
+      shelf.add(box);
+    });
+    shelf.userData = { type: "soapShelf" };
+    // (Do NOT traverse-overwrite userData here — the bottles carry their own
+    // { type: "shampoo", kind } tags that the bath routine reads.)
+    g.add(shelf);
+
+    // ---- Finishing touches: bath mat + towel rail ----
+    const bathMat = new THREE.Mesh(
+      new THREE.BoxGeometry(1.5, 0.02, 0.7),
+      new THREE.MeshStandardMaterial({ color: 0x60a5fa, roughness: 0.95 })
+    );
+    bathMat.position.set(-3.0, 0.012, -2.4);
+    bathMat.receiveShadow = true;
+    g.add(bathMat);
+    const rail = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.9, 12), chrome);
+    rail.rotation.z = Math.PI / 2;
+    rail.position.set(5.35, 1.5, 2.6);
+    g.add(rail);
+    const towel = new THREE.Mesh(
+      new THREE.BoxGeometry(0.06, 0.72, 0.42),
+      new THREE.MeshStandardMaterial({ color: 0xfda4af, roughness: 0.95 })
+    );
+    towel.position.set(5.28, 1.16, 2.6);
+    g.add(towel);
+
+    // ---- Black doorway back to the hallway ----
+    this.makeBlackDoorway(
+      "hallway",
+      "hallway",
+      g,
+      new THREE.Vector3(4.4, 0.02, 0),
+      new THREE.Vector3(roomW / 2 - 0.05, 1.15, 0),
+      -Math.PI / 2,
+      new THREE.Vector3(-1, 0, 0)
+    );
   }
 
   private setupToyCorner() {
@@ -4821,12 +5537,23 @@ export class ParkScene {
       const dx = e.clientX - this.prevMouseX;
       const dy = e.clientY - this.prevMouseY;
 
-      this.spherical.theta -= dx * 0.006;
-      this.spherical.phi = THREE.MathUtils.clamp(
-        this.spherical.phi - dy * 0.006,
-        0.15,
-        Math.PI / 2 - 0.05
-      );
+      if (this.activeTabletopGame) {
+        // Orbit around the chessboard: spin horizontally + tilt vertically,
+        // but never dip below the table or flip over the top.
+        this.ttSpherical.theta -= dx * 0.008;
+        this.ttSpherical.phi = THREE.MathUtils.clamp(
+          this.ttSpherical.phi - dy * 0.006,
+          0.22,
+          1.46
+        );
+      } else {
+        this.spherical.theta -= dx * 0.006;
+        this.spherical.phi = THREE.MathUtils.clamp(
+          this.spherical.phi - dy * 0.006,
+          0.15,
+          Math.PI / 2 - 0.05
+        );
+      }
 
       this.updateCameraPosition();
       this.prevMouseX = e.clientX;
@@ -4885,6 +5612,16 @@ export class ParkScene {
 
     dom.addEventListener("wheel", (e) => {
       e.preventDefault();
+      // During a tabletop game the wheel zooms in/out around the board only.
+      if (this.activeTabletopGame) {
+        this.ttSpherical.radius = THREE.MathUtils.clamp(
+          this.ttSpherical.radius + e.deltaY * 0.0016,
+          0.9,
+          3.2
+        );
+        this.updateCameraPosition();
+        return;
+      }
       // Zoom limits keep the camera INSIDE the room so walls never look
       // see-through from outside (city gets a wide orbit).
       let minRadius = 3.5;
@@ -4899,10 +5636,10 @@ export class ParkScene {
         minRadius = 2.0;
         maxRadius =
           this.houseRoom === "hallway"
-            ? 3.3
+            ? 4.6
             : this.houseRoom === "upstairs"
               ? 4.8
-              : 4.6; // living / kitchen
+              : 4.6; // living / kitchen / bathroom
       }
       this.spherical.radius = THREE.MathUtils.clamp(
         this.spherical.radius + e.deltaY * 0.008,
@@ -4931,10 +5668,20 @@ export class ParkScene {
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(mouse, this.camera);
 
+    // Bath-time: while Happy soaks in the tub the shampoo routine takes over
+    // (so tapping Happy rubs the lather in instead of just petting him).
+    if (
+      this.viewMode === "house" &&
+      this.houseRoom === "bathroom" &&
+      this.inBathtub &&
+      this.handleBathClick(raycaster)
+    ) {
+      return;
+    }
+
     // In-world tabletop play: only board cells respond — tapping empty space
     // or Happy across the table must NOT walk / pet during a game.
-    if (this.activeTabletopGame) {
-      const cellHits = raycaster.intersectObject(this.tabletopBoardGroup, true);
+    if (this.activeTabletopGame) {      const cellHits = raycaster.intersectObject(this.tabletopBoardGroup, true);
       for (const hit of cellHits) {
         let o: THREE.Object3D | null = hit.object;
         while (o) {
@@ -4985,30 +5732,55 @@ export class ParkScene {
         return;
       }
 
+      // Every room exit is a black doorway: press the mat (or the black panel)
+      // and Happy walks through it into the next room.
+      for (const dw of this.doorways) {
+        if (!dw.owner.visible) continue;
+        if (
+          raycaster.intersectObject(dw.mat, false).length > 0 ||
+          raycaster.intersectObject(dw.panel, false).length > 0
+        ) {
+          this.walkThroughDoor(dw);
+          return;
+        }
+      }
+
       if (this.houseRoom === "hallway") {
-        // HALLWAY interactivity — stairs up, doors to living + kitchen
+        // HALLWAY interactivity — stairs up, black doorways (handled above)
         const stairHits = raycaster.intersectObjects([this.stairsGroup, this.stairsMatMesh], true);
         if (stairHits.length > 0) {
           this.climbStairs();
           return;
         }
-        if (this.hallwayLivingMesh) {
-          const hits = raycaster.intersectObject(this.hallwayLivingMesh, false);
-          if (hits.length > 0) {
-            this.enterLivingRoom();
-            return;
-          }
-        }
-        if (this.hallwayKitchenMesh) {
-          const hits = raycaster.intersectObject(this.hallwayKitchenMesh, false);
-          if (hits.length > 0) {
-            this.enterKitchen();
-            return;
-          }
-        }
+        // (living / kitchen exits are black doorways, handled generically above)
         if (this.hallwayFloorMesh) {
           const floorHits = raycaster.intersectObject(this.hallwayFloorMesh, false);
           if (floorHits.length > 0) {
+            this.walkTo(floorHits[0].point);
+            return;
+          }
+        }
+        return;
+      }
+
+      if (this.houseRoom === "bathroom") {
+        // BATHROOM interactivity — shower + bathtub, toilet, floor walk
+        const showerHits = this.visibleHits(this.showerGroup, raycaster);
+        const tubHits = raycaster.intersectObject(this.bathtubGroup, true);
+        if (showerHits.length > 0 || tubHits.length > 0) {
+          this.enterBathtub();
+          return;
+        }
+        const wcHits = raycaster.intersectObject(this.toiletGroup, true);
+        if (wcHits.length > 0) {
+          sound.playButtonTap();
+          this.dog.setAction("sit", 1.5);
+          return;
+        }
+        if (this.bathroomFloorMesh) {
+          const floorHits = raycaster.intersectObject(this.bathroomFloorMesh, false);
+          if (floorHits.length > 0) {
+            if (this.inBathtub) this.exitBathtub();
             this.walkTo(floorHits[0].point);
             return;
           }
@@ -5027,13 +5799,7 @@ export class ParkScene {
           }
           return;
         }
-        if (this.descendMesh) {
-          const hits = raycaster.intersectObject(this.descendMesh, false);
-          if (hits.length > 0) {
-            if (this.onDescendClicked) this.onDescendClicked();
-            return;
-          }
-        }
+        // (the way back down is a black doorway, handled generically above)
         // Cozy bedroom functionalities: bedside lamp, alarm clock, slippers
         // + THE ARCADE MACHINE (portal to the Galaxy Arcade world!)
         const roomHits = raycaster.intersectObject(this.upstairsGroup, true);
@@ -5114,14 +5880,7 @@ export class ParkScene {
           return;
         }
 
-        // Back to hallway (hallway sits between kitchen and living room)
-        if (this.kitchenHallDoorMesh) {
-          const backHits = raycaster.intersectObject(this.kitchenHallDoorMesh, false);
-          if (backHits.length > 0) {
-            this.enterHallway();
-            return;
-          }
-        }
+        // (the back-to-hallway exit is a black doorway, handled generically above)
 
         // Kitchen floor walk
         if (this.kitchenFloorMesh) {
@@ -5176,14 +5935,7 @@ export class ParkScene {
         }
       }
 
-      // D2. Check Hallway Doorway Click -> Enter hallway!
-      if (this.hallwayDoorMesh) {
-        const kHits = raycaster.intersectObject(this.hallwayDoorMesh, false);
-        if (kHits.length > 0) {
-          this.enterHallway();
-          return;
-        }
-      }
+      // D2. The hallway exit is a black doorway (handled generically above).
 
       // E. Check Room Floor Click -> Walk to spot!
       if (this.roomFloorMesh) {
@@ -5366,15 +6118,19 @@ export class ParkScene {
   private updateCameraPosition() {
     // A zoom tween owns the camera while active (portal into machines)
     if (this.camTween.active) return;
-    // Tabletop play & wardrobe pin the camera to a curated view of Happy/board.
+    // Tabletop play: a free orbit around the board so the player can spin
+    // around and zoom in/out to scan their position. Radius/phi are clamped
+    // (in the drag + wheel handlers) so the board never leaves the view.
     if (this.activeTabletopGame) {
-      this.camera.position.lerp(this.TT_CAM_POS, 0.05);
-      this.camera.lookAt(this.TT_CAM_LOOK);
+      this.camera.position.setFromSpherical(this.ttSpherical).add(this.TT_FOCUS);
+      this.camera.lookAt(this.TT_FOCUS);
       return;
     }
     if (this.wardrobeCamLock) {
-      this.camera.position.set(-3.0, 1.25, 3.1);
-      this.camera.lookAt(-4.4, 0.8, 2.3);
+      // Happy is a ~3-unit-tall model, so the shot has to stand well back to
+      // frame the whole dog — hat and head included — against the closet.
+      this.camera.position.set(0.2, 2.4, 4.2);
+      this.camera.lookAt(-4.2, 1.4, 2.1);
       return;
     }
     // Side view: the camera rides alongside so you clearly see the
@@ -5460,26 +6216,35 @@ export class ParkScene {
 
     sound.playWhistle();
 
-    // Start ball at dog/camera launch point
-    const launchPos = new THREE.Vector3(0, 1.2, 2.5);
+    // Launch from just in front of Happy — never from a hard-coded world point.
+    // (Launching from a fixed spot made a re-throw land inside him, so the
+    // "reached the ball" check fired instantly and he never ran.)
+    const dogPos = this.dog.group.position;
+    const dir = new THREE.Vector3(Math.sin(targetAngle), 0, -Math.cos(targetAngle));
+    const launchPos = new THREE.Vector3(
+      dogPos.x + dir.x * 1.1,
+      1.2,
+      dogPos.z + dir.z * 1.1
+    );
     this.ballState.position.copy(launchPos);
     this.ballMesh.position.copy(launchPos);
     this.ballMesh.visible = true;
     this.dog.ballInMouth.visible = false;
 
-    // Calculate trajectory
-    const dir = new THREE.Vector3(
-      Math.sin(targetAngle) * targetDistance,
-      0,
-      -Math.cos(targetAngle) * targetDistance
+    this.ballState.velocity.set(
+      dir.x * targetDistance * 0.8,
+      5.5 + Math.random() * 1.5,
+      dir.z * targetDistance * 0.8
     );
-    this.ballState.velocity.set(dir.x * 0.8, 5.5 + Math.random() * 1.5, dir.z * 0.8);
     this.ballState.bounces = 0;
     this.ballState.active = true;
     this.fetchState = "chasing";
+    // A short grace period so the pickup can't trigger on the launch frame.
+    this.fetchGrabDelay = 0.6;
 
-    // Dog turns and chases
-    this.fetchTargetPos.set(launchPos.x + dir.x, 0, launchPos.z + dir.z);
+    // Remember where the player is standing: this is where Happy brings it back.
+    this.fetchReturnPos.set(dogPos.x, 0, dogPos.z);
+    this.fetchTargetPos.copy(launchPos);
     this.dog.setAction("run");
   }
 
@@ -5582,6 +6347,7 @@ export class ParkScene {
     }
 
     // 2. Dog Fetch AI
+    if (this.fetchGrabDelay > 0) this.fetchGrabDelay -= delta;
     if (this.fetchState === "chasing") {
       if (!this.dog?.group?.position || !this.ballMesh?.position) return;
       const dogPos = this.dog.group.position;
@@ -5603,7 +6369,7 @@ export class ParkScene {
       dogPos.z += Math.cos(targetAngle) * speed * delta;
 
       // When reached ball
-      if (dist < 0.7) {
+      if (dist < 0.7 && this.fetchGrabDelay <= 0) {
         this.fetchState = "grabbing";
         this.dog.setAction("idle");
         setTimeout(() => {
@@ -5806,6 +6572,7 @@ export class ParkScene {
     this.kitchenGroup.visible = false;
     this.hallwayGroup.visible = false;
     this.upstairsGroup.visible = false;
+    this.bathroomGroup.visible = false;
     this.cityGroup.visible = false;
     this.galaxyGroup.visible = false;
     this.highwayGroup.visible = false;
@@ -5826,15 +6593,15 @@ export class ParkScene {
     this.hideAllRooms();
     this.hallwayGroup.visible = true;
 
-    this.dog.group.position.set(0, 0, 2.6);
+    this.dog.group.position.set(0, 0, 1.2);
     this.dog.group.rotation.y = Math.PI;
     this.dog.setAction("idle");
 
     this.walkTarget = null;
     this.walkTargetMarker.visible = false;
 
-    this.spherical.set(3.3, Math.PI / 3.0, 0);
-    this.cameraTarget.set(0, 0.9, 0);
+    this.spherical.set(4.4, Math.PI / 3.0, 0);
+    this.cameraTarget.set(0, 0.9, 0.6);
     this.updateCameraPosition();
 
     sound.playSoftWoof();
@@ -5869,6 +6636,320 @@ export class ParkScene {
   }
 
   /**
+   * Enter the Bathroom (shower + bath, toilet, soap shelf with Happy's
+   * Men's Shampoo, Happy Kids and the Star bottle).
+   */
+  public enterBathroom() {
+    if (this.viewMode !== "house") {
+      this.viewMode = "house";
+      if (this.onHouseEntered) this.onHouseEntered();
+    }
+    this.houseRoom = "bathroom";
+    this.hideAllRooms();
+    this.bathroomGroup.visible = true;
+    this.inBathtub = false;
+
+    this.dog.group.position.set(0.4, 0, 0.6);
+    this.dog.group.rotation.y = Math.PI * 0.8;
+    this.dog.group.scale.setScalar(1);
+    this.dog.setAction("idle");
+
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+
+    this.spherical.set(4.6, Math.PI / 2.8, 0);
+    this.cameraTarget.set(0, 1.0, -0.4);
+    this.updateCameraPosition();
+
+    sound.playSoftWoof();
+    if (this.onRoomChanged) this.onRoomChanged("bathroom");
+  }
+
+  /** Click the shower: Happy hops into the bathtub (framed close-up). */
+  public enterBathtub() {
+    if (this.viewMode !== "house" || this.houseRoom !== "bathroom") return;
+    if (this.inBathtub) {
+      this.exitBathtub();
+      return;
+    }
+    const tub = this.BATHTUB_CENTER.clone();
+    this.walkTo(new THREE.Vector3(tub.x, 0, tub.z + 1.7), () => {
+      this.buildBathFoam();
+      this.clearBath();
+      this.inBathtub = true;
+      this.dog.group.position.set(tub.x, tub.y, tub.z);
+      this.dog.group.rotation.y = 0; // face the camera, chest-deep in the tub
+      this.dog.setAction("sit", 2.0);
+      this.spherical.set(4.3, Math.PI / 2.9, 0);
+      this.cameraTarget.set(tub.x, tub.y + 0.8, tub.z);
+      this.updateCameraPosition();
+      sound.playSqueak();
+      this.spawnHeartParticles(tub.clone().add(new THREE.Vector3(0, 0.9, 0)));
+    });
+  }
+
+  /** Step out of the tub and back to the bathroom floor. */
+  public exitBathtub() {
+    if (!this.inBathtub) return;
+    this.clearBath();
+    this.inBathtub = false;
+    this.dog.group.position.set(this.BATHTUB_CENTER.x + 0.2, 0, this.BATHTUB_CENTER.z + 1.6);
+    this.dog.group.rotation.y = Math.PI;
+    this.dog.setAction("idle");
+    this.spherical.set(4.6, Math.PI / 2.8, 0);
+    this.cameraTarget.set(0, 1.0, -0.4);
+    this.updateCameraPosition();
+  }
+
+  // =====================================================================
+  //  Bath-time routine: pick a shampoo → squeeze it over Happy → rub it in
+  //  (white foam everywhere) → unclip the hand shower and rinse him off.
+  // =====================================================================
+
+  /** Clumps of white foam, parented to Happy so they follow him around. */
+  private buildBathFoam() {
+    if (this.foamBuilt) return;
+    this.foamBuilt = true;
+    this.foamGroup = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.95 });
+    // Local space of the dog model (back, flanks and head).
+    const spots: [number, number, number][] = [
+      [0, 1.6, -0.5], [0.3, 1.45, -0.3], [-0.32, 1.47, -0.28],
+      [0.2, 1.66, -0.05], [-0.22, 1.66, -0.02], [0, 1.32, -0.72],
+      [0.36, 1.24, -0.1], [-0.36, 1.22, -0.12], [0.14, 1.74, -0.7],
+      [-0.16, 1.72, -0.74], [0.44, 1.5, -0.46], [-0.44, 1.5, -0.46],
+      [0, 1.18, -0.42], [0.24, 1.08, -0.55], [-0.24, 1.08, -0.5],
+      [0.1, 1.86, -0.34], [-0.1, 1.86, -0.3],
+    ];
+    spots.forEach(([x, y, z], i) => {
+      const r = 0.13 + ((i * 37) % 7) * 0.012;
+      const m = new THREE.Mesh(new THREE.SphereGeometry(r, 10, 8), mat);
+      m.position.set(x, y, z);
+      m.scale.set(1, 0.7, 1);
+      m.visible = false;
+      this.foamGroup.add(m);
+      this.foamBlobs.push(m);
+    });
+    this.dog.group.add(this.foamGroup);
+  }
+
+  /** Show the first `k` (0..1) share of the foam clumps. */
+  private setFoam(k: number) {
+    const n = Math.round(k * this.foamBlobs.length);
+    this.foamBlobs.forEach((b, i) => (b.visible = i < n));
+  }
+
+  /** Raycast helper that ignores objects hidden behind an invisible parent
+   *  (THREE's raycaster does not skip invisible meshes). */
+  private visibleHits(obj: THREE.Object3D, ray: THREE.Raycaster): THREE.Intersection[] {
+    return ray.intersectObject(obj, true).filter((h) => {
+      let o: THREE.Object3D | null = h.object;
+      while (o) {
+        if (!o.visible) return false;
+        o = o.parent;
+      }
+      return true;
+    });
+  }
+
+  private clearBath() {
+    if (this.bathBottle) {
+      this.scene.remove(this.bathBottle);
+      this.bathBottle = null;
+    }
+    if (this.bathStream) {
+      this.scene.remove(this.bathStream);
+      this.bathStream = null;
+    }
+    this.setFoam(0);
+    this.bathAnim = null;
+    this.bathStep = "idle";
+    if (this.showerDetached) this.reattachShower();
+  }
+
+  /** Reroute a click while Happy is soaking. Returns true if it was handled. */
+  private handleBathClick(raycaster: THREE.Raycaster): boolean {
+    // 1. Press the floating bottle → squeeze it over Happy.
+    if (this.bathBottle && this.bathStep === "soap") {
+      if (raycaster.intersectObject(this.bathBottle, true).length > 0) {
+        this.squeezeShampoo();
+        return true;
+      }
+    }
+    // 2. Rub the lather in (tap Happy).
+    if (this.bathStep === "lather") {
+      if (raycaster.intersectObject(this.dog.group, true).length > 0) {
+        this.rubShampoo();
+        return true;
+      }
+    }
+    // 3. Unclip / re-clip the hand shower (tap the head or the pole).
+    if (this.visibleHits(this.showerGroup, raycaster).length > 0) {
+      if (this.showerDetached) this.reattachShower();
+      else this.detachShower();
+      return true;
+    }
+    // 4. Take a bottle off the shelf (only if Happy isn't in front of it).
+    if (this.bathStep === "idle") {
+      const hits = raycaster.intersectObject(this.soapShelfGroup, true);
+      const dogHits = raycaster.intersectObject(this.dog.group, true);
+      if (hits.length > 0 && (!dogHits.length || hits[0].distance < dogHits[0].distance)) {
+        for (const hit of hits) {
+          let o: THREE.Object3D | null = hit.object;
+          while (o) {
+            const ud = o.userData as { type?: string; kind?: "mens" | "kids" | "star" };
+            if (ud.type === "shampoo" && ud.kind) {
+              this.pickShampoo(ud.kind);
+              return true;
+            }
+            o = o.parent;
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Lift a shampoo bottle off the shelf and float it over Happy. */
+  private pickShampoo(kind: "mens" | "kids" | "star") {
+    if (this.bathStep !== "idle") return;
+    const bottle = this.makeShampooBox(kind, 0.16, 0.24, 0.1);
+    bottle.position.set(this.BATHTUB_CENTER.x + 1.1, 1.5, this.BATHTUB_CENTER.z + 0.9);
+    this.scene.add(bottle);
+    this.bathBottle = bottle;
+    this.bathKind = kind;
+    this.bathStep = "soap";
+    this.bathAnim = {
+      kind: "float",
+      t: 0,
+      dur: 0.6,
+      from: bottle.position.clone(),
+      to: new THREE.Vector3(this.BATHTUB_CENTER.x + 0.42, 1.72, this.BATHTUB_CENTER.z + 0.5),
+    };
+    sound.playSqueak();
+    if (this.onBathEvent) this.onBathEvent("soap");
+  }
+
+  /** Tip the held bottle and squirt a ribbon of shampoo onto Happy. */
+  private squeezeShampoo() {
+    if (this.bathStep !== "soap" || !this.bathBottle) return;
+    this.bathStep = "lather";
+    this.bathAnim = {
+      kind: "squeeze",
+      t: 0,
+      dur: 0.85,
+      from: this.bathBottle.position.clone(),
+      to: new THREE.Vector3(this.BATHTUB_CENTER.x + 0.3, 1.5, this.BATHTUB_CENTER.z + 0.35),
+    };
+    // The falling ribbon of shampoo.
+    const stream = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.012, 0.03, 0.5, 8),
+      new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.3 })
+    );
+    stream.position.set(this.BATHTUB_CENTER.x + 0.3, 1.28, this.BATHTUB_CENTER.z + 0.3);
+    this.scene.add(stream);
+    this.bathStream = stream;
+    sound.playSqueak();
+    if (this.onBathEvent) this.onBathEvent("rub");
+  }
+
+  /** Rub the shampoo in: lather spreads over Happy as he wriggles. */
+  private rubShampoo() {
+    if (this.bathStep !== "lather") return;
+    this.bathStep = "rinse";
+    this.setFoam(0.65);
+    this.dog.setAction("zoomies", 1.8);
+    sound.playCrunch();
+    this.spawnHeartParticles(this.dog.group.position.clone().add(new THREE.Vector3(0, 1.4, 0)));
+    if (this.onBathEvent) this.onBathEvent("rub");
+  }
+
+  /** Unclip the hand shower from the wall and let it run over Happy. */
+  private detachShower() {
+    this.showerDetached = true;
+    if (this.showerHose) this.showerHose.visible = true;
+    if (this.showerSpray) this.showerSpray.visible = true;
+    this.showerHeadGroup.rotation.z = Math.PI * 0.42;
+    this.bathStep = "rinse";
+    // Rinse the foam away over a couple of seconds.
+    let t = 0;
+    const rinse = () => {
+      t += 0.06;
+      if (t < 1) {
+        this.setFoam(Math.max(0, (1 - t) * 1.15));
+        requestAnimationFrame(rinse);
+      } else {
+        this.setFoam(0);
+      }
+    };
+    rinse();
+    this.bathAnim = {
+      kind: "rinse",
+      t: 0,
+      dur: 0.55,
+      from: this.showerHeadGroup.position.clone(),
+      to: new THREE.Vector3(this.BATHTUB_CENTER.x, 1.9, this.BATHTUB_CENTER.z + 0.1),
+    };
+    this.dog.setAction("sit", 2.0);
+    sound.playSqueak();
+    if (this.onBathEvent) this.onBathEvent("rinse");
+  }
+
+  /** Clip the hand shower back onto its wall outlet. */
+  private reattachShower() {
+    this.showerDetached = false;
+    if (this.showerHose) this.showerHose.visible = false;
+    if (this.showerSpray) this.showerSpray.visible = false;
+    this.showerHeadGroup.position.copy(this.showerReturnTo);
+    this.showerHeadGroup.rotation.z = 0;
+    this.bathAnim = null;
+    if (this.bathStep === "rinse") {
+      this.bathStep = "idle";
+      this.setFoam(0);
+      if (this.onBathEvent) this.onBathEvent("done");
+    }
+  }
+
+  private updateBath(delta: number) {
+    const a = this.bathAnim;
+    if (!a) return;
+    a.t += delta / a.dur;
+    const t = Math.min(1, a.t);
+
+    if (a.kind === "float" && this.bathBottle) {
+      this.bathBottle.position.lerpVectors(a.from, a.to, t);
+      this.bathBottle.position.y += Math.sin(t * Math.PI) * 0.12;
+      this.bathBottle.rotation.y = t * Math.PI * 0.5;
+      if (t >= 1) this.bathAnim = null;
+      return;
+    }
+    if (a.kind === "squeeze" && this.bathBottle) {
+      this.bathBottle.position.lerpVectors(a.from, a.to, t);
+      this.bathBottle.rotation.z = Math.PI * 0.8 * t; // tip it upside-down
+      if (this.bathStream) this.bathStream.visible = t < 0.85;
+      if (t >= 1) {
+        if (this.bathStream) {
+          this.scene.remove(this.bathStream);
+          this.bathStream = null;
+        }
+        if (this.bathBottle) {
+          this.bathBottle.rotation.z = 0;
+          this.bathBottle.rotation.y = 0;
+        }
+        this.bathAnim = null;
+      }
+      return;
+    }
+    if (a.kind === "rinse") {
+      this.showerHeadGroup.position.lerpVectors(a.from, a.to, t);
+      if (t >= 1) {
+        this.showerHeadGroup.position.copy(a.to);
+        this.bathAnim = null;
+      }
+    }
+  }
+
+  /**
    * Climb the hallway stairs: dog walks to the base, hops up step by step,
    * then fires onStairsClimbed (the app plays the iris transition).
    */
@@ -5898,6 +6979,55 @@ export class ParkScene {
       this.dog.setAction("idle");
       sound.playRewardFanfare();
       if (this.onStairsClimbed) this.onStairsClimbed();
+    }
+  }
+
+  /**
+   * Press a black doorway: Happy trots onto the mat, then walks straight into
+   * the black panel and is swallowed by it. The room change fires once he is
+   * fully inside (onDoorWalkedThrough), so the announce text lands on the beat.
+   */
+  private walkThroughDoor(dw: {
+    target: HouseRoom;
+    label: string;
+    mat: THREE.Mesh;
+    panel: THREE.Mesh;
+    roomDir: THREE.Vector3;
+  }) {
+    if (this.doorWalk) return;
+    if (this.inBathtub) this.exitBathtub();
+    this.walkTo(dw.mat.position.clone(), () => {
+      // Step through: aim just inside the black panel.
+      const to = dw.panel.position.clone().addScaledVector(dw.roomDir, -0.05);
+      to.y = 0;
+      this.doorWalk = {
+        t: 0,
+        dur: 0.9,
+        from: this.dog.group.position.clone(),
+        to,
+        target: dw.target,
+        label: dw.label,
+      };
+      this.dog.setAction("run");
+      sound.playSoftWoof();
+    });
+  }
+
+  private updateDoorWalk(delta: number) {
+    const dw = this.doorWalk;
+    if (!dw) return;
+    dw.t += delta / dw.dur;
+    const t = Math.min(1, dw.t);
+    const pos = this.dog.group.position;
+    pos.x = THREE.MathUtils.lerp(dw.from.x, dw.to.x, t);
+    pos.z = THREE.MathUtils.lerp(dw.from.z, dw.to.z, t);
+    // Little stride bounce as he disappears into the dark
+    pos.y = Math.abs(Math.sin(t * Math.PI * 3)) * 0.06;
+    if (t >= 1) {
+      pos.y = 0;
+      this.dog.setAction("idle");
+      this.doorWalk = null;
+      if (this.onDoorWalkedThrough) this.onDoorWalkedThrough(dw.target, dw.label);
     }
   }
 
@@ -6502,6 +7632,12 @@ export class ParkScene {
         z: THREE.MathUtils.clamp(z, -3.6, 3.6),
       };
     }
+    if (this.houseRoom === "bathroom") {
+      return {
+        x: THREE.MathUtils.clamp(x, -5.5, 5.5),
+        z: THREE.MathUtils.clamp(z, -4.5, 4.5),
+      };
+    }
     if (this.viewMode === "house") {
       // Living / kitchen rooms are now a comfy 10x10
       return {
@@ -6685,6 +7821,9 @@ export class ParkScene {
       // Stair-climb animation
       this.updateClimb(delta);
 
+      // "Walking into the black doorway" animation
+      this.updateDoorWalk(delta);
+
       // Cinematic camera zooms (arcade portals)
       this.updateCameraTween(delta);
 
@@ -6702,6 +7841,12 @@ export class ParkScene {
 
       // Tabletop four-wins tokens falling + bouncing on the board
       this.updateTabletopTokens(delta);
+
+      // Chess capture / checkmate choreography + flying debris
+      this.updateTabletopAnim(delta);
+
+      // Bath-time: shampoo float / squeeze / rinse tweens
+      this.updateBath(delta);
 
       // Floating marker over the grabbed edit-mode object
       this.updateSelectionMarker(elapsed);
