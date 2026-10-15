@@ -46,6 +46,29 @@ export interface RoomLayout {
 /** Living room footprint in world units. Floors must span at least this far. */
 const HOUSE_ROOM_SIZE = 10.0;
 
+/**
+ * A strolling city dog NPC: wanders inside a little circle around its home
+ * spot (in the fountain park), waits, then strolls somewhere new. It only
+ * speaks "woof" — the bubble reveals what the barks actually mean.
+ */
+interface CityNpc {
+  model: Dog3D;
+  name: string;
+  home: THREE.Vector3;
+  radius: number;
+  target: THREE.Vector3 | null;
+  /** Seconds left before it picks a new spot. */
+  wait: number;
+  speed: number;
+  /** Woof lines + their doggy "translation". */
+  lines: { woof: string; meaning: string }[];
+  /** Extra lines while the birthday party is on (hats + big scream). */
+  partyLines: { woof: string; meaning: string }[];
+  lineIdx: number;
+  /** Random idle barks. */
+  barkCooldown: number;
+}
+
 export class ParkScene {
   private container: HTMLElement;
   private scene: THREE.Scene;
@@ -77,6 +100,14 @@ export class ParkScene {
   private cinematicCam: boolean = false;
   // Side-view tracking cam: watch the 3D car drive from the side (highway)
   private sideCam: boolean = false;
+  // ---- Car sat-nav: choose the stop before driving off -------------------
+  // The dashboard sat-nav pops up after Happy walks to the car and offers
+  // two stops: the Supermarket lot or the new lot BEHIND the Cake Store.
+  public carDestination: "supermarket" | "cakestore" = "supermarket";
+  /** Where the car is currently parked in the city (picks the way home). */
+  private carParkedLot: "supermarket" | "cakestore" = "supermarket";
+  private satNavPending = false;
+  public onCarSatNav?: () => void;
   public onCarRideMidway?: () => void;
   public onArrivedInCity?: () => void;
   public onCarReturnMidway?: () => void;
@@ -93,7 +124,50 @@ export class ParkScene {
   // City buildings (clickable: supermarket + gym)
   private supermarketGroup: THREE.Group = new THREE.Group();
   private gymGroup: THREE.Group = new THREE.Group();
+  private gymDumbbell: THREE.Group = new THREE.Group();
   private cityGroundMesh!: THREE.Mesh;
+
+  // Supermarket sliding glass doors + the walk-in choreography
+  private supermarketDoorL: THREE.Group | null = null;
+  private supermarketDoorR: THREE.Group | null = null;
+  private supermarketDoorProgress = 0; // 0 closed → 1 slid fully open
+  private supermarketDoorTarget = 0;
+  private supermarketState: "idle" | "walkToDoor" | "stepIn" = "idle";
+  private supermarketEntryTimeout = 0;
+
+  // ---- The Birthday Cake Store (pink house on the extended city road) ----
+  private cakeStoreGroup: THREE.Group = new THREE.Group();
+  private cakeStoreInteriorGroup: THREE.Group = new THREE.Group();
+  private cakeStoreFloorMesh!: THREE.Mesh;
+  private cakeStoreDoorMesh!: THREE.Mesh;
+  private cakeStoreInnerDoorMesh!: THREE.Mesh;
+  private cakeCandleFlame: THREE.Mesh | null = null;
+  private storeDog: Dog3D | null = null;
+  private storeCounterGroup: THREE.Group = new THREE.Group();
+  private storeDogBubble: THREE.Sprite | null = null;
+  private storeDogBubbleTimer = 0;
+  public onCakeStoreClicked?: () => void;
+  public onStoreDogTalked?: () => void;
+  public onCakeStoreExited?: () => void;
+
+  // ---- Strolling city dog NPCs in the fountain park (they only WOOF!) ----
+  private cityNpcs: CityNpc[] = [];
+  private cityBubble: THREE.Sprite | null = null;
+  private cityBubbleTimer = 0;
+  private npcTalkingIdx = -1;
+
+  // ---- Birthday party mode (party hats, balloons, group scream) ----
+  private birthdayMode: boolean = false;
+  private partyGroup: THREE.Group = new THREE.Group();
+  private partyScreamDone: boolean = false;
+  private partyBubble: THREE.Sprite | null = null;
+  private partyBubbleTimer = 0;
+  public onPartyScream?: () => void;
+
+  // Happy's own birthday bubbles ("HAPPY Birthday!" / "Drive to the city!")
+  private happyBubble: THREE.Sprite | null = null;
+  private happyBubbleTimer = 0;
+  private happyBubbleIdx = 0;
 
   // Seasonal holiday decorations (pumpkins, gifts, flags...)
   private holidayDecorGroup: THREE.Group = new THREE.Group();
@@ -219,7 +293,7 @@ export class ParkScene {
   private highwayGroup: THREE.Group = new THREE.Group();
   public onCityApproach?: () => void;
   public onHomeApproach?: () => void;
-  // Snow accumulation: while it snows, the grass slowly turns white
+  // Snow accumulation: while it snows, the ground slowly turns white
   // (0 = green lawn, 1 = fully blanketed). Melts back when it clears.
   private snowCoverage: number = 0;
   private readonly SNOW_COLOR = new THREE.Color(0xf4f8fb);
@@ -228,6 +302,11 @@ export class ParkScene {
   private precipPoints: THREE.Points | null = null;
   private precipVel: Float32Array | null = null;
   private precipKind: "none" | "rain" | "snow" = "none";
+  // Sticky snowflakes: every flake that lands leaves a little white splat
+  // on the ground, so the world slowly blankets over in front of you.
+  private snowSplats: THREE.Points | null = null;
+  private snowSplatCursor = 0;
+  private snowSplatTimer = 0;
 
   // House Room Interior elements (Living Room)
   private roomFloorMesh!: THREE.Mesh;
@@ -463,6 +542,7 @@ export class ParkScene {
     this.setupSelectionMarker();
     // The City (park + supermarket + gym), the little car & the Galaxy Arcade
     this.setupCity();
+    this.setupCakeStoreInterior();
     this.buildCar();
     this.setupGalaxyArcade();
     this.setupHighway();
@@ -496,6 +576,7 @@ export class ParkScene {
     this.scene.add(this.upstairsGroup);
     this.scene.add(this.bathroomGroup);
     this.scene.add(this.cityGroup);
+    this.scene.add(this.cakeStoreInteriorGroup);
     this.scene.add(this.galaxyGroup);
     this.houseGroup.visible = false; // Initially outdoors
     this.kitchenGroup.visible = false;
@@ -503,6 +584,7 @@ export class ParkScene {
     this.upstairsGroup.visible = false;
     this.bathroomGroup.visible = false;
     this.cityGroup.visible = false;
+    this.cakeStoreInteriorGroup.visible = false;
     this.galaxyGroup.visible = false;
 
     // 9. Dog model
@@ -1701,7 +1783,7 @@ export class ParkScene {
     bottomRail.castShadow = true;
     fenceGroup.add(bottomRail);
 
-    this.scene.add(fenceGroup);
+    this.parkGroup.add(fenceGroup); // park-only: it used to linger in the City too
   }
 
   private makeOneTree(scale: number, tall: boolean): THREE.Group {
@@ -2928,9 +3010,9 @@ export class ParkScene {
   private setupHallway() {
     this.hallwayGroup.clear();
     // A ROOMY grand hallway: wide enough to always see where you're walking
-    const roomW = 7;
+    const roomW = 9.6;
     const roomD = 12;
-    const wallH = 4.0;
+    const wallH = 4.4;
 
     // Wood flooring hallway runner
     const floorGeom = new THREE.PlaneGeometry(roomW, roomD);
@@ -3161,29 +3243,30 @@ export class ParkScene {
       }
     });
 
-    // Staircase along the right wall (8 steps climbing toward -z)
+    // Staircase along the right wall (8 steps climbing toward -z). It hugs
+    // the widened wall so the middle of the hall stays free to stroll.
     this.stairsGroup = new THREE.Group();
     const stepMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.6 });
     const stepTopMat = new THREE.MeshStandardMaterial({ color: 0xd6a35c, roughness: 0.55 });
     for (let i = 0; i < 8; i++) {
       const step = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.35, 0.58), stepMat);
-      step.position.set(2.3, 0.175 + i * 0.35, 3.9 - i * 0.55);
+      step.position.set(3.55, 0.175 + i * 0.35, 3.9 - i * 0.55);
       step.castShadow = true;
       step.receiveShadow = true;
       this.stairsGroup.add(step);
       const tread = new THREE.Mesh(new THREE.BoxGeometry(1.44, 0.05, 0.6), stepTopMat);
-      tread.position.set(2.3, 0.35 + i * 0.35, 3.9 - i * 0.55);
+      tread.position.set(3.55, 0.35 + i * 0.35, 3.9 - i * 0.55);
       tread.receiveShadow = true;
       this.stairsGroup.add(tread);
     }
     // Wooden handrail
     const rail = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 4.6), stepMat);
-    rail.position.set(1.5, 1.9, 1.9);
+    rail.position.set(2.75, 1.9, 1.9);
     rail.rotation.x = -0.55;
     this.stairsGroup.add(rail);
     for (let i = 0; i < 4; i++) {
       const post = new THREE.Mesh(new THREE.BoxGeometry(0.07, 1.1, 0.07), stepMat);
-      post.position.set(1.5, 0.9 + i * 0.55, 3.5 - i * 1.05);
+      post.position.set(2.75, 0.9 + i * 0.55, 3.5 - i * 1.05);
       this.stairsGroup.add(post);
     }
     // Dark opening at the top of the stairs (mystery above!)
@@ -3191,7 +3274,7 @@ export class ParkScene {
       new THREE.PlaneGeometry(1.8, 1.4),
       new THREE.MeshBasicMaterial({ color: 0x000000 })
     );
-    darkOpening.position.set(2.3, 3.35, -0.85);
+    darkOpening.position.set(3.55, 3.35, -0.85);
     this.stairsGroup.add(darkOpening);
     this.stairsGroup.userData = { type: "stairs" };
     this.stairsGroup.traverse((c) => {
@@ -3200,7 +3283,7 @@ export class ParkScene {
     this.hallwayGroup.add(this.stairsGroup);
 
     // "UPSTAIRS" mat at the stair base (click to climb!)
-    this.stairsMatMesh = this.makeDoorMat("⬆ UPSTAIRS 🐾", "#6d28d9", "#ddd6fe", "stairs", 1.0, 4.9);
+    this.stairsMatMesh = this.makeDoorMat("⬆ UPSTAIRS 🐾", "#6d28d9", "#ddd6fe", "stairs", 2.25, 4.9);
     this.stairsMatMesh.userData = { type: "stairs" };
     this.hallwayGroup.add(this.stairsMatMesh);
 
@@ -3228,7 +3311,7 @@ export class ParkScene {
       "bathroom",
       "bathroom",
       this.hallwayGroup,
-      new THREE.Vector3(-2.7, 0.02, 0),
+      new THREE.Vector3(-4.0, 0.02, 0),
       new THREE.Vector3(-roomW / 2 + 0.05, 1.15, 0),
       Math.PI / 2,
       new THREE.Vector3(1, 0, 0)
@@ -3707,7 +3790,7 @@ export class ParkScene {
     g.clear();
     const roomW = 12;
     const roomD = 10;
-    const wallH = 3.6;
+    const wallH = 4.2;
 
     // ---- Tiled floor ----
     const floorGeom = new THREE.PlaneGeometry(roomW, roomD);
@@ -4655,29 +4738,74 @@ export class ParkScene {
     this.scene.add(car);
   }
 
-  /** Click the parked car: Happy walks over, hops in, and the drive begins. */
+  /** Click the parked car: Happy walks over and the dashboard sat-nav opens. */
   public startCarRideToCity() {
-    if (this.viewMode !== "park" || this.carRide.phase !== "none") return;
+    if (this.viewMode !== "park" || this.carRide.phase !== "none" || this.satNavPending) return;
     this.carRide = { phase: "hopIn", midwayFired: false };
     const side = new THREE.Vector3(this.carGroup.position.x + 1.6, 0, this.carGroup.position.z);
     this.walkTo(side, () => {
-      this.dog.group.visible = false; // hops in!
-      this.carRide.phase = "driveToCity";
-      this.cinematicCam = true;
-      sound.playWhistle();
-      sound.playToyBounce();
+      // Happy's at the car: show the sat-nav and ask WHERE to.
+      this.carRide = { phase: "none", midwayFired: false };
+      this.satNavPending = true;
+      sound.playButtonTap();
+      if (this.onCarSatNav) this.onCarSatNav();
     });
+  }
+
+  /** The sat-nav destination was picked — hop in and roll out of the park. */
+  public startCarRideWithDestination(dest: "supermarket" | "cakestore") {
+    if (this.viewMode !== "park" || !this.satNavPending) return;
+    this.satNavPending = false;
+    this.carDestination = dest;
+    this.dog.group.visible = false; // hops in!
+    this.carRide = { phase: "driveToCity", midwayFired: false };
+    this.cinematicCam = true;
+    sound.playWhistle();
+    sound.playToyBounce();
+  }
+
+  /** The sat-nav was dismissed without picking a stop. */
+  public cancelCarSatNav() {
+    this.satNavPending = false;
   }
 
   /** In the City: click the car again to drive home. */
   public startCarRideHome() {
     if (this.viewMode !== "city" || this.carRide.phase !== "none") return;
     this.carRide = { phase: "hopIn", midwayFired: false };
-    const side = new THREE.Vector3(this.carGroup.position.x + 1.6, 0, this.carGroup.position.z);
+    const side = new THREE.Vector3(this.carGroup.position.x - 1.6, 0, this.carGroup.position.z + 1.2);
     this.walkTo(side, () => {
       this.dog.group.visible = false;
-      // Pull out of the lot, then cruise south down the street
-      this.carPath = [new THREE.Vector3(3, 0, 9), new THREE.Vector3(3, 0, 26)];
+      if (this.carParkedLot === "cakestore") {
+        // Leave the lot behind the Cake Store: back down the lane, out along
+        // the south side of the shop, then home down the street — again
+        // hugging the east lane past the plaza tree.
+        this.carPath = [
+          new THREE.Vector3(17.0, 0, -33.55),
+          new THREE.Vector3(17.0, 0, -24.0),
+          new THREE.Vector3(16.0, 0, -21.6),
+          new THREE.Vector3(11.0, 0, -21.4),
+          new THREE.Vector3(5.6, 0, -21.4),
+          new THREE.Vector3(4.2, 0, -19.8),
+          new THREE.Vector3(4.4, 0, -16),
+          new THREE.Vector3(4.4, 0, 0),
+          new THREE.Vector3(4.35, 0, 8.6),
+          new THREE.Vector3(3.2, 0, 11),
+          new THREE.Vector3(3, 0, 16),
+          new THREE.Vector3(3, 0, 26),
+        ];
+      } else {
+        // Back out of the spot, down the lane, onto the street and south home
+        this.carPath = [
+          new THREE.Vector3(8.0, 0, 1.05),
+          new THREE.Vector3(8.0, 0, 6.4),
+          new THREE.Vector3(7.8, 0, 7.9),
+          new THREE.Vector3(5.0, 0, 8.8),
+          new THREE.Vector3(3.2, 0, 10.5),
+          new THREE.Vector3(3, 0, 16),
+          new THREE.Vector3(3, 0, 26),
+        ];
+      }
       this.carPathIdx = 0;
       this.carRide.phase = "driveHome";
       this.sideCam = true;
@@ -4704,6 +4832,8 @@ export class ParkScene {
   public arriveHomeFromCity() {
     this.viewMode = "park";
     this.hideAllRooms();
+    // Next city visit should start the birthday scream all over again
+    this.partyScreamDone = false;
     this.parkGroup.visible = true;
     this.carGroup.rotation.y = 0;
     this.carGroup.position.set(-5, 0, 10.5);
@@ -4730,17 +4860,18 @@ export class ParkScene {
     this.cityGroup.visible = true;
     this.walkTarget = null;
     this.walkTargetMarker.visible = false;
-    // Nose-in at the painted parking spot by the park entrance
-    this.carGroup.rotation.y = -Math.PI / 2;
-    this.carGroup.position.set(5.4, 0, 2.5);
+    // Nose-in at the free parking spot beside the blue/yellow/purple cars
+    this.carParkedLot = "supermarket";
+    this.carGroup.rotation.y = Math.PI / 2;
+    this.carGroup.position.set(12.2, 0, 1.05);
     this.dog.group.visible = true;
-    this.dog.group.position.set(4.3, 0, 3.6);
-    this.dog.group.rotation.y = Math.PI * 0.8;
+    this.dog.group.position.set(10.3, 0, 3.4);
+    this.dog.group.rotation.y = Math.PI * 0.85;
     this.dog.setAction("sit", 3.0);
     this.carRide = { phase: "none", midwayFired: false };
     this.cinematicCam = false;
-    this.spherical.set(8.5, Math.PI / 3.1, 0.5);
-    this.cameraTarget.set(0, 1.0, 1.5);
+    this.spherical.set(9.0, Math.PI / 3.5, -1.95);
+    this.cameraTarget.set(11.6, 1.2, 3.4);
     this.updateCameraPosition();
   }
 
@@ -4813,16 +4944,50 @@ export class ParkScene {
     this.carRide = { phase: "highwayToCity", midwayFired: false };
   }
 
-  /** Enter the city and drive into the parking lot, seen from the side. */
+  /** Enter the city and drive to the sat-nav stop, hunting the free spot. */
   public startLotPullIn() {
     this.viewMode = "city";
     this.hideAllRooms();
     this.cityGroup.visible = true;
     this.carGroup.position.set(3, 0, 15);
     this.carGroup.rotation.y = Math.PI;
-    this.carPath = [new THREE.Vector3(3, 0, 10), new THREE.Vector3(3, 0, 4.2), new THREE.Vector3(5.4, 0, 2.5)];
     this.carPathIdx = 0;
     this.sideCam = true;
+    if (this.carDestination === "cakestore") {
+      // Roll all the way north up the street — hugging the east lane to
+      // clear the plaza tree by the bench — then hang a right around the
+      // south side of the pink Cake Store, and up its east side into the
+      // lot BEHIND the shop (never on the left-hand side of the road!)
+      this.carPath = [
+        new THREE.Vector3(3, 0, 10),
+        new THREE.Vector3(4.35, 0, 8.6),
+        new THREE.Vector3(4.4, 0, 2),
+        new THREE.Vector3(4.4, 0, -10),
+        new THREE.Vector3(4.2, 0, -16),
+        new THREE.Vector3(4.0, 0, -19.2),
+        new THREE.Vector3(6.0, 0, -21.2),
+        new THREE.Vector3(12.0, 0, -21.4),
+        new THREE.Vector3(16.2, 0, -21.6),
+        new THREE.Vector3(17.0, 0, -24.5),
+        new THREE.Vector3(17.0, 0, -29.5),
+        new THREE.Vector3(17.0, 0, -33.55),
+        new THREE.Vector3(21.2, 0, -33.55),
+      ];
+    } else {
+      // Roll up the street, swing into the lot driveway, cruise down the lane
+      // PAST the blue, yellow and purple cars, then nose into the free spot.
+      this.carPath = [
+        new THREE.Vector3(3, 0, 11),
+        new THREE.Vector3(3.4, 0, 9.2),
+        new THREE.Vector3(5.6, 0, 8.2),
+        new THREE.Vector3(8.0, 0, 7.4),
+        new THREE.Vector3(8.0, 0, 5.6),
+        new THREE.Vector3(8.0, 0, 3.9),
+        new THREE.Vector3(8.0, 0, 2.2),
+        new THREE.Vector3(8.0, 0, 1.05),
+        new THREE.Vector3(12.2, 0, 1.05),
+      ];
+    }
     this.carRide = { phase: "lotPullIn", midwayFired: false };
   }
 
@@ -4874,16 +5039,30 @@ export class ParkScene {
       }
     } else if (ride.phase === "lotPullIn") {
       if (this.moveCarAlongPath(delta, 8)) {
-        // Parked at the lot! Snap clean, Happy hops out
-        this.carGroup.rotation.y = Math.PI / 2; // nose-in, facing east
-        this.dog.group.visible = true;
-        this.dog.group.position.set(4.3, 0, 3.6);
-        this.dog.group.rotation.y = Math.PI * 0.8;
-        this.dog.setAction("sit", 3.0);
         this.carRide = { phase: "none", midwayFired: false };
         this.sideCam = false;
-        this.spherical.set(8.5, Math.PI / 3.1, 0.5);
-        this.cameraTarget.set(2, 1.0, 2);
+        this.carGroup.rotation.y = Math.PI / 2; // nose-in, facing east
+        this.dog.group.visible = true;
+        this.dog.setAction("sit", 3.0);
+        if (this.carDestination === "cakestore") {
+          // Parked in the new lot BEHIND the Cake Store — step out beside
+          // the neighbours and frame the pink shop next door.
+          this.carParkedLot = "cakestore";
+          this.dog.group.position.set(19.3, 0, -31.2);
+          this.dog.group.rotation.y = Math.PI * 0.85;
+          // Frame from the driveway mouth (south), so the lot, the cars and
+          // the pink shop's east side all read — never inside the shop!
+          this.spherical.set(12.5, 0.95, -0.35);
+          this.cameraTarget.set(20.9, 1.2, -30.6);
+        } else {
+          // Parked in the hedge lot by the supermarket: Happy hops out in
+          // the lane beside his car and the blue/yellow/purple neighbours.
+          this.carParkedLot = "supermarket";
+          this.dog.group.position.set(10.3, 0, 3.4);
+          this.dog.group.rotation.y = Math.PI * 0.85;
+          this.spherical.set(9.0, Math.PI / 3.5, -1.95);
+          this.cameraTarget.set(11.6, 1.2, 3.4);
+        }
         this.updateCameraPosition();
         sound.playRewardFanfare();
         if (this.onArrivedInCity) this.onArrivedInCity();
@@ -4928,7 +5107,8 @@ export class ParkScene {
   private setupCity() {
     const city = this.cityGroup;
 
-    // Concrete ground
+    // Concrete ground (96x96: the city road now runs much further north,
+    // all the way up to the Birthday Cake Store)
     const groundCanvas = document.createElement("canvas");
     groundCanvas.width = 256;
     groundCanvas.height = 256;
@@ -4942,9 +5122,9 @@ export class ParkScene {
     const groundTex = new THREE.CanvasTexture(groundCanvas);
     groundTex.wrapS = THREE.RepeatWrapping;
     groundTex.wrapT = THREE.RepeatWrapping;
-    groundTex.repeat.set(10, 10);
+    groundTex.repeat.set(12, 12);
     this.cityGroundMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(80, 80),
+      new THREE.PlaneGeometry(96, 96),
       new THREE.MeshStandardMaterial({ map: groundTex, roughness: 0.95 })
     );
     this.cityGroundMesh.geometry.rotateX(-Math.PI / 2);
@@ -4952,7 +5132,8 @@ export class ParkScene {
     this.cityGroundMesh.userData = { type: "city_floor" };
     city.add(this.cityGroundMesh);
 
-    // Street running along z (the car drives in on it from the forest)
+    // Street running along z (the car drives in on it from the forest).
+    // EXTENDED north: -36 … 28 so the new Cake Store has real frontage.
     const streetCanvas = document.createElement("canvas");
     streetCanvas.width = 64;
     streetCanvas.height = 256;
@@ -4966,22 +5147,22 @@ export class ParkScene {
     const streetTex = new THREE.CanvasTexture(streetCanvas);
     streetTex.wrapS = THREE.RepeatWrapping;
     streetTex.wrapT = THREE.RepeatWrapping;
-    streetTex.repeat.set(1, 6);
+    streetTex.repeat.set(1, 8);
     const street = new THREE.Mesh(
-      new THREE.PlaneGeometry(5.5, 52),
+      new THREE.PlaneGeometry(5.5, 64),
       new THREE.MeshStandardMaterial({ map: streetTex, roughness: 0.95 })
     );
     street.geometry.rotateX(-Math.PI / 2);
-    street.position.set(3, 0.02, 2);
+    street.position.set(3, 0.02, -4);
     street.userData = { type: "city_floor" };
     city.add(street);
 
     // Sidewalks flanking the street
     const sidewalkMat = new THREE.MeshStandardMaterial({ color: 0xd4d4d8, roughness: 0.9 });
     [-0.1, 6.2].forEach((x) => {
-      const sw = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 52), sidewalkMat);
+      const sw = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 64), sidewalkMat);
       sw.geometry.rotateX(-Math.PI / 2);
-      sw.position.set(x, 0.03, 2);
+      sw.position.set(x, 0.03, -4);
       sw.userData = { type: "city_floor" };
       city.add(sw);
     });
@@ -5084,21 +5265,8 @@ export class ParkScene {
     });
     city.add(park);
 
-    // ---- Supermarket (clickable building) ----
-    const makeBuilding = (
-      w: number, h: number, d: number, x: number, z: number,
-      bodyColor: number, signText: string, signBg: string, signFg: string
-    ) => {
-      const group = new THREE.Group();
-      const body = new THREE.Mesh(
-        new THREE.BoxGeometry(w, h, d),
-        new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.6 })
-      );
-      body.position.y = h / 2;
-      body.castShadow = true;
-      body.receiveShadow = true;
-      group.add(body);
-      // Big canvas sign above the doors
+    // ---- Shared sign-maker: rounded canvas plate with emoji + text ----
+    const makeSignPlane = (w: number, signText: string, signBg: string, signFg: string) => {
       const signCanvas = document.createElement("canvas");
       signCanvas.width = 512;
       signCanvas.height = 128;
@@ -5108,37 +5276,276 @@ export class ParkScene {
       ctx.roundRect(6, 6, 500, 116, 22);
       ctx.fill();
       ctx.fillStyle = signFg;
-      ctx.font = "bold 64px sans-serif";
+      // Auto-fit the text so long signs (e.g. 🛒 SUPERMARKET) never clip
+      let size = 64;
+      ctx.font = `bold ${size}px sans-serif`;
+      const measured = ctx.measureText(signText).width;
+      if (measured > 470) {
+        size = Math.max(30, Math.floor((64 * 470) / measured));
+        ctx.font = `bold ${size}px sans-serif`;
+      }
       ctx.textAlign = "center";
       ctx.fillText(signText, 256, 86);
-      const sign = new THREE.Mesh(
-        new THREE.PlaneGeometry(w * 0.85, 1.2),
+      return new THREE.Mesh(
+        new THREE.PlaneGeometry(w, w * (128 / 512)),
         new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(signCanvas) })
       );
-      sign.position.set(0, h - 0.9, d / 2 + 0.03);
-      group.add(sign);
-      // Glass double doors
+    };
+
+    // ---- SUPERMARKET: long beige market hall with brick roof + corner pillars ----
+    {
+      const market = new THREE.Group();
+      const w = 13;          // long facade (east-west)
+      const h = 3.8;         // wall height
+      const d = 6;           // depth
+      const ov = 0.8;        // roof overhang
+      const rh = 1.7;        // ridge height
+
+      const beigeMat = new THREE.MeshStandardMaterial({ color: 0xe4d5ae, roughness: 0.75 });
+      const pillarMat = new THREE.MeshStandardMaterial({ color: 0xcdb98a, roughness: 0.7 });
+      const stoneMat = new THREE.MeshStandardMaterial({ color: 0xb3a077, roughness: 0.8 });
+
+      // Walls
+      const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), beigeMat);
+      body.position.y = h / 2;
+      body.castShadow = true;
+      body.receiveShadow = true;
+      market.add(body);
+
+      // Four corner pillars (with little stone feet + caps)
+      [[-w / 2, -d / 2], [w / 2, -d / 2], [-w / 2, d / 2], [w / 2, d / 2]].forEach(([px, pz]) => {
+        const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.5, h, 0.5), pillarMat);
+        pillar.position.set(px, h / 2, pz);
+        pillar.castShadow = true;
+        market.add(pillar);
+        const foot = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.34, 0.72), stoneMat);
+        foot.position.set(px, 0.17, pz);
+        market.add(foot);
+        const cap = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.24, 0.72), stoneMat);
+        cap.position.set(px, h - 0.12, pz);
+        market.add(cap);
+      });
+
+      // Brick roof: two slanted slabs (brick canvas) meeting at a ridge
+      const brickCanvas = document.createElement("canvas");
+      brickCanvas.width = 256;
+      brickCanvas.height = 128;
+      const bCtx = brickCanvas.getContext("2d")!;
+      bCtx.fillStyle = "#7f3b2d"; // mortar
+      bCtx.fillRect(0, 0, 256, 128);
+      for (let row = 0; row < 8; row++) {
+        const y = row * 16;
+        const offset = (row % 2) * 24;
+        for (let col = 0; col < 6; col++) {
+          const shade = [0xa8553f, 0x9c4c38, 0xb05a42][(row + col) % 3];
+          bCtx.fillStyle = `#${shade.toString(16).padStart(6, "0")}`;
+          bCtx.fillRect(offset + col * 48 - 24, y + 2, 44, 12);
+          if (offset + col * 48 - 24 < 0) bCtx.fillRect(offset + col * 48 - 24 + 256, y + 2, 44, 12);
+        }
+      }
+      const brickTex = new THREE.CanvasTexture(brickCanvas);
+      brickTex.wrapS = THREE.RepeatWrapping;
+      brickTex.wrapT = THREE.RepeatWrapping;
+      brickTex.repeat.set(5, 2);
+      const brickMat = new THREE.MeshStandardMaterial({ map: brickTex, roughness: 0.85 });
+
+      const run = d / 2 + ov;
+      const slope = Math.hypot(run, rh);
+      const angle = Math.atan2(rh, run);
+      const L = w + ov * 2;
+      [1, -1].forEach((side) => {
+        const slab = new THREE.Mesh(new THREE.BoxGeometry(L, 0.22, slope), brickMat);
+        slab.position.set(0, h + rh / 2, (side * run) / 2);
+        slab.rotation.x = side * angle;
+        slab.castShadow = true;
+        market.add(slab);
+      });
+      const ridge = new THREE.Mesh(new THREE.BoxGeometry(L + 0.2, 0.2, 0.4), brickMat);
+      ridge.position.set(0, h + rh + 0.02, 0);
+      market.add(ridge);
+
+      // Gable end triangles (beige) so the roof tent looks solid
+      const gableShape = new THREE.Shape();
+      gableShape.moveTo(-run, 0);
+      gableShape.lineTo(run, 0);
+      gableShape.lineTo(0, rh);
+      gableShape.closePath();
+      const gableGeom = new THREE.ShapeGeometry(gableShape);
+      [1, -1].forEach((side) => {
+        const gable = new THREE.Mesh(
+          gableGeom,
+          new THREE.MeshStandardMaterial({ color: 0xe4d5ae, roughness: 0.75, side: THREE.DoubleSide })
+        );
+        gable.rotation.y = (side * Math.PI) / 2;
+        gable.position.set((side * w) / 2, h, 0);
+        market.add(gable);
+      });
+
+      // Entrance sign directly over the glass doors (the big rooftop display
+      // carries the name; this one marks the way in)
+      const sign = makeSignPlane(4.2, "🛒 SUPERMARKET", "#0369a1", "#ffffff");
+      sign.position.set(0, 3.25, d / 2 + 0.04);
+      market.add(sign);
+      const doorMat = new THREE.MeshStandardMaterial({
+        color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.72,
+        side: THREE.DoubleSide,
+      });
+      const frameMat = new THREE.MeshStandardMaterial({ color: 0xe8e8ec, metalness: 0.4, roughness: 0.4 });
+
+      // ---- Sliding GLASS DOORS: click them and they open for Happy to walk in ----
+      // Dark recess behind the opening (a little peek into the lit shop)
+      const recess = new THREE.Mesh(
+        new THREE.PlaneGeometry(3.1, 2.5),
+        new THREE.MeshBasicMaterial({ color: 0x241d18 })
+      );
+      recess.position.set(0, 1.28, d / 2 - 0.16);
+      market.add(recess);
+      const glow = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.9, 0.5),
+        new THREE.MeshBasicMaterial({ color: 0xffd9a0 })
+      );
+      glow.position.set(0, 2.3, d / 2 - 0.15);
+      market.add(glow);
+      // Header beam + side jambs around the entrance opening
+      const header = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.3, 0.18), frameMat);
+      header.position.set(0, 2.72, d / 2 + 0.02);
+      market.add(header);
+      [-1.62, 1.62].forEach((jx) => {
+        const jamb = new THREE.Mesh(new THREE.BoxGeometry(0.14, 2.6, 0.18), frameMat);
+        jamb.position.set(jx, 1.3, d / 2 + 0.02);
+        market.add(jamb);
+      });
+      // The two sliding panels (grouped — they slide apart when the store opens)
+      const mkDoorPanel = (side: 1 | -1) => {
+        const panel = new THREE.Group();
+        const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.32, 2.5), doorMat);
+        glass.position.set(0, 1.3, 0);
+        panel.add(glass);
+        const edge = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2.5, 0.1), frameMat);
+        edge.position.set(side * 0.62, 1.3, 0);
+        panel.add(edge);
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(1.36, 0.09, 0.1), frameMat);
+        rail.position.set(0, 2.52, 0);
+        panel.add(rail);
+        const handle = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.035, 0.035, 0.85, 8),
+          new THREE.MeshStandardMaterial({ color: 0xb0b6bf, metalness: 0.85, roughness: 0.25 })
+        );
+        handle.position.set(side * 0.17, 1.25, 0.1);
+        panel.add(handle);
+        panel.position.set(side * 0.68, 0, d / 2 + 0.07);
+        return panel;
+      };
+      this.supermarketDoorL = mkDoorPanel(-1);
+      this.supermarketDoorR = mkDoorPanel(1);
+      market.add(this.supermarketDoorL);
+      market.add(this.supermarketDoorR);
+
+      // Shop windows flanking the entrance
+      [-4.4, 4.4].forEach((wx) => {
+        const win = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 1.5), doorMat);
+        win.position.set(wx, 2.0, d / 2 + 0.05);
+        market.add(win);
+        const winFrame = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.7, 0.1), frameMat);
+        winFrame.position.set(wx, 2.0, d / 2 + 0.01);
+        market.add(winFrame);
+      });
+
+      // ---- ROOFTOP DISPLAY: a big SUPERMARKET billboard hanging over the roof ----
+      {
+        const postMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.6, roughness: 0.35 });
+        [-3.2, 3.2].forEach((px) => {
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.1, 0.18), postMat);
+          post.position.set(px, h + rh + 0.7, 0);
+          market.add(post);
+        });
+        const board = new THREE.Mesh(
+          new THREE.BoxGeometry(8.8, 2.3, 0.2),
+          new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.5 })
+        );
+        board.position.set(0, h + rh + 1.55, 0);
+        board.castShadow = true;
+        market.add(board);
+        const bigSign = makeSignPlane(8.0, "🛒 SUPERMARKET", "#0369a1", "#ffffff");
+        bigSign.position.set(0, h + rh + 1.55, 0.14);
+        market.add(bigSign);
+        const bigSignBack = makeSignPlane(8.0, "🛒 SUPERMARKET", "#0369a1", "#ffffff");
+        bigSignBack.position.set(0, h + rh + 1.55, -0.14);
+        bigSignBack.rotation.y = Math.PI;
+        market.add(bigSignBack);
+      }
+
+      market.position.set(13.5, 0, -10);
+      this.supermarketGroup = market;
+      this.supermarketGroup.userData = { type: "supermarket" };
+      this.supermarketGroup.traverse((c) => (c.userData = { type: "supermarket" }));
+      city.add(this.supermarketGroup);
+    }
+
+    // ---- GYM: orange training hall with a GIANT dumbbell sign on the roof ----
+    {
+      const gym = new THREE.Group();
+      const gw = 8;
+      const gh = 4.2;
+      const gd = 5;
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(gw, gh, gd),
+        new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.6 })
+      );
+      body.position.y = gh / 2;
+      body.castShadow = true;
+      body.receiveShadow = true;
+      gym.add(body);
+      const sign = makeSignPlane(6.5, "🏋️ DOGGY GYM", "#9a3412", "#ffffff");
+      sign.position.set(0, gh - 0.9, gd / 2 + 0.04);
+      gym.add(sign);
       const doorMat = new THREE.MeshStandardMaterial({
         color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85,
       });
       [-0.65, 0.65].forEach((dx) => {
         const door = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 2.0), doorMat);
-        door.position.set(dx, 1.0, d / 2 + 0.04);
-        group.add(door);
+        door.position.set(dx, 1.0, gd / 2 + 0.04);
+        gym.add(door);
       });
-      group.position.set(x, 0, z);
-      return group;
-    };
 
-    this.supermarketGroup = makeBuilding(9, 4.5, 5, 11, -9, 0x38bdf8, "🛒 SUPERMARKET", "#0369a1", "#ffffff");
-    this.supermarketGroup.userData = { type: "supermarket" };
-    this.supermarketGroup.traverse((c) => (c.userData = { type: "supermarket" }));
-    city.add(this.supermarketGroup);
+      // The giant "handle": a chunky dumbbell resting on two rooftop posts
+      const metalMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.7, roughness: 0.35 });
+      const plateMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, metalness: 0.5, roughness: 0.45 });
+      const dumbbell = new THREE.Group();
+      const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 4.6, 12), metalMat);
+      bar.rotation.z = Math.PI / 2;
+      dumbbell.add(bar);
+      [-1, 1].forEach((side) => {
+        const plate1 = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 0.95, 0.42, 20), plateMat);
+        plate1.rotation.z = Math.PI / 2;
+        plate1.position.x = side * 1.75;
+        plate1.castShadow = true;
+        dumbbell.add(plate1);
+        const plate2 = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 0.72, 0.4, 18), metalMat);
+        plate2.rotation.z = Math.PI / 2;
+        plate2.position.x = side * 2.25;
+        plate2.castShadow = true;
+        dumbbell.add(plate2);
+      });
+      const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 1.1, 12), metalMat);
+      grip.rotation.z = Math.PI / 2;
+      dumbbell.add(grip);
+      // Two posts holding it up like a rooftop sign
+      [-1.5, 1.5].forEach((px) => {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.24, 1.1, 0.24), metalMat);
+        post.position.set(px, gh + 0.55, 0);
+        gym.add(post);
+      });
+      dumbbell.position.set(0, gh + 1.75, 0);
+      this.gymDumbbell = dumbbell;
+      gym.add(dumbbell);
 
-    this.gymGroup = makeBuilding(8, 4.2, 5, -13, -10, 0xf97316, "🏋️ DOGGY GYM", "#9a3412", "#ffffff");
-    this.gymGroup.userData = { type: "gym" };
-    this.gymGroup.traverse((c) => (c.userData = { type: "gym" }));
-    city.add(this.gymGroup);
+      gym.position.set(-13, 0, -10);
+      this.gymGroup = gym;
+      this.gymGroup.userData = { type: "gym" };
+      this.gymGroup.traverse((c) => (c.userData = { type: "gym" }));
+      city.add(this.gymGroup);
+    }
 
     // ---- Skyline backdrop (north edge) ----
     const skyline = new THREE.Group();
@@ -5157,13 +5564,13 @@ export class ParkScene {
     const windowTex = new THREE.CanvasTexture(windowCanvas);
     windowTex.wrapS = THREE.RepeatWrapping;
     windowTex.wrapT = THREE.RepeatWrapping;
-    for (let i = 0; i < 7; i++) {
-      const h = 7 + Math.random() * 9;
+    for (let i = 0; i < 9; i++) {
+      const h = 7 + Math.random() * 10;
       const tower = new THREE.Mesh(
         new THREE.BoxGeometry(3.4, h, 3.4),
         new THREE.MeshStandardMaterial({ map: windowTex, roughness: 0.7 })
       );
-      tower.position.set(-21 + i * 6.5, h / 2, -24 - Math.random() * 3);
+      tower.position.set(-28 + i * 7, h / 2, -42 - Math.random() * 3);
       skyline.add(tower);
     }
     city.add(skyline);
@@ -5172,37 +5579,139 @@ export class ParkScene {
     const forestApproach = new THREE.Group();
     for (let i = 0; i < 16; i++) {
       const t = this.makeOneTree(0.85 + ((i * 31) % 30) / 100, i % 2 === 0);
-      const x = -18 + i * 2.4 + Math.random() * 1.2;
+      let x = -18 + i * 2.4 + Math.random() * 1.2;
+      // Keep the road mouth (and the whole carriageway) clearly open —
+      // no tree trunks standing in the middle of the street!
+      if (x > -1.5 && x < 8.5) x -= 10.5;
       t.position.set(x, 0, 19 + Math.random() * 7);
       forestApproach.add(t);
     }
     city.add(forestApproach);
 
-    // ---- Parking lot by the park entrance (the car parks here!) ----
+    // ---- Parking lot (EAST of the street — the car drives in and parks here!) ----
+    // Moved clear of the street: a proper hedge-framed lot with four painted
+    // spots. Three city cars (blue, yellow, purple) are already parked; the
+    // deep free spot is saved for the red one coming in off the street.
     const lot = new THREE.Group();
     const lotPad = new THREE.Mesh(
-      new THREE.PlaneGeometry(7, 6.2),
+      new THREE.PlaneGeometry(9.2, 8.8),
       new THREE.MeshStandardMaterial({ color: 0x4b5563, roughness: 0.95 })
     );
     lotPad.geometry.rotateX(-Math.PI / 2);
-    lotPad.position.y = 0.02;
+    lotPad.position.set(11.8, 0.02, 3.8);
     lotPad.receiveShadow = true;
     lot.add(lotPad);
-    // Painted white spot dividers
-    [0.7, 1.85, 3.0, 4.15].forEach((z) => {
+    // Driveway apron crossing the sidewalk (street → lot lane)
+    const apron = new THREE.Mesh(
+      new THREE.PlaneGeometry(3.4, 1.8),
+      new THREE.MeshStandardMaterial({ color: 0x565d64, roughness: 0.95 })
+    );
+    apron.geometry.rotateX(-Math.PI / 2);
+    apron.position.set(6.9, 0.025, 8.0);
+    apron.userData = { type: "city_floor" };
+    lot.add(apron);
+    // Painted white spot dividers (4 spots along the lot, stacked in z)
+    [1.9, 3.6, 5.3].forEach((z) => {
       const line = new THREE.Mesh(
         new THREE.BoxGeometry(6.8, 0.01, 0.12),
         new THREE.MeshBasicMaterial({ color: 0xffffff })
       );
-      line.position.set(0, 0.03, z);
+      line.position.set(12.3, 0.03, z);
       lot.add(line);
     });
-    // Little 🅿️ sign post
+    // Outer edge lines (softer white)
+    [0.2, 7.0].forEach((z) => {
+      const line = new THREE.Mesh(
+        new THREE.BoxGeometry(6.8, 0.01, 0.1),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 })
+      );
+      line.position.set(12.3, 0.03, z);
+      lot.add(line);
+    });
+
+    // Trimmed leafy hedges framing the lot (north, east & south sides)
+    const makeHedge = (length: number, alongX: boolean): THREE.Group => {
+      const hedge = new THREE.Group();
+      const core = new THREE.Mesh(
+        new THREE.BoxGeometry(alongX ? length : 0.55, 0.62, alongX ? 0.55 : length),
+        new THREE.MeshStandardMaterial({ color: 0x2f6b2f, roughness: 0.95 })
+      );
+      core.position.y = 0.31;
+      core.castShadow = true;
+      hedge.add(core);
+      const leafMatA = new THREE.MeshStandardMaterial({ color: 0x3f7d3a, roughness: 0.95 });
+      const leafMatB = new THREE.MeshStandardMaterial({ color: 0x4c8f45, roughness: 0.95 });
+      const leafMatC = new THREE.MeshStandardMaterial({ color: 0x5aa050, roughness: 0.95 });
+      const blobs = Math.max(3, Math.round(length / 0.42));
+      for (let i = 0; i < blobs; i++) {
+        const t = (i / (blobs - 1) - 0.5) * length;
+        const blob = new THREE.Mesh(
+          new THREE.SphereGeometry(0.3 + Math.random() * 0.1, 8, 8),
+          i % 3 === 0 ? leafMatA : i % 3 === 1 ? leafMatB : leafMatC
+        );
+        const side = (Math.random() - 0.5) * 0.5;
+        blob.position.set(
+          alongX ? t : side,
+          0.58 + Math.random() * 0.16,
+          alongX ? side : t
+        );
+        blob.castShadow = true;
+        hedge.add(blob);
+      }
+      return hedge;
+    };
+    const hedgeN = makeHedge(9.4, true);
+    hedgeN.position.set(12.0, 0, -0.55);
+    lot.add(hedgeN);
+    const hedgeE = makeHedge(8.8, false);
+    hedgeE.position.set(16.55, 0, 3.8);
+    lot.add(hedgeE);
+    const hedgeS = makeHedge(7.6, true);
+    hedgeS.position.set(12.9, 0, 8.3);
+    lot.add(hedgeS);
+
+    // Three neighbours already parked: blue, yellow & purple!
+    const makeParkedCar = (bodyColor: number, cabinColor: number): THREE.Group => {
+      const parked = new THREE.Group();
+      const bodyMat = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.35, metalness: 0.25 });
+      const cabMat = new THREE.MeshStandardMaterial({ color: cabinColor, roughness: 0.25, metalness: 0.3 });
+      const tireMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.9 });
+      const body = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.58, 2.75), bodyMat);
+      body.position.y = 0.58;
+      body.castShadow = true;
+      parked.add(body);
+      const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.32, 0.52, 1.25), cabMat);
+      cabin.position.set(0, 1.08, -0.25);
+      cabin.castShadow = true;
+      parked.add(cabin);
+      [[-0.82, 0.95], [0.82, 0.95], [-0.82, -0.95], [0.82, -0.95]].forEach(([x, z]) => {
+        const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.22, 12), tireMat);
+        wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(x, 0.3, z);
+        parked.add(wheel);
+      });
+      return parked;
+    };
+    const parkedSpots: { color: number; cabin: number; z: number }[] = [
+      { color: 0x3b82f6, cabin: 0xbfdbfe, z: 6.15 }, // blue
+      { color: 0xfacc15, cabin: 0xfef3c7, z: 4.45 }, // yellow
+      { color: 0xa855f7, cabin: 0xe9d5ff, z: 2.75 }, // purple
+    ];
+    parkedSpots.forEach(({ color, cabin, z }) => {
+      const car = makeParkedCar(color, cabin);
+      car.rotation.y = Math.PI / 2; // nose-in, facing east
+      car.position.set(12.2, 0, z);
+      car.userData = { type: "city_floor" }; // scenery — no click behaviour
+      car.traverse((c) => (c.userData = { type: "city_floor" }));
+      lot.add(car);
+    });
+
+    // Little 🅿️ sign post by the driveway
     const signPole = new THREE.Mesh(
       new THREE.CylinderGeometry(0.05, 0.05, 1.8, 8),
       new THREE.MeshStandardMaterial({ color: 0xd6d6d6, metalness: 0.6 })
     );
-    signPole.position.set(3.6, 0.9, 5.6);
+    signPole.position.set(8.7, 0.9, 8.9);
     lot.add(signPole);
     const signCanvas = document.createElement("canvas");
     signCanvas.width = 96;
@@ -5218,17 +5727,1189 @@ export class ParkScene {
     pCtx.fillText("P", 48, 70);
     const signPlate = new THREE.Mesh(
       new THREE.PlaneGeometry(0.7, 0.7),
-      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(signCanvas) })
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(signCanvas), side: THREE.DoubleSide })
     );
-    signPlate.position.set(3.6, 1.85, 5.6);
+    signPlate.position.set(8.7, 1.85, 8.9);
+    signPlate.rotation.y = Math.PI / 4;
     lot.add(signPlate);
-    lot.position.set(5.4, 0, 2.4);
     this.cityGroup.add(lot);
+
+    // ---- SECOND PARKING LOT: behind the Cake Store (east side, never on
+    // the left of the road). The sat-nav route for the Cake Store swings
+    // right off the street, glides along the shop's south side, turns up its
+    // east side and parks here — directly BEHIND the pink cake shop. ----
+    const lot2 = new THREE.Group();
+    // Driveway strip from the street, along the south side of the Cake Store
+    const drive2 = new THREE.Mesh(
+      new THREE.PlaneGeometry(12.6, 3.0),
+      new THREE.MeshStandardMaterial({ color: 0x565d64, roughness: 0.95 })
+    );
+    drive2.geometry.rotateX(-Math.PI / 2);
+    drive2.position.set(11.2, 0.025, -21.4);
+    drive2.userData = { type: "city_floor" };
+    lot2.add(drive2);
+    // Lane strip climbing the west side of the lot from the driveway
+    const lane2 = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.2, 6.4),
+      new THREE.MeshStandardMaterial({ color: 0x565d64, roughness: 0.95 })
+    );
+    lane2.geometry.rotateX(-Math.PI / 2);
+    lane2.position.set(17.05, 0.025, -23.7);
+    lane2.userData = { type: "city_floor" };
+    lot2.add(lane2);
+    // Lot pad
+    const lotPad2 = new THREE.Mesh(
+      new THREE.PlaneGeometry(9.2, 8.8),
+      new THREE.MeshStandardMaterial({ color: 0x4b5563, roughness: 0.95 })
+    );
+    lotPad2.geometry.rotateX(-Math.PI / 2);
+    lotPad2.position.set(20.8, 0.02, -31.0);
+    lotPad2.receiveShadow = true;
+    lotPad2.userData = { type: "city_floor" };
+    lot2.add(lotPad2);
+    // Painted white spot dividers (same 4-spot pattern as the first lot)
+    [-29.3, -31.0, -32.7].forEach((z) => {
+      const line = new THREE.Mesh(
+        new THREE.BoxGeometry(6.8, 0.01, 0.12),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+      );
+      line.position.set(21.3, 0.03, z);
+      lot2.add(line);
+    });
+    [-27.6, -34.4].forEach((z) => {
+      const line = new THREE.Mesh(
+        new THREE.BoxGeometry(6.8, 0.01, 0.1),
+        new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 })
+      );
+      line.position.set(21.3, 0.03, z);
+      lot2.add(line);
+    });
+    // Leafy hedges around the lot (south side leaves the lane gap open)
+    const hedge2N = makeHedge(9.4, true);
+    hedge2N.position.set(21.0, 0, -35.45);
+    lot2.add(hedge2N);
+    const hedge2E = makeHedge(8.8, false);
+    hedge2E.position.set(25.55, 0, -31.0);
+    lot2.add(hedge2E);
+    const hedge2S = makeHedge(7.4, true);
+    hedge2S.position.set(22.1, 0, -26.55);
+    lot2.add(hedge2S);
+    // Three neighbours already parked behind the shop: blue, yellow, purple
+    const parkedSpots2: { color: number; cabin: number; z: number }[] = [
+      { color: 0x3b82f6, cabin: 0xbfdbfe, z: -28.45 }, // blue
+      { color: 0xfacc15, cabin: 0xfef3c7, z: -30.15 }, // yellow
+      { color: 0xa855f7, cabin: 0xe9d5ff, z: -31.85 }, // purple
+    ];
+    parkedSpots2.forEach(({ color, cabin, z }) => {
+      const car = makeParkedCar(color, cabin);
+      car.rotation.y = Math.PI / 2; // nose-in, facing east
+      car.position.set(21.2, 0, z);
+      car.userData = { type: "city_floor" };
+      car.traverse((c) => (c.userData = { type: "city_floor" }));
+      lot2.add(car);
+    });
+    // Little 🅿️ sign by the driveway corner
+    const signPole2 = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.05, 1.8, 8),
+      new THREE.MeshStandardMaterial({ color: 0xd6d6d6, metalness: 0.6 })
+    );
+    signPole2.position.set(15.4, 0.9, -19.7);
+    lot2.add(signPole2);
+    const signPlate2 = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.7, 0.7),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(signCanvas), side: THREE.DoubleSide })
+    );
+    signPlate2.position.set(15.4, 1.85, -19.7);
+    signPlate2.rotation.y = Math.PI / 4;
+    lot2.add(signPlate2);
+    this.cityGroup.add(lot2);
+
+    // ---- THE BIRTHDAY CAKE STORE (pink house at the end of the extended road) ----
+    {
+      const store = new THREE.Group();
+      const sw = 7;    // depth (x, west→east)
+      const sh = 4.4;  // wall height
+      const sl = 10;   // length (z)
+      const pinkMat = new THREE.MeshStandardMaterial({ color: 0xf9a8d4, roughness: 0.7 });
+      const deepPinkMat = new THREE.MeshStandardMaterial({ color: 0xec4899, roughness: 0.65 });
+      const creamMat = new THREE.MeshStandardMaterial({ color: 0xfff1f2, roughness: 0.6 });
+
+      // Pink walls
+      const body = new THREE.Mesh(new THREE.BoxGeometry(sw, sh, sl), pinkMat);
+      body.position.y = sh / 2;
+      body.castShadow = true;
+      body.receiveShadow = true;
+      store.add(body);
+      // White base skirt + corner trim
+      const skirt = new THREE.Mesh(new THREE.BoxGeometry(sw + 0.2, 0.5, sl + 0.2), creamMat);
+      skirt.position.y = 0.25;
+      store.add(skirt);
+      [[-sw / 2, -sl / 2], [sw / 2, -sl / 2], [-sw / 2, sl / 2], [sw / 2, sl / 2]].forEach(([px, pz]) => {
+        const trim = new THREE.Mesh(new THREE.BoxGeometry(0.34, sh, 0.34), creamMat);
+        trim.position.set(px, sh / 2, pz);
+        trim.castShadow = true;
+        store.add(trim);
+      });
+
+      // Flat cream roof with a pink parapet (the cake stage)
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(sw + 0.6, 0.32, sl + 0.6), creamMat);
+      roof.position.y = sh + 0.16;
+      roof.receiveShadow = true;
+      store.add(roof);
+      const parapetMat = deepPinkMat;
+      [[0, -sl / 2 - 0.15, sw + 0.6, 0.3], [0, sl / 2 + 0.15, sw + 0.6, 0.3]].forEach(([px, pz, w, d]) => {
+        const parapet = new THREE.Mesh(new THREE.BoxGeometry(w, 0.34, d), parapetMat);
+        parapet.position.set(px, sh + 0.48, pz);
+        store.add(parapet);
+      });
+      [[-sw / 2 - 0.15, 0], [sw / 2 + 0.15, 0]].forEach(([px, pz]) => {
+        const parapet = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.34, sl + 0.6), parapetMat);
+        parapet.position.set(px, sh + 0.48, pz);
+        store.add(parapet);
+      });
+
+      // THE GIANT ROUND CAKE on the roof, with a candle on top!
+      const cake = new THREE.Group();
+      const tier1 = new THREE.Mesh(new THREE.CylinderGeometry(2.3, 2.3, 1.0, 28), pinkMat);
+      tier1.position.y = 0.5;
+      tier1.castShadow = true;
+      cake.add(tier1);
+      const frost1 = new THREE.Mesh(new THREE.TorusGeometry(2.28, 0.14, 10, 32), creamMat);
+      frost1.rotation.x = Math.PI / 2;
+      frost1.position.y = 1.0;
+      cake.add(frost1);
+      const tier2 = new THREE.Mesh(new THREE.CylinderGeometry(1.65, 1.65, 0.85, 24), creamMat);
+      tier2.position.y = 1.42;
+      tier2.castShadow = true;
+      cake.add(tier2);
+      const frost2 = new THREE.Mesh(new THREE.TorusGeometry(1.63, 0.12, 10, 28), deepPinkMat);
+      frost2.rotation.x = Math.PI / 2;
+      frost2.position.y = 1.85;
+      cake.add(frost2);
+      const tier3 = new THREE.Mesh(new THREE.CylinderGeometry(1.05, 1.05, 0.72, 22), pinkMat);
+      tier3.position.y = 2.2;
+      tier3.castShadow = true;
+      cake.add(tier3);
+      // Cherries around the tiers
+      const cherryMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.3 });
+      for (let i = 0; i < 10; i++) {
+        const a = (i / 10) * Math.PI * 2;
+        const cherry = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 10), cherryMat);
+        cherry.position.set(Math.sin(a) * 2.05, 1.02, Math.cos(a) * 2.05);
+        cake.add(cherry);
+      }
+      // Candle
+      const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.1, 1.0, 12), creamMat);
+      candle.position.y = 3.07;
+      cake.add(candle);
+      const flame = new THREE.Mesh(
+        new THREE.ConeGeometry(0.11, 0.34, 10),
+        new THREE.MeshStandardMaterial({ color: 0xffa500, emissive: 0xffa500, emissiveIntensity: 2.2 })
+      );
+      flame.position.y = 3.72;
+      cake.add(flame);
+      this.cakeCandleFlame = flame;
+      const candleGlow = new THREE.PointLight(0xffc266, 0.9, 7);
+      candleGlow.position.y = 3.7;
+      cake.add(candleGlow);
+      cake.position.set(0, sh + 0.32, 0);
+      store.add(cake);
+
+      // Two glass doors on the WEST face (toward the road) + frames
+      const doorMat = new THREE.MeshStandardMaterial({
+        color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85,
+      });
+      const frameMat = creamMat;
+      [-0.78, 0.78].forEach((dz) => {
+        const door = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 2.4), doorMat);
+        door.position.set(-sw / 2 - 0.01, 1.25, dz);
+        door.rotation.y = -Math.PI / 2;
+        store.add(door);
+        const frame = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2.6, 1.5), frameMat);
+        frame.position.set(-sw / 2 - 0.04, 1.3, dz);
+        store.add(frame);
+      });
+      const doorMatPlate = new THREE.Mesh(
+        new THREE.BoxGeometry(0.9, 0.05, 2.6),
+        new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.9 })
+      );
+      doorMatPlate.position.set(-sw / 2 - 0.5, 0.03, 0);
+      store.add(doorMatPlate);
+
+      // Big shop windows on the west + south faces
+      [[-sw / 2, -3.2], [-sw / 2, 3.2]].forEach(([px, pz]) => {
+        const win = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 1.6), doorMat);
+        win.position.set(px - 0.01, 2.0, pz);
+        win.rotation.y = -Math.PI / 2;
+        store.add(win);
+        const wFrame = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.85, 2.45), frameMat);
+        wFrame.position.set(px - 0.04, 2.0, pz);
+        store.add(wFrame);
+      });
+      [[-1.8], [1.8]].forEach(([px]) => {
+        const win = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 1.6), doorMat);
+        win.position.set(px, 2.0, sl / 2 + 0.01);
+        store.add(win);
+        const wFrame = new THREE.Mesh(new THREE.BoxGeometry(2.45, 1.85, 0.1), frameMat);
+        wFrame.position.set(px, 2.0, sl / 2 + 0.04);
+        store.add(wFrame);
+      });
+
+      // Signs: above the doors (west) + facing the road-approach (south)
+      const makeSign = (signText: string) => {
+        const c = document.createElement("canvas");
+        c.width = 512;
+        c.height = 128;
+        const ctx = c.getContext("2d")!;
+        ctx.fillStyle = "#db2777";
+        ctx.beginPath();
+        ctx.roundRect(6, 6, 500, 116, 22);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.font = "bold 58px sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(signText, 256, 84);
+        return new THREE.Mesh(
+          new THREE.PlaneGeometry(3.6, 0.9),
+          new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c) })
+        );
+      };
+      const signW = makeSign("🎂 CAKE STORE");
+      signW.position.set(-sw / 2 - 0.06, sh - 0.55, 0);
+      signW.rotation.y = -Math.PI / 2;
+      store.add(signW);
+      const signS = makeSign("🎂 CAKE STORE");
+      signS.position.set(0, sh - 0.55, sl / 2 + 0.06);
+      store.add(signS);
+
+      store.position.set(11.5, 0, -30);
+      this.cakeStoreGroup = store;
+      this.cakeStoreGroup.userData = { type: "cakestore" };
+      this.cakeStoreGroup.traverse((c) => (c.userData = { type: "cakestore" }));
+      city.add(this.cakeStoreGroup);
+    }
+
+    // Strolling dog NPCs in the fountain park + birthday party decor
+    this.setupCityDogNpcs();
+    this.setupBirthdayPartyDecor();
 
     // Warm city lighting
     const cityLight = new THREE.PointLight(0xfff1b8, 1.4, 30);
     cityLight.position.set(-5, 6, 1);
     city.add(cityLight);
+  }
+
+  // ================= SUPERMARKET GLASS DOORS =================
+
+  /**
+   * Happy asks the supermarket doors to open: he trots up to the entrance,
+   * the glass panels slide apart, he steps inside — and the shopping game
+   * opens (fired through onSupermarketClicked once he's through).
+   */
+  private beginSupermarketEntry() {
+    if (this.supermarketState !== "idle") return;
+    this.supermarketState = "walkToDoor";
+    this.supermarketDoorTarget = 1;
+    this.supermarketEntryTimeout = 20;
+    sound.playButtonTap();
+    // World coordinates of the market entrance (market sits at 13.5, -10)
+    const doorFront = new THREE.Vector3(13.5, 0, -6.15);
+    this.walkTo(doorFront, () => {
+      if (this.supermarketState !== "walkToDoor") return;
+      this.supermarketState = "stepIn";
+      this.supermarketEntryTimeout = 8;
+      const insidePoint = new THREE.Vector3(13.5, 0, -6.8);
+      this.walkTo(insidePoint, () => {
+        if (this.supermarketState !== "stepIn") return;
+        this.supermarketState = "idle";
+        this.supermarketDoorTarget = 0; // doors close behind him
+        sound.playSoftWoof();
+        if (this.onSupermarketClicked) this.onSupermarketClicked();
+      });
+    });
+  }
+
+  /** Slide the glass doors toward their target and guard the choreography. */
+  private updateSupermarketDoors(delta: number) {
+    if (!this.supermarketDoorL || !this.supermarketDoorR) return;
+    if (this.supermarketState !== "idle") {
+      this.supermarketEntryTimeout -= delta;
+      if (this.supermarketEntryTimeout <= 0) {
+        // The walk got interrupted (player tapped elsewhere) — reset safely
+        this.supermarketState = "idle";
+        this.supermarketDoorTarget = 0;
+      }
+    }
+    const diff = this.supermarketDoorTarget - this.supermarketDoorProgress;
+    if (Math.abs(diff) > 0.001) {
+      this.supermarketDoorProgress = THREE.MathUtils.clamp(
+        this.supermarketDoorProgress + Math.sign(diff) * delta * 1.6,
+        0,
+        1
+      );
+      const slide = this.supermarketDoorProgress * 1.05;
+      this.supermarketDoorL.position.x = -0.68 - slide;
+      this.supermarketDoorR.position.x = 0.68 + slide;
+    }
+  }
+
+  // ================= CITY DOG NPCS (the fountain-park woofers) =================
+
+  /** Three dogs stroll the fountain plaza. They only ever WOOF — the bubble
+   *  reveals what the barks actually mean (hit them to hear the next line). */
+  private setupCityDogNpcs() {
+    const defs: {
+      name: string;
+      breed: DogBreed;
+      collar: string;
+      home: [number, number];
+      radius: number;
+      lines: { woof: string; meaning: string }[];
+      partyLines: { woof: string; meaning: string }[];
+    }[] = [
+      {
+        name: "Rex",
+        breed: "husky",
+        collar: "#2563eb",
+        home: [-8.6, -1.6],
+        radius: 1.7,
+        lines: [
+          { woof: "Woof! Woof-woof woooof!", meaning: "Good afternoon! You're the new face around the fountain, aren't you?" },
+          { woof: "Grrr-woof! Woof woof!", meaning: "Careful — that puddle by the bench is deeper than it looks. I tested it. Twice." },
+          { woof: "Woooooof… woof!", meaning: "The pigeons think they run this plaza. Between us, I let them believe it." },
+          { woof: "Woof! Woof-woof-woof!", meaning: "If you ever find a bone near the fountain… it's mine. But I might share. Might." },
+        ],
+        partyLines: [
+          { woof: "WOOF WOOF WOOF!", meaning: "HAPPY BIRTHDAY! I've been barking it all morning — my throat is gone and my tail won't stop." },
+          { woof: "Woof! Woooof!", meaning: "The cake store dog baked all night. The whole park smells like frosting. Best day ever." },
+        ],
+      },
+      {
+        name: "Bella",
+        breed: "corgi",
+        collar: "#db2777",
+        home: [-1.9, -0.8],
+        radius: 1.5,
+        lines: [
+          { woof: "Yip yip! Woof!", meaning: "Oh my paws, hiii! You smell like park grass and adventure!" },
+          { woof: "Woof-woof! Yip yip!", meaning: "I saw the ice-cream truck this morning. It drove PAST. I'm still recovering." },
+          { woof: "Woof! Woooof…", meaning: "The fountain water? Cold. Very cold. I checked with my whole face." },
+          { woof: "Yip! Woof woof!", meaning: "Your human lets you choose the walk route? Mine calls it 'trust'. It is not trust." },
+        ],
+        partyLines: [
+          { woof: "Yip yip! WOOF!", meaning: "HAPPY BIRTHDAY!! I helped bake the cake! I mostly watched. I definitely taste-tested." },
+          { woof: "Woof! Yip!", meaning: "Balloons! BALLOONS! One of them looked at me funny, so I'm staying close to you." },
+        ],
+      },
+      {
+        name: "Milo",
+        breed: "dalmatian",
+        collar: "#7c3aed",
+        home: [-5.2, 5.0],
+        radius: 1.5,
+        lines: [
+          { woof: "Woof… woooof…", meaning: "Do you ever wonder why the fountain never stops talking? It just… woofs water all day." },
+          { woof: "Woof! Woof!", meaning: "I'm practicing my howl. I'm told it's 'a lot'. I'm working on it." },
+          { woof: "Woof-woof! Woof…", meaning: "Someday I'll catch my own tail. Today is not that day. Tomorrow isn't looking great either." },
+          { woof: "Woooof! Yip!", meaning: "Stick close to the cake store on your birthday. Trust me. The whole city smells like frosting." },
+        ],
+        partyLines: [
+          { woof: "WOOOOF! Woof!", meaning: "Happy birthday, friend! I wished for you to catch your tail one day. Dreams are important." },
+          { woof: "Woof… woof!", meaning: "The fountain is spraying in rhythm with the birthday song. I think. Or I'm just very happy." },
+        ],
+      },
+    ];
+
+    defs.forEach((d) => {
+      const model = new Dog3D(d.breed, d.collar);
+      model.group.scale.setScalar(0.85);
+      model.group.position.set(d.home[0], 0, d.home[1]);
+      model.group.rotation.y = Math.random() * Math.PI * 2;
+      model.setAction("idle");
+      this.cityGroup.add(model.group);
+      this.cityNpcs.push({
+        model,
+        name: d.name,
+        home: new THREE.Vector3(d.home[0], 0, d.home[1]),
+        radius: d.radius,
+        target: null,
+        wait: 1 + Math.random() * 3,
+        speed: 0.75 + Math.random() * 0.35,
+        lines: d.lines,
+        partyLines: d.partyLines,
+        lineIdx: 0,
+        barkCooldown: 4 + Math.random() * 6,
+      });
+    });
+  }
+
+  /**
+   * Canvas speech-bubble sprite. Lines are auto-wrapped & centered so
+   * long "translations" never overflow the bubble.
+   */
+  private makeSpeechSprite(opts: {
+    lines: { text: string; size: number; color: string; bold?: boolean; italic?: boolean }[];
+    canvasW?: number;
+    canvasH?: number;
+    bg?: string;
+    border?: string;
+    /** World-units per canvas pixel. */
+    pxPerUnit?: number;
+  }): THREE.Sprite {
+    const W = opts.canvasW ?? 560;
+    const H = opts.canvasH ?? 320;
+    const canvas = document.createElement("canvas");
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext("2d")!;
+
+    // Bubble plate + tail
+    const pad = 10;
+    const tailH = 34;
+    const bottom = H - tailH;
+    ctx.fillStyle = opts.bg ?? "rgba(255, 255, 255, 0.97)";
+    ctx.strokeStyle = opts.border ?? "#3f3f46";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.roundRect(pad, pad, W - pad * 2, bottom - pad, 26);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 20, bottom - 2);
+    ctx.lineTo(W / 2 + 20, bottom - 2);
+    ctx.lineTo(W / 2, bottom + tailH - 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    // Cover the tail outline seam on the bubble edge
+    ctx.fillStyle = opts.bg ?? "rgba(255, 255, 255, 0.97)";
+    ctx.fillRect(W / 2 - 18, bottom - 8, 36, 10);
+
+    // Text: wrap every line to the bubble width
+    const maxWidth = W - pad * 2 - 44;
+    const layout: { text: string; size: number; color: string; bold?: boolean; italic?: boolean }[] = [];
+    opts.lines.forEach((line) => {
+      ctx.font = `${line.italic ? "italic " : ""}${line.bold ? "bold " : ""}${line.size}px sans-serif`;
+      const words = line.text.split(" ");
+      let current = "";
+      words.forEach((word) => {
+        const test = current ? `${current} ${word}` : word;
+        if (ctx.measureText(test).width > maxWidth && current) {
+          layout.push({ ...line, text: current });
+          current = word;
+        } else {
+          current = test;
+        }
+      });
+      if (current) layout.push({ ...line, text: current });
+    });
+    const totalH = layout.reduce((acc, l) => acc + l.size * 1.32, 0);
+    let y = pad + (bottom - pad - totalH) / 2 + 6;
+    ctx.textAlign = "center";
+    layout.forEach((l) => {
+      ctx.font = `${l.italic ? "italic " : ""}${l.bold ? "bold " : ""}${l.size}px sans-serif`;
+      ctx.fillStyle = l.color;
+      y += l.size * 1.32;
+      ctx.fillText(l.text, W / 2, y - l.size * 0.32);
+    });
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.anisotropy = 4;
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false })
+    );
+    const ppu = opts.pxPerUnit ?? 160;
+    sprite.scale.set(W / ppu, H / ppu, 1);
+    sprite.renderOrder = 999;
+    return sprite;
+  }
+
+  private disposeSprite(sprite: THREE.Sprite | null) {
+    if (!sprite) return;
+    (sprite.material as THREE.SpriteMaterial).map?.dispose();
+    (sprite.material as THREE.SpriteMaterial).dispose();
+    sprite.parent?.remove(sprite);
+  }
+
+  /** Show the next bark line above a city NPC (woof + doggy translation). */
+  private showCityNpcBubble(npc: CityNpc) {
+    const pool = this.birthdayMode ? npc.partyLines : npc.lines;
+    const line = pool[npc.lineIdx % pool.length];
+    npc.lineIdx += 1;
+    this.disposeSprite(this.cityBubble);
+    this.cityBubble = this.makeSpeechSprite({
+      canvasW: 560,
+      canvasH: 330,
+      lines: [
+        { text: `${npc.name} 🐾`, size: 26, color: "#9d174d", bold: true },
+        { text: line.woof, size: 46, color: "#111827", bold: true },
+        { text: `(it means: “${line.meaning}”)`, size: 25, color: "#4b5563", italic: true },
+      ],
+    });
+    const p = npc.model.group.position;
+    this.cityBubble.position.set(p.x, 2.65, p.z);
+    this.cityGroup.add(this.cityBubble);
+    this.cityBubbleTimer = 7.5;
+  }
+
+  /** Happy walks up to a strolling NPC and it barks at him. */
+  private talkToCityNpc(idx: number) {
+    const npc = this.cityNpcs[idx];
+    if (!npc) return;
+    this.npcTalkingIdx = idx;
+    npc.target = null;
+    npc.wait = Math.max(npc.wait, 3.5);
+    // Face Happy
+    const dx = this.dog.group.position.x - npc.model.group.position.x;
+    const dz = this.dog.group.position.z - npc.model.group.position.z;
+    if (Math.hypot(dx, dz) > 0.01) {
+      npc.model.group.rotation.y = Math.atan2(dx, dz);
+    }
+    npc.model.setAction("bark", 1.5);
+    sound.playBark(idx === 0 ? "low" : idx === 1 ? "high" : "normal");
+    this.showCityNpcBubble(npc);
+  }
+
+  /** One big bubble over the plaza: ALL the dogs scream "Happy Birthday!" */
+  private showPartyScream() {
+    this.disposeSprite(this.partyBubble);
+    this.partyBubble = this.makeSpeechSprite({
+      canvasW: 780,
+      canvasH: 300,
+      bg: "rgba(255, 241, 242, 0.97)",
+      border: "#db2777",
+      lines: [
+        { text: "🎉 HAPPY BIRTHDAY! 🎂", size: 78, color: "#db2777", bold: true },
+        { text: "Every dog in the park howls it together! (Woof-woof, translated.)", size: 26, color: "#831843", italic: true },
+      ],
+    });
+    this.partyBubble.position.set(-5, 4.3, 1.2);
+    this.cityGroup.add(this.partyBubble);
+    this.partyBubbleTimer = 9.5;
+    // The whole pack joins in!
+    this.cityNpcs.forEach((npc, i) => {
+      npc.target = null;
+      npc.wait = Math.max(npc.wait, 4);
+      npc.model.setAction(i % 2 === 0 ? "howl" : "bark", 2.6);
+      const dx = -5 - npc.model.group.position.x;
+      const dz = 1 - npc.model.group.position.z;
+      npc.model.group.rotation.y = Math.atan2(dx, dz);
+    });
+    sound.playRewardFanfare();
+    if (this.onPartyScream) this.onPartyScream();
+  }
+
+  /** Happy's own cycling birthday bubbles. */
+  private refreshHappyBirthdayBubble() {
+    this.disposeSprite(this.happyBubble);
+    if (!this.birthdayMode) return;
+    const lines = this.happyBubbleIdx === 0
+      ? [
+          { text: "HAPPY", size: 116, color: "#db2777", bold: true },
+          { text: "Birthday! 🎂", size: 52, color: "#111827", bold: true },
+          { text: "(HAPPY is my name — clever, right?)", size: 24, color: "#6b7280", italic: true },
+        ]
+      : [
+          { text: "Don't you want to drive to the city? 🚗", size: 44, color: "#111827", bold: true },
+          { text: "The party is waiting in the fountain park!", size: 26, color: "#6b7280", italic: true },
+        ];
+    this.happyBubble = this.makeSpeechSprite({ canvasW: 640, canvasH: 330, lines });
+    const p = this.dog.group.position;
+    this.happyBubble.position.set(p.x, 3.1, p.z);
+    this.scene.add(this.happyBubble);
+    this.happyBubbleTimer = 8.5;
+  }
+
+  /** Toggle birthday-party mode: party hats, tree of balloons & the big scream. */
+  public setBirthdayMode(active: boolean) {    this.birthdayMode = active;
+    this.partyGroup.visible = active;
+    // Happy gets the one-and-only striped cone hat (not sold in any shop!)
+    this.dog.setHolidayHat(active ? "party" : this.holiday === "christmas" ? "santa" : "none");
+    this.cityNpcs.forEach((npc) => npc.model.setHolidayHat(active ? "party" : "none"));
+    this.partyScreamDone = false;
+    if (!active) {
+      this.disposeSprite(this.happyBubble);
+      this.happyBubble = null;
+      this.disposeSprite(this.partyBubble);
+      this.partyBubble = null;
+    } else {
+      this.happyBubbleIdx = 0;
+      this.happyBubbleTimer = 0.8;
+    }
+  }
+
+  // ================= BIRTHDAY PARTY DECOR =================
+
+  /** Balloons, a banner and a cake table that appear in the city on birthdays. */
+  private setupBirthdayPartyDecor() {
+    this.partyGroup = new THREE.Group();
+    this.partyGroup.visible = false;
+
+    // Banner between two poles over the plaza
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.6 });
+    [[-9.4, 1.5], [-0.6, 1.5]].forEach(([px, pz]) => {
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.11, 4.0, 10), poleMat);
+      pole.position.set(px, 2.0, pz);
+      pole.castShadow = true;
+      this.partyGroup.add(pole);
+    });
+    const bannerCanvas = document.createElement("canvas");
+    bannerCanvas.width = 1024;
+    bannerCanvas.height = 192;
+    const bctx = bannerCanvas.getContext("2d")!;
+    bctx.fillStyle = "#fdf2f8";
+    bctx.beginPath();
+    bctx.roundRect(4, 4, 1016, 184, 22);
+    bctx.fill();
+    bctx.strokeStyle = "#db2777";
+    bctx.lineWidth = 10;
+    bctx.stroke();
+    bctx.fillStyle = "#db2777";
+    bctx.font = "bold 92px sans-serif";
+    bctx.textAlign = "center";
+    bctx.fillText("🎉 HAPPY BIRTHDAY! 🎂", 512, 124);
+    const banner = new THREE.Mesh(
+      new THREE.PlaneGeometry(8.6, 1.6),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(bannerCanvas), side: THREE.DoubleSide })
+    );
+    banner.position.set(-5, 3.35, 1.5);
+    this.partyGroup.add(banner);
+
+    // Balloon clusters (fountain park + cake store front)
+    const balloonColors = [0xf472b6, 0xfacc15, 0x60a5fa, 0xa855f7, 0x4ade80];
+    const makeBalloonCluster = (cx: number, cz: number) => {
+      const cluster = new THREE.Group();
+      for (let i = 0; i < 5; i++) {
+        const color = balloonColors[i % balloonColors.length];
+        const balloon = new THREE.Mesh(
+          new THREE.SphereGeometry(0.3, 12, 12),
+          new THREE.MeshStandardMaterial({ color, roughness: 0.25 })
+        );
+        balloon.scale.set(1, 1.22, 1);
+        balloon.position.set(
+          (Math.random() - 0.5) * 1.1,
+          2.4 + Math.random() * 0.9,
+          (Math.random() - 0.5) * 1.1
+        );
+        balloon.castShadow = true;
+        cluster.add(balloon);
+        const string = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.012, 0.012, 1.0, 6),
+          new THREE.MeshBasicMaterial({ color: 0xffffff })
+        );
+        string.position.set(balloon.position.x, balloon.position.y - 0.9, balloon.position.z);
+        cluster.add(string);
+      }
+      cluster.position.set(cx, 0, cz);
+      this.partyGroup.add(cluster);
+    };
+    makeBalloonCluster(-9.6, -2.7);
+    makeBalloonCluster(-0.4, -2.7);
+    makeBalloonCluster(-9.6, 4.7);
+    makeBalloonCluster(7.4, -26.2);
+    makeBalloonCluster(7.4, -33.8);
+
+    // Party table with a big cake near the fountain
+    const table = new THREE.Group();
+    const top = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.15, 1.15, 0.12, 20),
+      new THREE.MeshStandardMaterial({ color: 0xfde68a, roughness: 0.6 })
+    );
+    top.position.y = 0.92;
+    top.castShadow = true;
+    table.add(top);
+    const tablecloth = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.05, 1.2, 0.75, 20, 1, true),
+      new THREE.MeshStandardMaterial({ color: 0xfbcfe8, roughness: 0.8, side: THREE.DoubleSide })
+    );
+    tablecloth.position.y = 0.5;
+    table.add(tablecloth);
+    const leg = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.12, 0.16, 0.9, 10),
+      new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.6 })
+    );
+    leg.position.y = 0.45;
+    table.add(leg);
+    // Big cake on the table
+    const tableCake = new THREE.Group();
+    const t1 = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.62, 0.62, 0.34, 20),
+      new THREE.MeshStandardMaterial({ color: 0xf9a8d4, roughness: 0.6 })
+    );
+    t1.position.y = 0.17;
+    t1.castShadow = true;
+    tableCake.add(t1);
+    const t2 = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.42, 0.42, 0.28, 18),
+      new THREE.MeshStandardMaterial({ color: 0xfff1f2, roughness: 0.6 })
+    );
+    t2.position.y = 0.48;
+    tableCake.add(t2);
+    const candle = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.05, 0.3, 8),
+      new THREE.MeshStandardMaterial({ color: 0x60a5fa, roughness: 0.5 })
+    );
+    candle.position.y = 0.77;
+    tableCake.add(candle);
+    const tFlame = new THREE.Mesh(
+      new THREE.ConeGeometry(0.06, 0.16, 8),
+      new THREE.MeshStandardMaterial({ color: 0xffa500, emissive: 0xffa500, emissiveIntensity: 2 })
+    );
+    tFlame.position.y = 1.0;
+    tableCake.add(tFlame);
+    tableCake.position.y = 1.0;
+    table.add(tableCake);
+    table.position.set(-2.2, 0, 3.4);
+    this.partyGroup.add(table);
+
+    this.cityGroup.add(this.partyGroup);
+  }
+
+  // ================= THE CAKE STORE INTERIOR =================
+
+  /** Square plot, rectangular room inside, long counter with cake models,
+   *  and the friendly cake-chef dog behind it. */
+  private setupCakeStoreInterior() {
+    const room = this.cakeStoreInteriorGroup;
+
+    // Wood floor (walkable)
+    const woodCanvas = document.createElement("canvas");
+    woodCanvas.width = 256;
+    woodCanvas.height = 256;
+    const wctx = woodCanvas.getContext("2d")!;
+    wctx.fillStyle = "#d9b382";
+    wctx.fillRect(0, 0, 256, 256);
+    for (let i = 0; i < 10; i++) {
+      wctx.fillStyle = i % 2 === 0 ? "#cfa77a" : "#c9a173";
+      wctx.fillRect(0, i * 26, 256, 24);
+      wctx.fillStyle = "rgba(120, 72, 40, 0.35)";
+      wctx.fillRect(0, i * 26 + 24, 256, 2);
+    }
+    const woodTex = new THREE.CanvasTexture(woodCanvas);
+    woodTex.wrapS = THREE.RepeatWrapping;
+    woodTex.wrapT = THREE.RepeatWrapping;
+    woodTex.repeat.set(6, 4);
+    this.cakeStoreFloorMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(20, 14),
+      new THREE.MeshStandardMaterial({ map: woodTex, roughness: 0.85 })
+    );
+    this.cakeStoreFloorMesh.geometry.rotateX(-Math.PI / 2);
+    this.cakeStoreFloorMesh.position.y = 0.01;
+    this.cakeStoreFloorMesh.receiveShadow = true;
+    this.cakeStoreFloorMesh.userData = { type: "cakestore_floor" };
+    room.add(this.cakeStoreFloorMesh);
+
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xfbcfe8, roughness: 0.85 });
+    const creamMat = new THREE.MeshStandardMaterial({ color: 0xfff7f9, roughness: 0.7 });
+    const wainscotMat = new THREE.MeshStandardMaterial({ color: 0xfff1f2, roughness: 0.75 });
+    const wallH = 4.6;
+
+    // Walls (south wall gets a doorway gap in the middle) — the room is BIG
+    // so the camera can orbit freely without ever touching a wall
+    const northW = new THREE.Mesh(new THREE.BoxGeometry(20, wallH, 0.3), wallMat);
+    northW.position.set(0, wallH / 2, -7);
+    room.add(northW);
+    const westW = new THREE.Mesh(new THREE.BoxGeometry(0.3, wallH, 14), wallMat);
+    westW.position.set(-10, wallH / 2, 0);
+    room.add(westW);
+    const eastW = new THREE.Mesh(new THREE.BoxGeometry(0.3, wallH, 14), wallMat);
+    eastW.position.set(10, wallH / 2, 0);
+    room.add(eastW);
+    [-5.725, 5.725].forEach((x) => {
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(8.55, wallH, 0.3), wallMat);
+      seg.position.set(x, wallH / 2, 7);
+      room.add(seg);
+    });
+    const header = new THREE.Mesh(new THREE.BoxGeometry(2.9, 0.9, 0.3), wallMat);
+    header.position.set(0, wallH - 0.45, 7);
+    room.add(header);
+    // White wainscot strips
+    [[0, -6.82, 20], [-9.82, 0, 14], [9.82, 0, 14]].forEach(([px, pz, len]) => {
+      const strip = new THREE.Mesh(
+        new THREE.BoxGeometry(px === 0 ? len : 0.24, 0.9, px === 0 ? 0.24 : len),
+        wainscotMat
+      );
+      strip.position.set(px, 0.45, pz);
+      room.add(strip);
+    });
+    // Ceiling
+    const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(20.4, 14.4), creamMat);
+    ceiling.geometry.rotateX(Math.PI / 2);
+    ceiling.position.y = wallH;
+    room.add(ceiling);
+
+    // South-wall door (the way back out) + windows either side
+    const doorGlass = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.4, 2.5),
+      new THREE.MeshStandardMaterial({
+        color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85, side: THREE.DoubleSide,
+      })
+    );
+    doorGlass.position.set(0, 1.28, 7);
+    this.cakeStoreDoorMesh = doorGlass;
+    this.cakeStoreDoorMesh.userData = { type: "cakestore_exit" };
+    room.add(doorGlass);
+    [[-5.0], [5.0]].forEach(([wx]) => {
+      const win = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 1.7), doorGlass.material);
+      win.position.set(wx, 1.55, 6.84);
+      room.add(win);
+      const wFrame = new THREE.Mesh(new THREE.BoxGeometry(2.15, 1.95, 0.06), creamMat);
+      wFrame.position.set(wx, 1.55, 6.87);
+      room.add(wFrame);
+    });
+    // EXIT sign over the door
+    const exitCanvas = document.createElement("canvas");
+    exitCanvas.width = 128;
+    exitCanvas.height = 64;
+    const ectx = exitCanvas.getContext("2d")!;
+    ectx.fillStyle = "#16a34a";
+    ectx.beginPath();
+    ectx.roundRect(4, 4, 120, 56, 12);
+    ectx.fill();
+    ectx.fillStyle = "#ffffff";
+    ectx.font = "bold 36px sans-serif";
+    ectx.textAlign = "center";
+    ectx.fillText("EXIT", 64, 45);
+    const exitSign = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.0, 0.5),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(exitCanvas) })
+    );
+    exitSign.position.set(0, 3.05, 6.84);
+    room.add(exitSign);
+
+    // Wall sign behind the counter
+    const salonCanvas = document.createElement("canvas");
+    salonCanvas.width = 512;
+    salonCanvas.height = 128;
+    const sctx = salonCanvas.getContext("2d")!;
+    sctx.fillStyle = "#fff1f2";
+    sctx.beginPath();
+    sctx.roundRect(4, 4, 504, 120, 20);
+    sctx.fill();
+    sctx.strokeStyle = "#db2777";
+    sctx.lineWidth = 8;
+    sctx.stroke();
+    sctx.fillStyle = "#db2777";
+    sctx.font = "bold 58px sans-serif";
+    sctx.textAlign = "center";
+    sctx.fillText("🎂 CAKE SALON", 256, 82);
+    const salonSign = new THREE.Mesh(
+      new THREE.PlaneGeometry(4.4, 1.1),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(salonCanvas) })
+    );
+    salonSign.position.set(0, 3.3, -6.82);
+    room.add(salonSign);
+
+    // The long counter (a rectangle inside the square store)
+    const counterPink = new THREE.MeshStandardMaterial({ color: 0xf472b6, roughness: 0.55 });
+    const counterTop = new THREE.MeshStandardMaterial({ color: 0xfff7f9, roughness: 0.4 });
+    this.storeCounterGroup = new THREE.Group();
+    const base = new THREE.Mesh(new THREE.BoxGeometry(10, 0.92, 1.0), counterPink);
+    base.position.y = 0.46;
+    base.castShadow = true;
+    this.storeCounterGroup.add(base);
+    const topSlab = new THREE.Mesh(new THREE.BoxGeometry(10.3, 0.12, 1.2), counterTop);
+    topSlab.position.y = 0.98;
+    topSlab.castShadow = true;
+    this.storeCounterGroup.add(topSlab);
+    const kick = new THREE.Mesh(new THREE.BoxGeometry(10.1, 0.16, 1.05), creamMat);
+    kick.position.y = 0.08;
+    this.storeCounterGroup.add(kick);
+    this.storeCounterGroup.position.set(0, 0, 0.6);
+    room.add(this.storeCounterGroup);
+
+    // Cake models marching along the counter
+    const cakeSpots: { x: number; base: number; icing: number; drip: number; cherry: boolean }[] = [
+      { x: -4.0, base: 0x6b4426, icing: 0x8b5a2b, drip: 0xfff1f2, cherry: true },
+      { x: -2.0, base: 0xf9a8d4, icing: 0xf472b6, drip: 0xfff1f2, cherry: true },
+      { x: 0.0, base: 0xfff1f2, icing: 0xfda4af, drip: 0xfacc15, cherry: false },
+      { x: 2.0, base: 0xfef3c7, icing: 0xfde68a, drip: 0xffffff, cherry: true },
+      { x: 4.0, base: 0xc4b5fd, icing: 0xa855f7, drip: 0xfff1f2, cherry: false },
+    ];
+    cakeSpots.forEach((spot) => {
+      const mini = new THREE.Group();
+      const plate = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.46, 0.46, 0.05, 18),
+        new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35 })
+      );
+      mini.add(plate);
+      const cakeBody = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.34, 0.36, 0.3, 16),
+        new THREE.MeshStandardMaterial({ color: spot.base, roughness: 0.6 })
+      );
+      cakeBody.position.y = 0.18;
+      cakeBody.castShadow = true;
+      mini.add(cakeBody);
+      const icing = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.35, 0.35, 0.1, 16),
+        new THREE.MeshStandardMaterial({ color: spot.icing, roughness: 0.5 })
+      );
+      icing.position.y = 0.37;
+      mini.add(icing);
+      const dripRing = new THREE.Mesh(
+        new THREE.TorusGeometry(0.34, 0.045, 8, 20),
+        new THREE.MeshStandardMaterial({ color: spot.drip, roughness: 0.5 })
+      );
+      dripRing.rotation.x = Math.PI / 2;
+      dripRing.position.y = 0.32;
+      mini.add(dripRing);
+      if (spot.cherry) {
+        const cherry = new THREE.Mesh(
+          new THREE.SphereGeometry(0.09, 10, 10),
+          new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.3 })
+        );
+        cherry.position.y = 0.5;
+        mini.add(cherry);
+      }
+      mini.position.set(spot.x, 1.04, 0.6);
+      room.add(mini);
+    });
+
+    // Shelves of cake boxes on the north wall
+    const shelfMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
+    [1.5, 2.4].forEach((sy) => {
+      const shelf = new THREE.Mesh(new THREE.BoxGeometry(8.4, 0.08, 0.34), shelfMat);
+      shelf.position.set(0, sy, -6.65);
+      room.add(shelf);
+    });
+    const boxColors = [0xf472b6, 0xfacc15, 0x60a5fa, 0xa855f7, 0x4ade80, 0xfb923c];
+    boxColors.forEach((color, i) => {
+      const box = new THREE.Mesh(
+        new THREE.BoxGeometry(0.42, 0.34, 0.3),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.6 })
+      );
+      box.position.set(-3.4 + i * 1.35, 1.72, -6.65);
+      room.add(box);
+    });
+    // Second row of boxes on the upper shelf
+    [0xfb7185, 0x38bdf8, 0xfbbf24, 0x34d399, 0xc084fc].forEach((color, i) => {
+      const box = new THREE.Mesh(
+        new THREE.BoxGeometry(0.42, 0.34, 0.3),
+        new THREE.MeshStandardMaterial({ color, roughness: 0.6 })
+      );
+      box.position.set(-2.7 + i * 1.35, 2.62, -6.65);
+      room.add(box);
+    });
+
+    // Display fridge on the east wall
+    const fridge = new THREE.Group();
+    const fridgeBody = new THREE.Mesh(
+      new THREE.BoxGeometry(1.4, 1.9, 0.9),
+      new THREE.MeshStandardMaterial({ color: 0xe0f2fe, roughness: 0.3, metalness: 0.2 })
+    );
+    fridgeBody.position.y = 0.95;
+    fridge.add(fridgeBody);
+    const fridgeGlass = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.2, 1.5),
+      new THREE.MeshStandardMaterial({
+        color: 0xbfe6f5, roughness: 0.05, metalness: 0.4, transparent: true, opacity: 0.6,
+      })
+    );
+    fridgeGlass.position.set(0, 1.05, 0.46);
+    fridge.add(fridgeGlass);
+    fridge.position.set(7.6, 0, -1.4);
+    room.add(fridge);
+
+    // The cake-chef dog behind the counter (he talks!)
+    this.storeDog = new Dog3D("corgi", "#db2777");
+    this.storeDog.group.position.set(-0.4, 0, -1.15);
+    this.storeDog.group.rotation.y = 0; // looks south toward the entrance
+    this.storeDog.setAction("idle");
+    room.add(this.storeDog.group);
+
+    // Warm shop light
+    const shopLight = new THREE.PointLight(0xffe4c4, 1.4, 24);
+    shopLight.position.set(0, 4.0, 1.2);
+    room.add(shopLight);
+    const pinkGlow = new THREE.PointLight(0xff9bc7, 0.8, 13);
+    pinkGlow.position.set(-5, 3.3, -2.5);
+    room.add(pinkGlow);
+    const backLight = new THREE.PointLight(0xfff1d6, 0.9, 16);
+    backLight.position.set(5.5, 4.0, -3);
+    room.add(backLight);
+  }
+
+  /** Clicking the shop dog (or his counter) makes him greet you. */
+  private talkToStoreDog() {
+    if (this.storeDog) this.storeDog.setAction("bark", 1.4);
+    sound.playBark("high");
+    this.storeDogSay("Woof! Welcome to my cake store! 🎂 Would you like to set your birthday?");
+    if (this.onStoreDogTalked) this.onStoreDogTalked();
+  }
+
+  /** Update the shop dog's speech bubble (also used by React). */
+  public storeDogSay(text: string) {
+    this.disposeSprite(this.storeDogBubble);
+    this.storeDogBubble = this.makeSpeechSprite({
+      canvasW: 620,
+      canvasH: 300,
+      lines: [
+        { text: "Chef Biscuit 🐾", size: 26, color: "#9d174d", bold: true },
+        { text: text, size: 36, color: "#111827", bold: true },
+      ],
+    });
+    this.storeDogBubble.position.set(-0.4, 2.75, -1.15);
+    this.cakeStoreInteriorGroup.add(this.storeDogBubble);
+    this.storeDogBubbleTimer = 8.5;
+  }
+
+  /** Walk through the Cake Store doors (called behind the cartoon transition). */
+  public enterCakeStore() {
+    this.viewMode = "cakestore";
+    this.houseRoom = "living";
+    this.hideAllRooms();
+    this.cakeStoreInteriorGroup.visible = true;
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    this.dog.group.position.set(0, 0, 5.6);
+    this.dog.group.rotation.y = Math.PI; // faces the counter
+    this.dog.setAction("idle");
+    this.spherical.set(7.4, Math.PI / 3.2, 0);
+    this.cameraTarget.set(0, 0.9, 0.2);
+    this.updateCameraPosition();
+    sound.playSoftWoof();
+    // On a birthday the chef dog greets you with the big news right away
+    if (this.birthdayMode) {
+      this.storeDogSay("WOOF! HAPPY BIRTHDAY!! 🎉 The whole city park is waiting to celebrate with you!");
+    }
+    if (this.onRoomChanged) this.onRoomChanged("living");
+  }
+
+  /** Step back out of the Cake Store into the city. */
+  public exitCakeStore() {
+    if (this.viewMode !== "cakestore") return;
+    this.viewMode = "city";
+    this.hideAllRooms();
+    this.cityGroup.visible = true;
+    this.dog.group.position.set(7.9, 0, -30);
+    this.dog.group.rotation.y = -Math.PI / 2; // faces the store from outside
+    this.dog.setAction("idle");
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    this.spherical.set(9.5, Math.PI / 3.1, 0.5);
+    this.cameraTarget.set(9.5, 1.0, -29.5);
+    this.updateCameraPosition();
+    sound.playButtonTap();
+    if (this.onCakeStoreExited) this.onCakeStoreExited();
+  }
+
+  // ================= CITY NPC + BIRTHDAY RUNTIME UPDATES =================
+
+  /** Per-frame brains for the fountain-park dogs (stroll, wait, woof). */
+  private updateCityNpcs(delta: number, elapsed: number) {
+    if (this.viewMode !== "city" || !this.cityGroup.visible) return;
+    const dogPos = this.dog.group.position;
+    this.cityNpcs.forEach((npc, idx) => {
+      npc.model.update(delta, elapsed);
+      const pos = npc.model.group.position;
+      if (npc.target) {
+        const dx = npc.target.x - pos.x;
+        const dz = npc.target.z - pos.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist < 0.09) {
+          npc.target = null;
+          npc.wait = 1.8 + Math.random() * 4.5;
+          npc.model.setAction("idle");
+        } else {
+          const step = Math.min(dist, npc.speed * delta);
+          pos.x += (dx / dist) * step;
+          pos.z += (dz / dist) * step;
+          const targetAngle = Math.atan2(dx, dz);
+          npc.model.group.rotation.y = THREE.MathUtils.lerp(
+            npc.model.group.rotation.y,
+            targetAngle,
+            Math.min(1, delta * 4.5)
+          );
+          if (npc.model.currentAction !== "run") npc.model.setAction("run");
+        }
+      } else {
+        npc.wait -= delta;
+        npc.barkCooldown -= delta;
+        // Soft idle woofs when Happy wanders close (never mid-conversation)
+        if (npc.barkCooldown <= 0 && idx !== this.npcTalkingIdx) {
+          npc.barkCooldown = 8 + Math.random() * 10;
+          if (Math.hypot(pos.x - dogPos.x, pos.z - dogPos.z) < 9) {
+            npc.model.setAction("bark", 1.2);
+            sound.playSoftWoof();
+          }
+        }
+        if (npc.wait <= 0) {
+          if (idx === this.npcTalkingIdx) {
+            // Chat's over — back to the stroll
+            this.npcTalkingIdx = -1;
+          } else {
+            // A new spot inside this dog's little circle (never in the fountain)
+            const angle = Math.random() * Math.PI * 2;
+            const r = npc.radius * (0.35 + Math.random() * 0.65);
+            let tx = npc.home.x + Math.sin(angle) * r;
+            let tz = npc.home.z + Math.cos(angle) * r;
+            if (Math.hypot(tx + 5, tz - 1) < 2.1) {
+              tx = npc.home.x;
+              tz = npc.home.z;
+            }
+            npc.target = new THREE.Vector3(tx, 0, tz);
+          }
+        }
+      }
+    });
+  }
+
+  /** Birthday beats: candle flicker, bubble timers, party scream & Happy's lines. */
+  private updateBirthday(delta: number, elapsed: number) {
+    // Candle flame on the giant roof cake flickers forever (it's so pretty)
+    if (this.cakeCandleFlame) {
+      const s = 1 + Math.sin(elapsed * 12) * 0.18 + Math.sin(elapsed * 27) * 0.09;
+      this.cakeCandleFlame.scale.set(1, s, 1);
+    }
+    // The giant dumbbell sign on the gym sways gently in the breeze
+    this.gymDumbbell.rotation.z = Math.sin(elapsed * 1.1) * 0.05;
+
+    // Bubble lifetimes
+    if (this.cityBubbleTimer > 0) {
+      this.cityBubbleTimer -= delta;
+      if (this.cityBubbleTimer <= 0) {
+        this.disposeSprite(this.cityBubble);
+        this.cityBubble = null;
+      }
+    }
+    if (this.partyBubbleTimer > 0) {
+      this.partyBubbleTimer -= delta;
+      if (this.partyBubbleTimer <= 0) {
+        this.disposeSprite(this.partyBubble);
+        this.partyBubble = null;
+      }
+    }
+    if (this.storeDogBubbleTimer > 0) {
+      this.storeDogBubbleTimer -= delta;
+      if (this.storeDogBubbleTimer <= 0) {
+        this.disposeSprite(this.storeDogBubble);
+        this.storeDogBubble = null;
+      }
+    }
+
+    // Arriving in the city on a birthday: the whole pack screams together!
+    if (this.birthdayMode && !this.partyScreamDone && this.viewMode === "city" && this.cityGroup.visible) {
+      this.partyScreamDone = true;
+      this.showPartyScream();
+    }
+
+    // Happy's cycling birthday bubbles while strolling around at home
+    if (this.birthdayMode) {
+      if (this.viewMode === "park" || this.viewMode === "house") {
+        this.happyBubbleTimer -= delta;
+        if (this.happyBubbleTimer <= 0 || !this.happyBubble) {
+          this.happyBubbleIdx = this.happyBubble ? (this.happyBubbleIdx + 1) % 2 : 0;
+          this.refreshHappyBirthdayBubble();
+        }
+        if (this.happyBubble) {
+          const p = this.dog.group.position;
+          this.happyBubble.position.set(p.x, 3.1, p.z);
+        }
+      } else if (this.happyBubble) {
+        this.disposeSprite(this.happyBubble);
+        this.happyBubble = null;
+      }
+    }
   }
 
   // ================= HOLIDAY EASTER EGGS =================
@@ -6076,10 +7757,10 @@ export class ParkScene {
 
     // ================= CITY MODE interactivity =================
     if (this.viewMode === "city") {
-      // Supermarket -> shopping dash minigame
+      // Supermarket -> the glass doors slide open and Happy walks in to shop
       const marketHits = raycaster.intersectObject(this.supermarketGroup, true);
       if (marketHits.length > 0) {
-        if (this.onSupermarketClicked) this.onSupermarketClicked();
+        this.beginSupermarketEntry();
         return;
       }
       // Gym -> doggy workout minigame
@@ -6087,6 +7768,20 @@ export class ParkScene {
       if (gymHits.length > 0) {
         if (this.onGymClicked) this.onGymClicked();
         return;
+      }
+      // The Birthday Cake Store -> walk in (React plays the transition)
+      const cakeHits = raycaster.intersectObject(this.cakeStoreGroup, true);
+      if (cakeHits.length > 0) {
+        if (this.onCakeStoreClicked) this.onCakeStoreClicked();
+        return;
+      }
+      // The strolling park dog NPCs -> they only woof at you
+      for (let i = 0; i < this.cityNpcs.length; i++) {
+        const npcHits = raycaster.intersectObject(this.cityNpcs[i].model.group, true);
+        if (npcHits.length > 0) {
+          this.talkToCityNpc(i);
+          return;
+        }
       }
       // The car -> drive back home
       const carHits = raycaster.intersectObject(this.carGroup, true);
@@ -6099,6 +7794,40 @@ export class ParkScene {
         const groundHits = raycaster.intersectObject(this.cityGroundMesh, false);
         if (groundHits.length > 0) {
           this.walkTo(groundHits[0].point);
+          return;
+        }
+      }
+      return;
+    }
+
+    // ================= CAKE STORE interactivity =================
+    if (this.viewMode === "cakestore") {
+      // The cake-chef dog behind the counter (or his counter) -> talk!
+      if (this.storeDog) {
+        const dogHits = raycaster.intersectObject(this.storeDog.group, true);
+        if (dogHits.length > 0) {
+          this.talkToStoreDog();
+          return;
+        }
+      }
+      const counterHits = raycaster.intersectObject(this.storeCounterGroup, true);
+      if (counterHits.length > 0) {
+        this.talkToStoreDog();
+        return;
+      }
+      // Front door -> back out into the city
+      if (this.cakeStoreDoorMesh) {
+        const doorHits = raycaster.intersectObject(this.cakeStoreDoorMesh, false);
+        if (doorHits.length > 0) {
+          this.exitCakeStore();
+          return;
+        }
+      }
+      // Shop floor walk
+      if (this.cakeStoreFloorMesh) {
+        const floorHits = raycaster.intersectObject(this.cakeStoreFloorMesh, false);
+        if (floorHits.length > 0) {
+          this.walkTo(floorHits[0].point);
           return;
         }
       }
@@ -6161,7 +7890,43 @@ export class ParkScene {
     if (!target) return;
 
     this.camera.position.setFromSpherical(this.spherical).add(target);
+    // Never let the interior camera slip outside the walls (no more void!)
+    this.confineCameraToRoom();
     this.camera.lookAt(target);
+  }
+
+  /**
+   * Interior camera confinement: clamps the camera INSIDE the current room so
+   * orbiting can never poke through a wall and reveal the empty void. Applies
+   * to the whole dog house (every room) and the Cake Store.
+   */
+  private confineCameraToRoom() {
+    const c = this.camera.position;
+    if (this.viewMode === "cakestore") {
+      c.x = THREE.MathUtils.clamp(c.x, -9.4, 9.4);
+      c.y = THREE.MathUtils.clamp(c.y, 0.8, 4.3);
+      c.z = THREE.MathUtils.clamp(c.z, -6.5, 6.5);
+      return;
+    }
+    if (this.viewMode !== "house") return;
+    if (this.houseRoom === "hallway") {
+      c.x = THREE.MathUtils.clamp(c.x, -4.4, 4.4);
+      c.y = THREE.MathUtils.clamp(c.y, 0.8, 4.2);
+      c.z = THREE.MathUtils.clamp(c.z, -5.7, 5.7);
+    } else if (this.houseRoom === "bathroom") {
+      c.x = THREE.MathUtils.clamp(c.x, -5.6, 5.6);
+      c.y = THREE.MathUtils.clamp(c.y, 0.8, 3.9);
+      c.z = THREE.MathUtils.clamp(c.z, -4.6, 4.6);
+    } else if (this.houseRoom === "upstairs") {
+      c.x = THREE.MathUtils.clamp(c.x, -5.6, 5.6);
+      c.y = THREE.MathUtils.clamp(c.y, 0.8, 3.3);
+      c.z = THREE.MathUtils.clamp(c.z, -4.1, 4.1);
+    } else {
+      // Living room / kitchen (10x10)
+      c.x = THREE.MathUtils.clamp(c.x, -4.7, 4.7);
+      c.y = THREE.MathUtils.clamp(c.y, 0.8, 3.8);
+      c.z = THREE.MathUtils.clamp(c.z, -4.7, 4.7);
+    }
   }
 
   public setTimeOfDay(time: TimeOfDay) {
@@ -6574,6 +8339,7 @@ export class ParkScene {
     this.upstairsGroup.visible = false;
     this.bathroomGroup.visible = false;
     this.cityGroup.visible = false;
+    this.cakeStoreInteriorGroup.visible = false;
     this.galaxyGroup.visible = false;
     this.highwayGroup.visible = false;
     // The car only makes sense in the outdoor worlds
@@ -6600,7 +8366,7 @@ export class ParkScene {
     this.walkTarget = null;
     this.walkTargetMarker.visible = false;
 
-    this.spherical.set(4.4, Math.PI / 3.0, 0);
+    this.spherical.set(6.4, Math.PI / 3.1, 0);
     this.cameraTarget.set(0, 0.9, 0.6);
     this.updateCameraPosition();
 
@@ -6627,7 +8393,7 @@ export class ParkScene {
     this.walkTarget = null;
     this.walkTargetMarker.visible = false;
 
-    this.spherical.set(4.8, Math.PI / 3.1, 0);
+    this.spherical.set(5.6, Math.PI / 2.8, 0);
     this.cameraTarget.set(0, 0.9, 0);
     this.updateCameraPosition();
 
@@ -6657,7 +8423,7 @@ export class ParkScene {
     this.walkTarget = null;
     this.walkTargetMarker.visible = false;
 
-    this.spherical.set(4.6, Math.PI / 2.8, 0);
+    this.spherical.set(5.4, Math.PI / 2.9, 0);
     this.cameraTarget.set(0, 1.0, -0.4);
     this.updateCameraPosition();
 
@@ -6696,7 +8462,7 @@ export class ParkScene {
     this.dog.group.position.set(this.BATHTUB_CENTER.x + 0.2, 0, this.BATHTUB_CENTER.z + 1.6);
     this.dog.group.rotation.y = Math.PI;
     this.dog.setAction("idle");
-    this.spherical.set(4.6, Math.PI / 2.8, 0);
+    this.spherical.set(5.4, Math.PI / 2.9, 0);
     this.cameraTarget.set(0, 1.0, -0.4);
     this.updateCameraPosition();
   }
@@ -7456,24 +9222,112 @@ export class ParkScene {
 
   /**
    * Ground tint = weather base color, gradually whitened by snowCoverage.
-   * While it snows the lawn blankets over ~90s; it melts back in ~45s.
+   * While it snows the ground blankets over in ~10s of landing snowflakes
+   * (each sticky splat adds to it) and melts back in ~25s.
    */
   private applyGroundTint() {
     const groundMat = this.groundMesh?.material as THREE.MeshStandardMaterial | undefined;
-    if (!groundMat) return;
-    const base = this.weather === "rainy" ? this.GRASS_RAINY : this.GRASS_SUNNY;
-    groundMat.color.copy(base).lerp(this.SNOW_COLOR, this.snowCoverage);
+    if (groundMat) {
+      const base = this.weather === "rainy" ? this.GRASS_RAINY : this.GRASS_SUNNY;
+      groundMat.color.copy(base).lerp(this.SNOW_COLOR, this.snowCoverage);
+    }
+    // The city concrete whitens with it (emissive, so the texture still shows)
+    if (this.cityGroundMesh) {
+      const cityMat = this.cityGroundMesh.material as THREE.MeshStandardMaterial;
+      cityMat.emissive.copy(this.SNOW_COLOR);
+      cityMat.emissiveIntensity = this.snowCoverage * 0.8;
+    }
   }
 
   private updateSnowCoverage(delta: number) {
     const prev = this.snowCoverage;
     if (this.weather === "snowy") {
-      this.snowCoverage = Math.min(1, this.snowCoverage + delta / 90);
+      // ~10 seconds of snowfall blankets the whole ground white
+      this.snowCoverage = Math.min(1, this.snowCoverage + delta / 10);
     } else if (this.snowCoverage > 0) {
-      this.snowCoverage = Math.max(0, this.snowCoverage - delta / 45);
+      this.snowCoverage = Math.max(0, this.snowCoverage - delta / 25);
     }
     if (this.snowCoverage !== prev) {
       this.applyGroundTint();
+    }
+  }
+
+  /** Build the layer of soft round splats that landed flakes leave behind. */
+  private buildSnowSplatLayer() {
+    const cap = 1600;
+    const positions = new Float32Array(cap * 3);
+    for (let i = 0; i < cap; i++) {
+      positions[i * 3 + 1] = -30; // parked under the world until a flake lands
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    // Soft round flake splat sprite
+    const c = document.createElement("canvas");
+    c.width = 64;
+    c.height = 64;
+    const ctx = c.getContext("2d")!;
+    const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 30);
+    grad.addColorStop(0, "rgba(255,255,255,1)");
+    grad.addColorStop(0.6, "rgba(255,255,255,0.9)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, 64, 64);
+    const mat = new THREE.PointsMaterial({
+      map: new THREE.CanvasTexture(c),
+      color: 0xffffff,
+      size: 0.44,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+    });
+    this.snowSplats = new THREE.Points(geom, mat);
+    this.snowSplats.frustumCulled = false;
+    this.scene.add(this.snowSplats);
+    this.snowSplatCursor = 0;
+    this.snowSplatTimer = 0;
+  }
+
+  /**
+   * While it snows in an outdoor world, landed flakes keep stamping soft white
+   * splats on the ground around the dog (~130/s, so after ~10s everything is
+   * white). The splats melt away with the snowCoverage after the snowfall.
+   */
+  private updateSnowSplats(delta: number) {
+    if (this.weather === "snowy" && !this.snowSplats) {
+      this.buildSnowSplatLayer();
+    }
+    if (!this.snowSplats) return;
+    const outdoors =
+      this.viewMode === "park" || this.viewMode === "city" || this.viewMode === "highway";
+    this.snowSplats.visible = outdoors;
+    const mat = this.snowSplats.material as THREE.PointsMaterial;
+    if (this.weather === "snowy" && outdoors && this.snowCoverage < 0.995) {
+      this.snowSplatTimer -= delta;
+      const pos = this.snowSplats.geometry.getAttribute("position") as THREE.BufferAttribute;
+      const arr = pos.array as Float32Array;
+      const cap = pos.count;
+      const dog = this.dog.group.position;
+      let stamped = false;
+      while (this.snowSplatTimer <= 0) {
+        this.snowSplatTimer += 1 / 130; // ~130 flakes land per second
+        const i = this.snowSplatCursor % cap;
+        arr[i * 3] = dog.x + (Math.random() - 0.5) * 30;
+        arr[i * 3 + 1] = 0.045 + Math.random() * 0.02;
+        arr[i * 3 + 2] = dog.z + (Math.random() - 0.5) * 30;
+        this.snowSplatCursor++;
+        stamped = true;
+      }
+      if (stamped) pos.needsUpdate = true;
+    }
+    // Splats melt together with the blanket
+    mat.opacity = 0.95 * this.snowCoverage;
+    if (this.weather !== "snowy" && this.snowCoverage <= 0.01) {
+      this.scene.remove(this.snowSplats);
+      this.snowSplats.geometry.dispose();
+      (mat.map as THREE.Texture | null)?.dispose();
+      mat.dispose();
+      this.snowSplats = null;
+      this.snowSplatCursor = 0;
     }
   }
 
@@ -7545,8 +9399,10 @@ export class ParkScene {
 
   private updatePrecipitationMotion(delta: number, elapsed: number) {
     if (!this.precipPoints || this.precipKind === "none") return;
-    // Storms stay outside — never rain inside the dog house (highway counts as outside)
-    this.precipPoints.visible = this.viewMode === "park" || this.viewMode === "highway";
+    // Storms stay outside — never rain inside the dog house (highway & the
+    // city streets both count as outside)
+    this.precipPoints.visible =
+      this.viewMode === "park" || this.viewMode === "highway" || this.viewMode === "city";
     if (!this.precipPoints.visible) return;
     // Keep the storm centered on the dog
     this.precipPoints.position.set(this.dog.group.position.x, 0, this.dog.group.position.z);
@@ -7616,14 +9472,21 @@ export class ParkScene {
     }
     if (this.viewMode === "city") {
       return {
-        x: THREE.MathUtils.clamp(x, -12.0, 13.0),
-        z: THREE.MathUtils.clamp(z, -13.0, 15.0),
+        x: THREE.MathUtils.clamp(x, -13.0, 25.8),
+        z: THREE.MathUtils.clamp(z, -36.2, 16.0),
+      };
+    }
+    if (this.viewMode === "cakestore") {
+      // The big rectangular shop floor inside the square building
+      return {
+        x: THREE.MathUtils.clamp(x, -8.8, 8.8),
+        z: THREE.MathUtils.clamp(z, -5.8, 5.8),
       };
     }
     if (this.houseRoom === "hallway") {
       return {
-        x: THREE.MathUtils.clamp(x, -2.6, 2.6),
-        z: THREE.MathUtils.clamp(z, -5.2, 5.2),
+        x: THREE.MathUtils.clamp(x, -3.9, 3.9),
+        z: THREE.MathUtils.clamp(z, -5.4, 5.4),
       };
     }
     if (this.houseRoom === "upstairs") {
@@ -7854,14 +9717,23 @@ export class ParkScene {
       // Rain / snow weather particles
       this.updatePrecipitationMotion(delta, elapsed);
 
-      // Snow slowly blankets the lawn white while it snows
+      // Snow slowly blankets the lawn white while it snows — landed flakes
+      // stick to the ground as splats (see updateSnowSplats)
       this.updateSnowCoverage(delta);
+      this.updateSnowSplats(delta);
 
       // Seasonal ambience: ❄️ Christmas snowfall / 🍃 spring leaves & pollen
       this.updateSeasonParticles(delta, elapsed);
 
       // Arcade cabinet bounce/flash after being pressed
       this.updateArcadePulse(delta);
+
+      // Strolling city dog NPCs (they only woof!) + birthday party beats
+      this.updateCityNpcs(delta, elapsed);
+      this.updateBirthday(delta, elapsed);
+
+      // Supermarket glass doors sliding open / shut
+      this.updateSupermarketDoors(delta);
 
       // Multiplayer machine: idle screen shimmer + click flash
       if (this.mpScreenMat) {

@@ -67,8 +67,9 @@ export class Dog3D {
   private backRightLeg!: THREE.Group;
   private frontLeftPaw!: THREE.Mesh;
   private frontRightPaw!: THREE.Mesh;
-  // Holiday Easter-egg hats (Santa at Christmas, party hat at New Year...)
+  // Holiday Easter-egg hats (Santa at Christmas, party hat for birthdays)
   private holidayHatGroup: THREE.Group | null = null;
+  private holidayHatKind: "none" | "santa" | "party" = "none";
   private currentHolidayHat: string = "none";
 
   // Segmented tail
@@ -519,19 +520,39 @@ export class Dog3D {
 
     // Rebuild the holiday hat after a breed change (headMesh was recreated)
     this.holidayHatGroup = null;
+    this.holidayHatKind = "none";
     if (this.currentHolidayHat !== "none") {
-      this.setHolidayHat(this.currentHolidayHat as "santa");
+      this.setHolidayHat(this.currentHolidayHat as "santa" | "party");
     }
   }
 
   /**
-   * Holiday Easter-egg hat: a bobbling Santa hat at Christmas
-   * ("santa") — hidden otherwise ("none").
+   * Special hats that live outside the wardrobe:
+   *  - "santa": bobbling Santa hat at Christmas
+   *  - "party": cone birthday hat (yellow & pink stripes) worn on birthdays
+   *  - "none":  take the hat off
    */
-  public setHolidayHat(kind: "santa" | "none") {
+  public setHolidayHat(kind: "santa" | "party" | "none") {
     this.currentHolidayHat = kind;
-    if (!this.holidayHatGroup && kind === "santa") {
-      this.holidayHatGroup = new THREE.Group();
+    if (kind === "none") {
+      if (this.holidayHatGroup) this.holidayHatGroup.visible = false;
+      this.holidayHatKind = "none";
+      return;
+    }
+    // Already built the right hat? Just make sure it is on.
+    if (this.holidayHatGroup && this.holidayHatKind === kind) {
+      this.holidayHatGroup.visible = true;
+      return;
+    }
+    // (Re)build the requested hat
+    if (this.holidayHatGroup) {
+      this.headMesh.remove(this.holidayHatGroup);
+      this.holidayHatGroup = null;
+    }
+    this.holidayHatKind = kind;
+    this.holidayHatGroup = new THREE.Group();
+
+    if (kind === "santa") {
       const redMat = new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.5 });
       const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.6 });
       // Droopy cone cap
@@ -551,11 +572,48 @@ export class Dog3D {
       this.holidayHatGroup.add(pompom);
       this.holidayHatGroup.position.set(0, 0.48, 0.05);
       this.holidayHatGroup.rotation.z = 0.3;
-      this.headMesh.add(this.holidayHatGroup);
+    } else {
+      // Party cone hat: yellow & pink candy stripes
+      const stripeCanvas = document.createElement("canvas");
+      stripeCanvas.width = 64;
+      stripeCanvas.height = 64;
+      const sctx = stripeCanvas.getContext("2d")!;
+      const bands = ["#facc15", "#f472b6"];
+      for (let i = 0; i < 8; i++) {
+        sctx.fillStyle = bands[i % 2];
+        sctx.fillRect(0, i * 8, 64, 8);
+      }
+      const stripeTex = new THREE.CanvasTexture(stripeCanvas);
+      stripeTex.wrapS = THREE.RepeatWrapping;
+      stripeTex.wrapT = THREE.RepeatWrapping;
+      const cone = new THREE.Mesh(
+        new THREE.ConeGeometry(0.25, 0.48, 16),
+        new THREE.MeshStandardMaterial({ map: stripeTex, roughness: 0.55 })
+      );
+      cone.position.y = 0.22;
+      cone.castShadow = true;
+      this.holidayHatGroup.add(cone);
+      // Soft brim so the cone sits snug on the head
+      const brim = new THREE.Mesh(
+        new THREE.TorusGeometry(0.24, 0.045, 10, 18),
+        new THREE.MeshStandardMaterial({ color: 0xf9a8d4, roughness: 0.5 })
+      );
+      brim.rotation.x = Math.PI / 2;
+      brim.position.y = -0.02;
+      this.holidayHatGroup.add(brim);
+      // Fluffy pompom on the tip
+      const pompom = new THREE.Mesh(
+        new THREE.SphereGeometry(0.085, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0xfff1f2, roughness: 0.8 })
+      );
+      pompom.position.set(0, 0.48, 0);
+      this.holidayHatGroup.add(pompom);
+      this.holidayHatGroup.position.set(0, 0.48, 0.05);
+      this.holidayHatGroup.rotation.z = 0.12;
     }
-    if (this.holidayHatGroup) {
-      this.holidayHatGroup.visible = kind === "santa";
-    }
+
+    this.holidayHatGroup.visible = true;
+    this.headMesh.add(this.holidayHatGroup);
   }
 
   public setAccessory(accessoryId?: string) {

@@ -53,6 +53,15 @@ import { BreedJournal } from "./features/journal/BreedJournal";
 import { ScoreboardModal } from "./features/account/ScoreboardModal";
 import { getAccount, linkAccount, saveAccount } from "./features/account/AccountService";
 import { getCurrentHoliday, holidayBlurb } from "./features/seasonal/holidays";
+import { BirthdaySalonModal } from "./features/birthday/BirthdaySalonModal";
+import { CarSatNavModal, CarDestination } from "./features/car/CarSatNavModal";
+import {
+  BirthdayDate,
+  isBirthdayToday,
+  loadBirthday,
+  saveBirthday,
+  formatBirthday,
+} from "./features/birthday/birthdayData";
 import { logDayEvent, bumpLifetime, getLifetime } from "./features/journal/dayJournal";
 import { ACHIEVEMENTS, evaluateAchievements } from "./features/achievements/achievementsData";
 import { getBoneBalance } from "./features/bonerush/boneRushData";
@@ -302,6 +311,15 @@ export default function App() {
   const [followCamera, setFollowCamera] = useState<boolean>(true);
   const [viewMode, setViewMode] = useState<HouseViewMode>("park");
   const [houseRoom, setHouseRoom] = useState<HouseRoom>("living");
+  // ---- Birthday Cake Salon: the saved day (month + day, never a year) ----
+  // On the saved day (checked at login) the whole city throws a party.
+  const [birthday, setBirthday] = useState<BirthdayDate | null>(() => loadBirthday());
+  const [partyActive, setPartyActive] = useState<boolean>(() => isBirthdayToday(loadBirthday()));
+  const [partyPreview, setPartyPreview] = useState<boolean>(false);
+  const [showBirthdaySalon, setShowBirthdaySalon] = useState<boolean>(false);
+  // The scene-init effect has [] deps, so it reads the live party flag via ref
+  const partyActiveRef = useRef(partyActive);
+  partyActiveRef.current = partyActive;
   const [showCookingModal, setShowCookingModal] = useState<boolean>(false);
   // Timed cooking: 2:00 countdown, then the park house glows red with a pot
   const [activeCookJob, setActiveCookJob] = useState<CookingJob | null>(() => {
@@ -327,6 +345,9 @@ export default function App() {
     }
   });
   const [showAlbum, setShowAlbum] = useState<boolean>(false);
+  // The car's dashboard sat-nav: appears after Happy walks to the car and
+  // offers the two stops in the city (Supermarket lot / behind the Cake Store)
+  const [showSatNav, setShowSatNav] = useState<boolean>(false);
   const [readyMeal, setReadyMeal] = useState<CookingJob | null>(() => {
     try {
       const raw = localStorage.getItem("doghouse_readymeal_v1");
@@ -804,6 +825,11 @@ export default function App() {
 
     // ---- The little car: a fully 3D cinematic ride seen from the side ----
     // Park drive-off → forest highway (side view) → city parking lot.
+    // First, though: Happy walks to the car and the dashboard sat-nav pops up
+    // to ask WHERE — 🛒 Supermarket or 🎂 Cake Store (park behind the shop).
+    scene.onCarSatNav = () => {
+      setShowSatNav(true);
+    };
     scene.onCarRideMidway = () => {
       playCartoonTransition(
         "Cruising down the highway... 🚗💨",
@@ -825,7 +851,12 @@ export default function App() {
       logDayEvent("carRides", "Rode the car to the City Park");
       bumpLifetime("carRides", 1);
       setAchTick((t) => t + 1);
-      showToast(`🏙️ Parked at the City lot! Tap the 🛒 Supermarket or 🏋️ Gym — or the car to go home!`);
+      const dest = scene.carDestination;
+      showToast(
+        dest === "cakestore"
+          ? "🎂 Parked behind the Cake Store! Walk around the front and step inside for a treat!"
+          : `🏙️ Parked at the City lot! Try the 🛒 Supermarket, 🏋️ Gym — or drive to the pink 🎂 Cake Store!`
+      );
     };
     scene.onCarReturnMidway = () => {
       playCartoonTransition(
@@ -855,6 +886,33 @@ export default function App() {
     };
     scene.onGymClicked = () => {
       setActiveMiniGame("gym");
+    };
+
+    // ---- The Birthday Cake Store: click it to walk in through the transition ----
+    scene.onCakeStoreClicked = () => {
+      playCartoonTransition(
+        "Stepping into the Cake Store... 🎂",
+        () => {
+          scene.enterCakeStore();
+          setViewMode("cakestore");
+        },
+        "Welcome to the Cake Store! Talk to Chef Biscuit behind the counter 🐾"
+      );
+    };
+    scene.onStoreDogTalked = () => {
+      setShowBirthdaySalon(true);
+    };
+    scene.onCakeStoreExited = () => {
+      setViewMode("city");
+      showToast("Back out on the city street! 🏙️");
+    };
+
+    // ---- Birthday party mode: striped cone hats, balloons & the group scream ----
+    scene.setBirthdayMode(partyActiveRef.current);
+    scene.onPartyScream = () => {
+      confetti({ particleCount: 150, spread: 100, origin: { y: 0.55 } });
+      confetti({ particleCount: 60, spread: 80, origin: { y: 0.4 }, angle: 120 });
+      showToast("🎉 Every dog in the park howls: HAPPY BIRTHDAY! 🎂");
     };
 
     // ---- The bedroom ARCADE MACHINE: zoom in & teleport to the Galaxy Arcade ----
@@ -999,7 +1057,9 @@ export default function App() {
     isSleeping ||
     showTabletopMenu ||
     !!tabletopGame ||
-    showWardrobe;
+    showWardrobe ||
+    showBirthdaySalon ||
+    showSatNav;
 
   // The title screen covers the whole app until the player hits Start.
   const menuVisible = !started;
@@ -1514,9 +1574,74 @@ export default function App() {
     }
   };
 
+  // Keep the 3D party mode (striped hats, balloons, screams) in sync
+  useEffect(() => {
+    parkSceneRef.current?.setBirthdayMode(partyActive);
+  }, [partyActive]);
+
+  // ---- Birthday Cake Salon handlers ----
+  const handleSaveBirthday = (b: BirthdayDate) => {
+    saveBirthday(b);
+    setBirthday(b);
+    const today = isBirthdayToday(b);
+    setPartyActive(today);
+    setPartyPreview(false);
+    setShowBirthdaySalon(false);
+    parkSceneRef.current?.storeDogSay(
+      today
+        ? "WOOF!! That's TODAY! 🎉 The party starts right now — drive to the city park!"
+        : `Saved! 🎂 See you on ${formatBirthday(b)}! I'll bake the giant cake!`
+    );
+    showToast(
+      today
+        ? "🎉 It's Happy's birthday TODAY! The party is on!"
+        : `🎂 Birthday saved: ${formatBirthday(b)} (no year needed!)`
+    );
+  };
+
+  const handlePreviewBirthdayParty = () => {
+    setPartyActive(true);
+    setPartyPreview(!isBirthdayToday(birthday));
+    setShowBirthdaySalon(false);
+    parkSceneRef.current?.storeDogSay("Woof! Party mode ON! 🎉 Wanna see it? Drive to the city park!");
+    confetti({ particleCount: 80, spread: 80, origin: { y: 0.5 } });
+    showToast("🎉 Birthday party preview! Happy got his special cone hat! 🎂");
+  };
+
+  const handleEndBirthdayPreview = () => {
+    setPartyActive(false);
+    setPartyPreview(false);
+    parkSceneRef.current?.storeDogSay("Woof! Party's packed away… for now. See you on the big day!");
+    showToast("🎂 Party preview ended.");
+  };
+
+  // ---- Car sat-nav: pick the city stop, then hit the road ----
+  const handleSatNavPick = (dest: CarDestination) => {
+    setShowSatNav(false);
+    playCartoonTransition(
+      dest === "cakestore" ? "Off to the Cake Store! 🎂🚗" : "Off to the Supermarket! 🛒🚗",
+      () => {
+        parkSceneRef.current?.startCarRideWithDestination(dest);
+      }
+    );
+  };
+
+  const handleSatNavCancel = () => {
+    setShowSatNav(false);
+    parkSceneRef.current?.cancelCarSatNav();
+    showToast("🚗 Maybe later! Tap the car again when you're ready to drive.");
+  };
+
   // Toggle View Mode: Between Park, House, City and the Galaxy Arcade
   const handleToggleViewMode = () => {
     if (!parkSceneRef.current) return;
+    if (viewMode === "cakestore") {
+      // Step back out of the Cake Store (fires onCakeStoreExited → city)
+      playCartoonTransition("Leaving the Cake Store... 🎂", () => {
+        parkSceneRef.current!.exitCakeStore();
+      });
+      return;
+    }
     if (viewMode === "arcade") {
       playCartoonTransition(
         "Leaving the Galaxy Arcade... 🐾",
@@ -2133,6 +2258,26 @@ export default function App() {
         </div>
       )}
 
+      {/* Birthday party banner: "HAPPY Birthday!" pill while the party is on */}
+      {partyActive && !menuVisible && (
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2 px-4 py-2 rounded-full bg-[#db2777] border-2 border-pink-200/70 text-white font-black text-xs sm:text-sm shadow-2xl pointer-events-auto animate-in fade-in slide-in-from-bottom-4 duration-300">
+          <span className="text-base">🎂</span>
+          <span>
+            <span className="uppercase tracking-widest">HAPPY</span>
+            <span className="text-pink-100"> Birthday!</span>
+          </span>
+          {partyPreview && (
+            <button
+              onClick={handleEndBirthdayPreview}
+              className="ml-1 px-2 py-0.5 rounded-full bg-white/20 hover:bg-white/30 text-[10px] font-bold cursor-pointer transition-colors"
+              title="End the party preview"
+            >
+              ✕ preview
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Photo Mode: unobstructed viewfinder with poses, grid & filters */}
       {photoMode && !anyModalOpen && (
         <PhotoMode
@@ -2648,6 +2793,22 @@ export default function App() {
           onDelete={handleDeletePhoto}
           onClose={() => setShowAlbum(false)}
         />
+      )}
+
+      {/* Birthday Cake Salon: Chef Biscuit saves the big day (month + day, no year) */}
+      {showBirthdaySalon && !menuVisible && (
+        <BirthdaySalonModal
+          saved={birthday}
+          partyActive={partyActive}
+          onSave={handleSaveBirthday}
+          onPreviewParty={handlePreviewBirthdayParty}
+          onClose={() => setShowBirthdaySalon(false)}
+        />
+      )}
+
+      {/* Car sat-nav: the driver's seat + the two city stops (Supermarket / Cake Store) */}
+      {showSatNav && !menuVisible && (
+        <CarSatNavModal onPick={handleSatNavPick} onCancel={handleSatNavCancel} />
       )}
 
       {/* Soup-ready reveal: pot spins, lid slides off, dish info appears */}

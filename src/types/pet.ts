@@ -35,7 +35,7 @@ export interface PetAccessory {
   description: string;
 }
 
-export type HouseViewMode = "park" | "house" | "city" | "arcade" | "highway";
+export type HouseViewMode = "park" | "house" | "city" | "arcade" | "highway" | "cakestore";
 
 export type HouseRoom = "living" | "hallway" | "kitchen" | "upstairs" | "bathroom";
 

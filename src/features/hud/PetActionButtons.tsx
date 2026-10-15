@@ -168,12 +168,15 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   const isHouse = viewMode === "house";
   const isCity = viewMode === "city";
   const isArcade = viewMode === "arcade";
-  const isAway = isCity || isArcade; // away-from-home worlds (city & galaxy arcade)
+  const isCakeStore = viewMode === "cakestore";
+  const isAway = isCity || isArcade || isCakeStore; // away-from-home worlds (city, arcade & cake store)
   const isKitchen = isHouse && houseRoom === "kitchen";
   const isHallway = isHouse && houseRoom === "hallway";
   const isBathroom = isHouse && houseRoom === "bathroom";
   const isBedroom = isHouse && houseRoom === "upstairs";
-  const roomLabel = isArcade
+  const roomLabel = isCakeStore
+    ? "🎂 Cake Store"
+    : isArcade
     ? "🌌 Galaxy Arcade"
     : isCity
     ? "🏙️ City Park"
