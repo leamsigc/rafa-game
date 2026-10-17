@@ -35,7 +35,19 @@ export interface PetAccessory {
   description: string;
 }
 
-export type HouseViewMode = "park" | "house" | "city" | "arcade" | "highway" | "cakestore";
+export type HouseViewMode =
+  | "park"
+  | "house"
+  | "city"
+  | "arcade"
+  | "highway"
+  | "cakestore"
+  | "musicschool"
+  | "townhall"
+  | "library"
+  | "clothing"
+  | "toolshop"
+  | "cafe";
 
 export type HouseRoom = "living" | "hallway" | "kitchen" | "upstairs" | "bathroom";
 
@@ -90,8 +102,10 @@ export interface PetStats {
   unlockedBedStyles: string[];
   currentBedStyle: string;
   ingredientsInventory?: Record<string, number>;
-  /** Owned tool ids (legacy field — the axe / tree-chopping tool was removed). */
+  /** Owned tool ids (the axe is bought in the city Tool Store). */
   ownedTools?: string[];
+  /** Indices of the 4 cake-store birthday presents already opened. */
+  openedPresents?: number[];
   /** Unlocked achievement badge ids. */
   unlockedAchievements?: string[];
   /** Secret chat codes discovered (exact code ids). */

@@ -5,10 +5,6 @@ import {
   Sparkles,
   Check,
   X,
-  Crown,
-  Glasses,
-  Bell,
-  Layers,
   Coins,
   Smile,
 } from "lucide-react";
@@ -19,70 +15,8 @@ interface HouseShopModalProps {
   stats: PetStats;
   onClose: () => void;
   onUpdateBedColors: (colors: BedColors) => void;
-  onBuyAccessory: (accessoryId: string, cost: number) => void;
-  onEquipAccessory: (accessoryId: string | undefined) => void;
   onBuyToy: (toy: "bone" | "duck" | "bear" | "ball", cost: number) => void;
 }
-
-interface AccessoryItem {
-  id: string;
-  name: string;
-  description: string;
-  price: number;
-  icon: string;
-}
-
-const ACCESSORIES_CATALOG: AccessoryItem[] = [
-  {
-    id: "bowtie",
-    name: "Crimson Bowtie",
-    description: "A charming red satin bowtie for formal trot walks.",
-    price: 35,
-    icon: "🎀",
-  },
-  {
-    id: "sunglasses",
-    name: "Cool Shades",
-    description: "Classic tinted UV sunglasses. 100% pure canine swagger.",
-    price: 45,
-    icon: "🕶️",
-  },
-  {
-    id: "scarf",
-    name: "Cozy Winter Scarf",
-    description: "A warm knit crimson scarf for breezy afternoon outings.",
-    price: 40,
-    icon: "🧣",
-  },
-  {
-    id: "bell",
-    name: "Golden Jingle Bell",
-    description: "A polished brass bell that chimes gently on every step.",
-    price: 25,
-    icon: "🔔",
-  },
-  {
-    id: "tophat",
-    name: "Aristocrat Top Hat",
-    description: "A dapper black silk hat with a crimson ribbon.",
-    price: 65,
-    icon: "🎩",
-  },
-  {
-    id: "crown",
-    name: "Royal Golden Crown",
-    description: "A sparkling imperial crown studded with rubies.",
-    price: 100,
-    icon: "👑",
-  },
-  {
-    id: "witchhat",
-    name: "Spooky Witch Hat",
-    description: "A pointed purple witch hat. Granted free every Halloween season — or buy it early!",
-    price: 55,
-    icon: "🧙",
-  },
-];
 
 const TOYS_CATALOG = [
   {
@@ -132,15 +66,13 @@ const PRESET_PALETTES = [
   { name: "Midnight Charcoal", hex: "#1e293b" },
 ];
 
-type ShopTab = "bed" | "accessories" | "toys";
+type ShopTab = "bed" | "toys";
 type BedPart = "cushion" | "frame" | "blanket";
 
 export const HouseShopModal: React.FC<HouseShopModalProps> = ({
   stats,
   onClose,
   onUpdateBedColors,
-  onBuyAccessory,
-  onEquipAccessory,
   onBuyToy,
 }) => {
   const [activeTab, setActiveTab] = useState<ShopTab>("bed");
@@ -163,8 +95,6 @@ export const HouseShopModal: React.FC<HouseShopModalProps> = ({
     onUpdateBedColors(updated);
   };
 
-  const ownedAccessories = stats.ownedAccessories || [];
-  const equippedAccessory = stats.equippedAccessory;
   const currentToy = stats.houseToy || "bone";
 
   return (
@@ -188,7 +118,7 @@ export const HouseShopModal: React.FC<HouseShopModalProps> = ({
                 <Sparkles className="w-4 h-4 text-yellow-200" />
               </h2>
               <p className="text-xs text-amber-100 font-medium">
-                Customize your dog's cozy bed & buy fancy accessories!
+                Customize your dog's cozy bed & pick a floor toy — clothes now live at the City Boutique!
               </p>
             </div>
           </div>
@@ -231,22 +161,6 @@ export const HouseShopModal: React.FC<HouseShopModalProps> = ({
           >
             <Palette className="w-4 h-4 text-amber-600" />
             <span>Bed Customizer</span>
-          </button>
-
-          <button
-            id="shop-tab-accessories"
-            onClick={() => {
-              sound.playButtonTap();
-              setActiveTab("accessories");
-            }}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-sm font-bold transition-all ${
-              activeTab === "accessories"
-                ? "bg-white text-amber-900 shadow-sm border border-amber-200/60"
-                : "text-amber-800/70 hover:bg-amber-100/50"
-            }`}
-          >
-            <Crown className="w-4 h-4 text-amber-600" />
-            <span>Dog Accessories</span>
           </button>
 
           <button
@@ -440,111 +354,6 @@ export const HouseShopModal: React.FC<HouseShopModalProps> = ({
                 <span className="text-xs text-emerald-600 font-bold flex items-center gap-1">
                   <Check className="w-3.5 h-3.5" /> Saved & Active in Room
                 </span>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 2: ACCESSORIES SHOP */}
-          {activeTab === "accessories" && (
-            <div className="space-y-4">
-              <div className="bg-amber-100/60 border border-amber-200 rounded-2xl p-4 text-xs text-amber-900 flex items-start gap-3">
-                <span className="text-xl">🎩</span>
-                <div>
-                  <p className="font-bold text-amber-950 mb-0.5">Dress up your dog!</p>
-                  <p>
-                    Use your hard-earned <strong>doggy coins</strong> from fetch games and treats to
-                    buy hats, sunglasses, bows, and bells! Click to equip or remove them anytime.
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                {ACCESSORIES_CATALOG.map((item) => {
-                  const isOwned = ownedAccessories.includes(item.id);
-                  const isEquipped = equippedAccessory === item.id;
-                  const canAfford = stats.coins >= item.price;
-
-                  return (
-                    <div
-                      key={item.id}
-                      id={`accessory-item-${item.id}`}
-                      className={`p-4 rounded-2xl border bg-white flex flex-col justify-between transition-all ${
-                        isEquipped
-                          ? "border-amber-500 ring-2 ring-amber-400/40 shadow-md"
-                          : "border-slate-200 hover:border-amber-300"
-                      }`}
-                    >
-                      <div>
-                        <div className="flex items-start justify-between mb-2">
-                          <span className="text-3xl">{item.icon}</span>
-                          {isEquipped ? (
-                            <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-[10px] font-bold rounded-full border border-emerald-300 flex items-center gap-1">
-                              <Check className="w-3 h-3" /> Equipped
-                            </span>
-                          ) : isOwned ? (
-                            <span className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded-full">
-                              Owned
-                            </span>
-                          ) : (
-                            <div className="flex items-center gap-1 font-bold text-amber-600 text-xs bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
-                              <Coins className="w-3 h-3 fill-amber-500" />
-                              <span>{item.price}</span>
-                            </div>
-                          )}
-                        </div>
-
-                        <h4 className="text-sm font-bold text-slate-800 mb-1">{item.name}</h4>
-                        <p className="text-xs text-slate-500 leading-relaxed mb-3">
-                          {item.description}
-                        </p>
-                      </div>
-
-                      {/* Action Button */}
-                      <div>
-                        {isEquipped ? (
-                          <button
-                            id={`unequip-${item.id}-button`}
-                            onClick={() => {
-                              sound.playButtonTap();
-                              onEquipAccessory(undefined);
-                            }}
-                            className="w-full py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1"
-                          >
-                            <X className="w-3 h-3" /> Unequip
-                          </button>
-                        ) : isOwned ? (
-                          <button
-                            id={`equip-${item.id}-button`}
-                            onClick={() => {
-                              sound.playRewardFanfare();
-                              onEquipAccessory(item.id);
-                            }}
-                            className="w-full py-2 px-3 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-bold transition shadow-sm flex items-center justify-center gap-1"
-                          >
-                            <Check className="w-3 h-3" /> Wear Item
-                          </button>
-                        ) : (
-                          <button
-                            id={`buy-${item.id}-button`}
-                            disabled={!canAfford}
-                            onClick={() => {
-                              sound.playRewardFanfare();
-                              onBuyAccessory(item.id, item.price);
-                            }}
-                            className={`w-full py-2 px-3 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 ${
-                              canAfford
-                                ? "bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-600 hover:to-yellow-600 text-white shadow-sm"
-                                : "bg-slate-100 text-slate-400 cursor-not-allowed"
-                            }`}
-                          >
-                            <Coins className="w-3.5 h-3.5 fill-current" />
-                            {canAfford ? `Buy for ${item.price} Coins` : "Need More Coins"}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
               </div>
             </div>
           )}

@@ -23,6 +23,17 @@ export interface IllnessDef {
 
 export const ILLNESSES: IllnessDef[] = [
   {
+    id: "cold",
+    name: "A Little Cold",
+    emoji: "🤧",
+    weight: 0,
+    healthDrain: 0.8,
+    energyDrain: 1,
+    joyDrain: 1,
+    blockedActions: [],
+    blurb: "Happy has a cold. He wants some chocolate milk.",
+  },
+  {
     id: "sneeze",
     name: "Sneezy Nose",
     emoji: "🤧",
@@ -180,10 +191,20 @@ export interface MedicineDef {
 
 export const MEDICINES: MedicineDef[] = [
   {
+    id: "chocolate_milk",
+    name: "Chocolate Milk",
+    emoji: "🥛",
+    cures: ["cold"],
+    healthRestore: 20,
+    energyRestore: 8,
+    cost: 15,
+    blurb: "Happy's favourite rainy-day remedy. Warm cocoa milk that melts a cold away.",
+  },
+  {
     id: "tissue_box",
     name: "Tissue Box",
     emoji: "🧻",
-    cures: ["sneeze", "runny_nose"],
+    cures: ["sneeze", "runny_nose", "cold"],
     healthRestore: 8,
     energyRestore: 4,
     cost: 18,

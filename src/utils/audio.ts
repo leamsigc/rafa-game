@@ -593,6 +593,95 @@ class SoundEngine {
     osc.stop(now + 0.16);
   }
 
+  /** Music-school instruments: plays a short riff on the chosen instrument. */
+  public playInstrument(kind: "piano" | "guitar" | "drum" | "xylophone" | "flute") {
+    if (!this.settings.sfxEnabled) return;
+    const ctx = this.getContext();
+    if (!ctx || !this.sfxGain) return;
+
+    const out = this.sfxGain;
+    const t0 = ctx.currentTime;
+
+    // A single voiced note with a quick attack and an exponential tail.
+    const note = (
+      freq: number,
+      start: number,
+      dur: number,
+      type: OscillatorType,
+      peak: number,
+      filterHz?: number
+    ) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+      gain.gain.setValueAtTime(0, ctx.currentTime + start);
+      gain.gain.linearRampToValueAtTime(peak, ctx.currentTime + start + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      if (filterHz) {
+        const filter = ctx.createBiquadFilter();
+        filter.type = "lowpass";
+        filter.frequency.setValueAtTime(filterHz, ctx.currentTime + start);
+        osc.connect(filter);
+        filter.connect(gain);
+      } else {
+        osc.connect(gain);
+      }
+      gain.connect(out);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur + 0.02);
+    };
+
+    // A noise-based percussion hit (snare / hat / kick click).
+    const hit = (start: number, dur: number, hp: number, peak: number) => {
+      const bufferSize = Math.max(1, Math.floor(ctx.sampleRate * dur));
+      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (ctx.sampleRate * dur * 0.4));
+      }
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = "highpass";
+      filter.frequency.setValueAtTime(hp, ctx.currentTime);
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(peak, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      src.connect(filter);
+      filter.connect(gain);
+      gain.connect(out);
+      src.start(ctx.currentTime + start);
+      src.stop(ctx.currentTime + start + dur + 0.02);
+    };
+
+    if (kind === "piano") {
+      // A warm ascending arpeggio (C5 E5 G5 C6)
+      [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => note(f, i * 0.14, 0.6, "triangle", 0.35, 4200));
+    } else if (kind === "guitar") {
+      // A gentle plucked pattern (E4 B3 E4 G4)
+      [329.63, 246.94, 329.63, 392.0].forEach((f, i) => note(f, i * 0.18, 0.55, "sawtooth", 0.3, 1800));
+    } else if (kind === "xylophone") {
+      // Bright bouncy melody (C6 E6 G6 C7)
+      [1046.5, 1318.5, 1568.0, 2093.0].forEach((f, i) => note(f, i * 0.11, 0.35, "sine", 0.3));
+    } else if (kind === "flute") {
+      // Airy legato phrase (G4 B4 D5 G5)
+      [392.0, 493.88, 587.33, 783.99].forEach((f, i) => note(f, i * 0.2, 0.5, "sine", 0.25));
+    } else {
+      // Drum kit: kick / snare / hat / snare groove
+      note(70, 0.0, 0.16, "sine", 0.6);
+      hit(0.0, 0.05, 6000, 0.2);
+      hit(0.17, 0.1, 1200, 0.35);
+      hit(0.25, 0.04, 7000, 0.16);
+      note(70, 0.36, 0.16, "sine", 0.6);
+      hit(0.5, 0.1, 1200, 0.35);
+      hit(0.58, 0.04, 7000, 0.16);
+      hit(0.75, 0.11, 1200, 0.4);
+    }
+    // Prime the audio graph so the very first riff is not swallowed on iOS.
+    void t0;
+  }
+
   /** Whistle trainer chirp */
   public playWhistle() {
     if (!this.settings.sfxEnabled) return;

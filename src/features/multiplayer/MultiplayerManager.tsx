@@ -59,6 +59,7 @@ export const MultiplayerManager: React.FC<MultiplayerManagerProps> = ({
   const [joinCode, setJoinCode] = useState("");
   const [copied, setCopied] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [joinFormOpen, setJoinFormOpen] = useState(false);
 
   // Spin up the 3D void lobby once a group is live
   useEffect(() => {
@@ -154,36 +155,54 @@ export const MultiplayerManager: React.FC<MultiplayerManagerProps> = ({
                   setCreating(true);
                   onCreate();
                 }}
-                className="mt-5 w-full flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-sky-500 hover:bg-sky-400 disabled:opacity-60 font-bold transition-colors"
+                className="mt-5 w-full flex items-center justify-center gap-2 px-4 py-3.5 rounded-2xl bg-sky-500 hover:bg-sky-400 disabled:opacity-60 font-black text-base transition-colors cursor-pointer active:scale-[0.99]"
               >
                 <Sparkles className="w-5 h-5" />
-                {creating ? "Generating group code..." : "Create a Group"}
+                {creating ? "Making your group..." : "Make a Group"}
               </button>
-              <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
-                <span className="flex-1 h-px bg-white/10" /> or join with a code <span className="flex-1 h-px bg-white/10" />
-              </div>
-              <form
-                className="mt-3 flex gap-2"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (joinCode.trim()) onJoin(joinCode.trim());
-                }}
+              <button
+                onClick={() => setJoinFormOpen((v) => !v)}
+                className={`mt-3 w-full flex items-center justify-center gap-2 px-4 py-3.5 rounded-2xl font-black text-base transition-colors cursor-pointer active:scale-[0.99] ${
+                  joinFormOpen
+                    ? "bg-white/10 hover:bg-white/20 text-white"
+                    : "bg-emerald-500 hover:bg-emerald-400 text-white"
+                }`}
               >
-                <input
-                  value={joinCode}
-                  onChange={(e) => setJoinCode(e.target.value)}
-                  placeholder="aB3xY9cD"
-                  maxLength={8}
-                  className="flex-1 min-w-0 rounded-2xl bg-white/10 border border-white/15 px-4 py-3 font-mono uppercase tracking-widest outline-none focus:border-sky-400 placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-500"
-                />
-                <button
-                  type="submit"
-                  disabled={!joinCode.trim()}
-                  className="px-4 py-3 rounded-2xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 font-bold transition-colors"
-                >
-                  Join
-                </button>
-              </form>
+                <Users className="w-5 h-5" />
+                Join a Group
+              </button>
+
+              {joinFormOpen && (
+                <>
+                  <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                    <span className="flex-1 h-px bg-white/10" /> enter a friend's group code{" "}
+                    <span className="flex-1 h-px bg-white/10" />
+                  </div>
+                  <form
+                    className="mt-3 flex gap-2"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (joinCode.trim()) onJoin(joinCode.trim());
+                    }}
+                  >
+                    <input
+                      value={joinCode}
+                      onChange={(e) => setJoinCode(e.target.value)}
+                      placeholder="aB3xY9cD"
+                      maxLength={8}
+                      autoFocus
+                      className="flex-1 min-w-0 rounded-2xl bg-white/10 border border-white/15 px-4 py-3 font-mono uppercase tracking-widest outline-none focus:border-emerald-400 placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-500"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!joinCode.trim()}
+                      className="px-4 py-3 rounded-2xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 font-bold transition-colors cursor-pointer"
+                    >
+                      Join
+                    </button>
+                  </form>
+                </>
+              )}
               <button onClick={onCloseMenu} className="mt-4 w-full text-sm text-slate-400 hover:text-white transition-colors">
                 Close
               </button>

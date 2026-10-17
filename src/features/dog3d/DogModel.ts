@@ -423,20 +423,83 @@ export class Dog3D {
     this.headMesh.add(hatGroup);
     this.accessories.set("tophat", hatGroup);
 
-    // 3. Golden Crown
+    // 3. Royal Golden Crown — a jewelled imperial crown (band, arches, jewels)
     const crownGroup = new THREE.Group();
-    crownGroup.position.set(0, 0.48, 0.05);
-    const goldCrownMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, metalness: 0.8, roughness: 0.2 });
-    const crownBaseGeom = new THREE.CylinderGeometry(0.24, 0.22, 0.14, 16);
-    const crownBase = new THREE.Mesh(crownBaseGeom, goldCrownMat);
+    crownGroup.position.set(0, 0.46, 0.05);
+    const goldBright = new THREE.MeshStandardMaterial({
+      color: 0xffd24a,
+      metalness: 0.95,
+      roughness: 0.16,
+      emissive: 0x6b4a00,
+      emissiveIntensity: 0.25,
+    });
+    const goldDark = new THREE.MeshStandardMaterial({
+      color: 0xd69412,
+      metalness: 0.9,
+      roughness: 0.3,
+    });
+    const velvetMat = new THREE.MeshStandardMaterial({ color: 0xb3122f, roughness: 0.85 });
+    const rubyMat = new THREE.MeshStandardMaterial({
+      color: 0xe11d48,
+      metalness: 0.4,
+      roughness: 0.15,
+      emissive: 0x7f0d24,
+      emissiveIntensity: 0.5,
+    });
+    const sapphireMat = new THREE.MeshStandardMaterial({
+      color: 0x2563eb,
+      metalness: 0.4,
+      roughness: 0.15,
+      emissive: 0x0b2a72,
+      emissiveIntensity: 0.5,
+    });
+
+    // Red velvet cap peeking out of the top of the band
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.22, 0.16, 18), velvetMat);
+    cap.position.y = 0.06;
+    crownGroup.add(cap);
+
+    // Main gold band
+    const crownBase = new THREE.Mesh(new THREE.CylinderGeometry(0.255, 0.245, 0.17, 22), goldBright);
+    crownBase.castShadow = true;
     crownGroup.add(crownBase);
-    for (let i = 0; i < 5; i++) {
-      const angle = (i / 5) * Math.PI * 2;
-      const spikeGeom = new THREE.ConeGeometry(0.05, 0.14, 4);
-      const spike = new THREE.Mesh(spikeGeom, goldCrownMat);
-      spike.position.set(Math.sin(angle) * 0.2, 0.14, Math.cos(angle) * 0.2);
-      crownGroup.add(spike);
+    // Bottom + top rim beads
+    [0.08, -0.08].forEach((ry) => {
+      const rim = new THREE.Mesh(new THREE.TorusGeometry(0.252, 0.022, 8, 26), goldDark);
+      rim.rotation.x = Math.PI / 2;
+      rim.position.y = ry;
+      crownGroup.add(rim);
+    });
+
+    // Jewels around the band, alternating ruby / sapphire
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const jewel = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.045, 0),
+        i % 2 === 0 ? rubyMat : sapphireMat
+      );
+      jewel.position.set(Math.sin(a) * 0.255, 0, Math.cos(a) * 0.255);
+      jewel.scale.set(0.7, 1.1, 0.7);
+      crownGroup.add(jewel);
     }
+
+    // Pointed arches with gold pearls on top (tall/short alternating)
+    for (let i = 0; i < 6; i++) {
+      const a = (i / 6) * Math.PI * 2;
+      const tall = i % 2 === 0;
+      const archH = tall ? 0.24 : 0.16;
+      const arch = new THREE.Mesh(new THREE.ConeGeometry(0.062, archH, 6), goldBright);
+      arch.position.set(Math.sin(a) * 0.215, 0.085 + archH / 2, Math.cos(a) * 0.215);
+      crownGroup.add(arch);
+      const pearl = new THREE.Mesh(new THREE.SphereGeometry(0.045, 12, 12), goldBright);
+      pearl.position.set(Math.sin(a) * 0.215, 0.085 + archH + 0.03, Math.cos(a) * 0.215);
+      crownGroup.add(pearl);
+    }
+
+    // Crown-top finial: a little gold orb ringed by a cross of pearls
+    const top = new THREE.Mesh(new THREE.SphereGeometry(0.06, 14, 14), goldBright);
+    top.position.y = 0.2;
+    crownGroup.add(top);
     crownGroup.visible = false;
     this.headMesh.add(crownGroup);
     this.accessories.set("crown", crownGroup);

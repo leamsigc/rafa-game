@@ -23,6 +23,8 @@ import { TimeOfDay } from "../dog3d/ParkScene";
 import { AudioSettings, sound } from "../../utils/audio";
 import { ACHIEVEMENTS } from "../achievements/achievementsData";
 import { getLifetime } from "../journal/dayJournal";
+import { getLevelInfo, MAX_LEVEL } from "../leveling/leveling";
+import dogAvatar from "../../assets/images/dog_avatar_1788547305164.jpg";
 
 export type SettingsTab = "audio" | "pet" | "environment" | "achievements" | "account";
 
@@ -87,6 +89,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => sound.getSettings());
   const unlockedSet = new Set(stats.unlockedAchievements || []);
+  const levelInfo = getLevelInfo(stats.xp);
 
   const handleMasterVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
@@ -135,15 +138,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       <div className="relative w-full max-w-lg bg-[#F2E8CF] border border-[#386641]/20 rounded-3xl shadow-2xl overflow-hidden text-[#386641] flex flex-col max-h-[90vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-[#386641]/20 bg-[#386641] text-[#F2E8CF]">
-          <div className="flex items-center gap-2.5">
-            <div className="p-1.5 rounded-xl bg-[#A7C957]/20 text-[#A7C957]">
-              <Volume2 className="w-5 h-5" />
-            </div>
-            <div>
-              <h3 className="text-base font-black text-white">Settings & Audio</h3>
-              <p className="text-[11px] text-[#A7C957]/90 font-medium">
-                Customize soundscape, companion styling, and park ambiance
-              </p>
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <img
+              src={dogAvatar}
+              alt={dogName}
+              referrerPolicy="no-referrer"
+              className="w-11 h-11 rounded-2xl object-cover border-2 border-[#A7C957] shadow-sm shrink-0"
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-black text-white truncate">{dogName}</h3>
+                <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-[#A7C957]/25 text-[#F2E8CF] border border-[#A7C957]/40 shrink-0">
+                  Lvl {levelInfo.level}
+                </span>
+              </div>
+              <div className="mt-1 flex items-center gap-2">
+                <div className="w-full max-w-[190px] h-2 rounded-full bg-white/20 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-[#A7C957] to-[#F2E8CF] transition-all duration-500"
+                    style={{ width: `${Math.round(levelInfo.progress * 100)}%` }}
+                  />
+                </div>
+                <span className="text-[10px] font-bold text-[#A7C957] whitespace-nowrap">
+                  {levelInfo.isMax
+                    ? "MAX"
+                    : `${levelInfo.xpIntoLevel}/${levelInfo.xpForNext} XP`}
+                </span>
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-1.5">
@@ -417,6 +438,53 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* TAB 2: PET STYLING & BREED */}
           {activeTab === "pet" && (
             <div className="space-y-4">
+              {/* Dog portrait + XP progress bar */}
+              <div className="rounded-2xl bg-white border border-[#386641]/15 shadow-xs p-4">
+                <div className="flex items-center gap-4">
+                  <img
+                    src={dogAvatar}
+                    alt={dogName}
+                    referrerPolicy="no-referrer"
+                    className="w-16 h-16 rounded-2xl object-cover border-2 border-[#386641]/30 shadow-sm shrink-0"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-sm font-black text-[#386641] truncate">{dogName}</h4>
+                      <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-[#A7C957]/40 text-[#386641] border border-[#6A994E]/30">
+                        Lvl {levelInfo.level}
+                      </span>
+                    </div>
+                    <div className="mt-2">
+                      <div className="flex items-center justify-between text-[10px] font-bold text-[#386641]/80 mb-1">
+                        <span className="flex items-center gap-1">
+                          <Sparkles className="w-3 h-3 text-amber-500" /> XP
+                        </span>
+                        <span>
+                          {levelInfo.isMax
+                            ? "MAX LEVEL"
+                            : `${levelInfo.xpIntoLevel} / ${levelInfo.xpForNext}`}
+                        </span>
+                      </div>
+                      <div className="w-full h-2.5 rounded-full bg-[#386641]/12 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-[#A7C957] to-[#6A994E] transition-all duration-500"
+                          style={{ width: `${Math.round(levelInfo.progress * 100)}%` }}
+                        />
+                      </div>
+                      <p className="mt-1.5 text-[10px] text-[#386641]/65 font-medium">
+                        {levelInfo.isMax
+                          ? `Legendary! ${dogName} reached the maximum level (${MAX_LEVEL}).`
+                          : `${levelInfo.xpToNext} XP to Level ${levelInfo.level + 1}`}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-3 flex items-center justify-between text-[10px] text-[#386641]/60 font-medium">
+                  <span>Total XP: {stats.xp}</span>
+                  <span>Max level {MAX_LEVEL}</span>
+                </div>
+              </div>
+
               {/* Pet Name Input */}
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-[#386641] mb-1.5">

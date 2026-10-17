@@ -41,6 +41,8 @@ import { PetCustomizerModal } from "./features/hud/PetCustomizerModal";
 import { SettingsModal } from "./features/hud/SettingsModal";
 import { SkillTreeModal } from "./features/skills/SkillTreeModal";
 import { HouseShopModal } from "./features/shop/HouseShopModal";
+import { ToolShopModal } from "./features/tools/ToolShopModal";
+import { getClothingItem } from "./features/clothing/clothingData";
 import { SleepOverlay } from "./features/hud/SleepOverlay";
 import { IrisTransition, IrisPhase } from "./features/hud/IrisTransition";
 import { CartoonTransition, CartoonPhase } from "./features/transitions/CartoonTransition";
@@ -54,6 +56,11 @@ import { ScoreboardModal } from "./features/account/ScoreboardModal";
 import { getAccount, linkAccount, saveAccount } from "./features/account/AccountService";
 import { getCurrentHoliday, holidayBlurb } from "./features/seasonal/holidays";
 import { BirthdaySalonModal } from "./features/birthday/BirthdaySalonModal";
+import { TutorialModal } from "./features/city/TutorialModal";
+import { getLevelInfo, levelFromXp, MAX_LEVEL } from "./features/leveling/leveling";
+import { MultiplayerManager } from "./features/multiplayer/MultiplayerManager";
+import { AVAILABLE_TREATS } from "./features/treats/treatsData";
+import { CafeMenuModal, type CafeItemDef } from "./features/cafe/CafeMenuModal";
 import { CarSatNavModal, CarDestination } from "./features/car/CarSatNavModal";
 import {
   BirthdayDate,
@@ -134,6 +141,8 @@ applyGlobalSaveReset();
 const WEATHER_STORAGE_KEY = "doghouse_weather_v1";
 const WEATHER_ROTATE_MS = 3 * 60 * 60 * 1000;
 const WEATHER_ORDER: WeatherType[] = ["sunny", "rainy", "snowy"];
+/** Health can never be rained below this floor — the "caught a cold" threshold. */
+const RAIN_HEALTH_FLOOR = 50;
 
 function pickNewWeather(current: WeatherType): WeatherType {
   const opts = WEATHER_ORDER.filter((w) => w !== current);
@@ -307,6 +316,8 @@ export default function App() {
   const weather = weatherState.w;
   const weatherRef = useRef<WeatherType>(weather);
   weatherRef.current = weather;
+  /** How long Happy has been soaked outside, measured in metabolism ticks. */
+  const rainExposureRef = useRef(0);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [followCamera, setFollowCamera] = useState<boolean>(true);
   const [viewMode, setViewMode] = useState<HouseViewMode>("park");
@@ -317,6 +328,8 @@ export default function App() {
   const [partyActive, setPartyActive] = useState<boolean>(() => isBirthdayToday(loadBirthday()));
   const [partyPreview, setPartyPreview] = useState<boolean>(false);
   const [showBirthdaySalon, setShowBirthdaySalon] = useState<boolean>(false);
+  // Town Hall: Bruno the clerk dog's step-by-step game tutorial
+  const [showTutorial, setShowTutorial] = useState<boolean>(false);
   // The scene-init effect has [] deps, so it reads the live party flag via ref
   const partyActiveRef = useRef(partyActive);
   partyActiveRef.current = partyActive;
@@ -348,6 +361,17 @@ export default function App() {
   // The car's dashboard sat-nav: appears after Happy walks to the car and
   // offers the two stops in the city (Supermarket lot / behind the Cake Store)
   const [showSatNav, setShowSatNav] = useState<boolean>(false);
+  // Multiplayer group menu (opened from the little path machine). Design-only
+  // for now — no lobby server is required to browse it.
+  const [showMultiplayerMenu, setShowMultiplayerMenu] = useState<boolean>(false);
+  const [mpMenuError, setMpMenuError] = useState<string | null>(null);
+  // Live multiplayer group size → drives how many convoy cars are parked in
+  // the park. 0 = solo (no convoy). Wired to a preview from the group menu
+  // until the host server is online.
+  const [mpGroupSize, setMpGroupSize] = useState<number>(0);
+  // Café order menu (bottom sheet) + where Happy is sitting
+  const [showCafeMenu, setShowCafeMenu] = useState<boolean>(false);
+  const [cafePlace, setCafePlace] = useState<"patio" | "inside">("patio");
   const [readyMeal, setReadyMeal] = useState<CookingJob | null>(() => {
     try {
       const raw = localStorage.getItem("doghouse_readymeal_v1");
@@ -373,6 +397,7 @@ export default function App() {
   const [showTrainingModal, setShowTrainingModal] = useState<boolean>(false);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [showShopModal, setShowShopModal] = useState<boolean>(false);
+  const [showToolShop, setShowToolShop] = useState<boolean>(false);
   const [isSleeping, setIsSleeping] = useState<boolean>(false);
   const isSleepingRef = useRef<boolean>(false);
   isSleepingRef.current = isSleeping;
@@ -413,6 +438,10 @@ export default function App() {
       setToastMessage(null);
     }, 3200);
   };
+
+  // Live mirror of stats for scene callbacks registered once in the init effect
+  const statsRef = useRef<PetStats>(stats);
+  statsRef.current = stats;
 
   // Passive Bonuses Helper
   const hasSkill = (skillId: string) => stats.unlockedSkills?.includes(skillId);
@@ -600,10 +629,15 @@ export default function App() {
   );
 
   // Natural slow metabolism over time (+ loneliness when ignored)
-  // Rain makes the dog lethargic: energy drains twice as fast.
+  // Rain makes the dog lethargic: energy drains twice as fast, and staying
+  // out in the rain too long soaks him: health sinks toward 50 and he catches
+  // a cold ("Happy has a sneeze and wants some chocolate milk.").
   useEffect(() => {
     const timer = setInterval(() => {
       const rainy = weatherRef.current === "rainy";
+      const scene = parkSceneRef.current;
+      const indoors = !!scene && scene.viewMode === "house";
+      const soaked = rainy && !indoors;
       setStats((prev) => {
         const newHunger = Math.min(100, prev.hunger + 1);
         const drain = (newHunger > 70 ? 2 : 1) * (rainy ? 2 : 1);
@@ -614,24 +648,48 @@ export default function App() {
           hunger: newHunger,
           energy: newEnergy,
           happiness: neglected ? Math.max(0, prev.happiness - 4) : prev.happiness,
-          ...tickHealth(prev, neglected),
+          ...tickHealth(prev, neglected, soaked),
         };
       });
+      // Exposure builds while soaked and dries off indoors / in the sun.
+      rainExposureRef.current = soaked
+        ? Math.min(12, rainExposureRef.current + 1)
+        : Math.max(0, rainExposureRef.current - 2);
     }, 45000);
     return () => clearInterval(timer);
   }, []);
 
   /**
    * Health drift for one metabolism tick: a neglected, empty, sick pup gets
-   * worse; a well-cared-for healthy one heals back toward 100.
+   * worse; a well-cared-for healthy one heals back toward 100. Getting rained
+   * on drags health down to (but never below) 50 and eventually causes a cold.
    */
-  const tickHealth = (prev: PetStats, neglected: boolean): Partial<PetStats> => {
+  const tickHealth = (prev: PetStats, neglected: boolean, soaked: boolean): Partial<PetStats> => {
     const health = prev.health ?? 100;
     const illness = getIllness(prev.illness);
 
-    if (illness) {
+    // Soaked outside: health slides toward the 50-point "cold" floor.
+    if (soaked && rainExposureRef.current >= 2) {
+      const ramp = Math.min(6, rainExposureRef.current - 1); // grows the longer he stays out
+      const nextHealth = Math.max(RAIN_HEALTH_FLOOR, health - 2 * ramp);
+      if (nextHealth <= RAIN_HEALTH_FLOOR && !illness) {
+        return {
+          health: RAIN_HEALTH_FLOOR,
+          illness: "cold",
+          happiness: Math.max(0, prev.happiness - 2),
+        };
+      }
       return {
-        health: clampHealth(health - illness.healthDrain * (neglected ? 1.6 : 1)),
+        health: nextHealth,
+        happiness: Math.max(0, prev.happiness - 2),
+      };
+    }
+
+    if (illness) {
+      // A cold never sinks health below the 50-point floor.
+      const floor = illness.id === "cold" ? RAIN_HEALTH_FLOOR : 0;
+      return {
+        health: Math.max(floor, clampHealth(health - illness.healthDrain * (neglected ? 1.6 : 1))),
         energy: Math.max(10, prev.energy - illness.energyDrain),
         happiness: Math.max(0, prev.happiness - illness.joyDrain),
       };
@@ -714,6 +772,10 @@ export default function App() {
       loadSavedLayout()
     );
     parkSceneRef.current = scene;
+    // Dev-only escape hatch for QA in the browser console.
+    if (import.meta.env.DEV) {
+      (window as unknown as { __dogScene?: ParkScene }).__dogScene = scene;
+    }
 
     scene.onFetchSuccess = (points) => {
       sound.playRewardFanfare();
@@ -736,7 +798,7 @@ export default function App() {
 
       setStats((prev) => {
         const nextXp = prev.xp + points;
-        const newLevel = Math.floor(nextXp / 100) + 1;
+        const newLevel = levelFromXp(nextXp);
         const leveledUp = newLevel > prev.level;
         if (leveledUp) {
           showToast(`🌟 Level Up! ${prev.name} is now Level ${newLevel}! (+1 Training Point)`);
@@ -761,6 +823,9 @@ export default function App() {
     if (stats.equippedAccessory) {
       scene.dog.setAccessory(stats.equippedAccessory);
     }
+    scene.setHasAxe((stats.ownedTools || []).includes("axe"));
+    scene.setOpenedPresents(stats.openedPresents || []);
+    scene.setClothingState(stats.ownedAccessories || [], stats.equippedAccessory);
     if (stats.bedColors) {
       scene.updateBedColors(stats.bedColors);
     }
@@ -855,6 +920,8 @@ export default function App() {
       showToast(
         dest === "cakestore"
           ? "🎂 Parked behind the Cake Store! Walk around the front and step inside for a treat!"
+          : dest === "airport"
+          ? "✈️ Parked at the Airport! Watch the planes land and take off — the terminal opens soon!"
           : `🏙️ Parked at the City lot! Try the 🛒 Supermarket, 🏋️ Gym — or drive to the pink 🎂 Cake Store!`
       );
     };
@@ -887,6 +954,12 @@ export default function App() {
     scene.onGymClicked = () => {
       setActiveMiniGame("gym");
     };
+    // ---- The little path machine opens the Multiplayer group menu ----
+    scene.onMultiplayerMachineClicked = () => {
+      stampInteraction();
+      setMpMenuError(null);
+      setShowMultiplayerMenu(true);
+    };
 
     // ---- The Birthday Cake Store: click it to walk in through the transition ----
     scene.onCakeStoreClicked = () => {
@@ -905,6 +978,183 @@ export default function App() {
     scene.onCakeStoreExited = () => {
       setViewMode("city");
       showToast("Back out on the city street! 🏙️");
+    };
+
+    // ---- New civic buildings: Music School, Town Hall & Library ----
+    scene.onMusicSchoolClicked = () => {
+      playCartoonTransition(
+        "Stepping into the Music School... 🎵",
+        () => {
+          scene.enterMusicSchool();
+          setViewMode("musicschool");
+        },
+        "Welcome to the Music School! Tap an instrument to hear it play! 🎵"
+      );
+    };
+    scene.onMusicSchoolExited = () => {
+      setViewMode("city");
+      showToast("Back out on the city street! 🎶");
+    };
+    scene.onInstrumentPlayed = (label) => {
+      showToast(`🎵 Happy plays the ${label}!`);
+    };
+    scene.onTownHallClicked = () => {
+      playCartoonTransition(
+        "Stepping into the Town Hall... 🏛️",
+        () => {
+          scene.enterTownHall();
+          setViewMode("townhall");
+        },
+        "The Town Hall! Talk to Bruno the clerk dog for a tutorial. 🐾"
+      );
+    };
+    scene.onTownHallExited = () => {
+      setViewMode("city");
+      showToast("Back out on the city street! 🏛️");
+    };
+    scene.onClerkTalked = () => {
+      setShowTutorial(true);
+    };
+    scene.onLibraryClicked = () => {
+      playCartoonTransition(
+        "Stepping into the Library... 📚",
+        () => {
+          scene.enterLibrary();
+          setViewMode("library");
+        },
+        "The Library! Tap a glowing book to read a story. 📖"
+      );
+    };
+    scene.onLibraryExited = () => {
+      setViewMode("city");
+      showToast("Back out on the city street! 📚");
+    };
+    scene.onBookPicked = () => {
+      setStory(null);
+      setShowStoryBook(true);
+    };
+    scene.onBenchRest = () => {
+      stampInteraction();
+      setStats((prev) => ({
+        ...prev,
+        energy: Math.min(100, prev.energy + 12),
+        happiness: Math.min(100, prev.happiness + 6),
+      }));
+      showToast("🪑 Ahhh… a nice bench rest! (+12 Energy, +6 Joy)");
+    };
+
+    // ---- Boutique Row neighbours: Halloween trick-or-treat ----
+    scene.onTrickOrTreat = (houseName, firstVisit) => {
+      if (!firstVisit) {
+        showToast(`🎃 You already trick-or-treated at ${houseName} — Happy's bucket is full!`);
+        return;
+      }
+      const candy = AVAILABLE_TREATS[Math.floor(Math.random() * AVAILABLE_TREATS.length)];
+      stampInteraction();
+      sound.playRewardFanfare();
+      confetti({ particleCount: 55, spread: 70, origin: { y: 0.65 } });
+      setStats((prev) => {
+        const nextXp = prev.xp + 15;
+        const inv = { ...prev.treatsInventory };
+        inv[candy.id] = (inv[candy.id] || 0) + 1;
+        return {
+          ...prev,
+          treatsInventory: inv,
+          coins: prev.coins + 10,
+          xp: nextXp,
+          level: levelFromXp(nextXp),
+          happiness: Math.min(100, prev.happiness + 5),
+        };
+      });
+      showToast(`🎃 Trick or treat at ${houseName}! +1 ${candy.name}, +10 coins, +15 XP`);
+    };
+
+    // ---- Café: patio seating, interior counter, barista & menu ----
+    scene.onCafeClicked = () => {
+      playCartoonTransition(
+        "Stepping into Happy Café... ☕",
+        () => {
+          scene.enterCafe();
+          setViewMode("cafe");
+        },
+        "Welcome to Happy Café! Order at the counter. ☕"
+      );
+    };
+    scene.onCafeExited = () => {
+      setViewMode("city");
+      showToast("Back out on Boutique Row! ☕");
+    };
+    scene.onCafeSit = (place) => {
+      stampInteraction();
+      setCafePlace(place);
+      setShowCafeMenu(true);
+    };
+    scene.onCafeDogTalked = () => {
+      // The café chatter bubble is rendered in the 3D world; nothing else needed.
+    };
+
+    // ---- Airport: the big terminal door is "coming soon" ----
+    scene.onAirportClicked = () => {
+      sound.playButtonTap();
+      showToast("✈️ The Airport terminal is coming soon — watch the planes land for now!");
+    };
+
+    // ---- Boutique Row: 3D Clothing Boutique, Tool Store & NPC presents ----
+    scene.onClothingStoreClicked = () => {
+      playCartoonTransition(
+        "Stepping into the Boutique... 👗",
+        () => {
+          scene.enterClothingStore();
+          scene.setClothingState(
+            statsRef.current.ownedAccessories || [],
+            statsRef.current.equippedAccessory
+          );
+          setViewMode("clothing");
+        },
+        "The Doggy Boutique! Tap a hat on a dog-head mannequin to buy or wear it. 👗"
+      );
+    };
+    scene.onClothingStoreExited = () => {
+      setViewMode("city");
+      showToast("Back out on Boutique Row! 🛍️");
+    };
+    scene.onClothingItemClicked = (id) => handleClothingItem(id);
+    scene.onToolStoreClicked = () => {
+      playCartoonTransition(
+        "Stepping into the Tool Store... 🪓",
+        () => {
+          scene.enterToolStore();
+          setViewMode("toolshop");
+        },
+        "The Tool Store! Tap the axe on the wall to buy it. 🪓"
+      );
+    };
+    scene.onToolStoreExited = () => {
+      setViewMode("city");
+      showToast("Back out on Boutique Row! 🛠️");
+    };
+    scene.onAxeClicked = () => setShowToolShop(true);
+    scene.onChopLog = () => handleChopLog();
+    scene.onPresentOpened = (index) => handlePresentOpened(index);
+    // ---- Lumberjack Axe: fell park trees for coins + XP ----
+    scene.onTreeClickedNoAxe = () => {
+      showToast("🪓 That tree needs the Lumberjack Axe! Buy it in the city Tool Store.");
+    };
+    scene.onTreeChopped = () => {
+      stampInteraction();
+      sound.playRewardFanfare();
+      confetti({ particleCount: 25, spread: 45, origin: { y: 0.7 } });
+      setStats((prev) => {
+        const nextXp = prev.xp + 20;
+        return {
+          ...prev,
+          coins: prev.coins + 12,
+          xp: nextXp,
+          level: levelFromXp(nextXp),
+          happiness: Math.min(100, prev.happiness + 4),
+        };
+      });
+      showToast("🪓 TIMBER! +12 coins, +20 XP — the tree will grow back soon!");
     };
 
     // ---- Birthday party mode: striped cone hats, balloons & the group scream ----
@@ -997,6 +1247,11 @@ export default function App() {
     }
   }, [stats.breed, stats.collarColor]);
 
+  // Multiplayer group size → convoy of friend cars parked by Happy's car.
+  useEffect(() => {
+    parkSceneRef.current?.setConvoySize(mpGroupSize);
+  }, [mpGroupSize, started]);
+
   // While the tabletop MENU or the wardrobe overlay is on top, gate the 3D
   // scene's click handler so taps never leak into the world. During an active
   // in-world board game the gate stays OPEN (the scene handles board taps).
@@ -1043,6 +1298,7 @@ export default function App() {
     showSkillTree ||
     showSettingsModal ||
     showShopModal ||
+    showToolShop ||
     showCookingModal ||
     showReadyModal ||
     showAlbum ||
@@ -1059,7 +1315,10 @@ export default function App() {
     !!tabletopGame ||
     showWardrobe ||
     showBirthdaySalon ||
-    showSatNav;
+    showTutorial ||
+    showSatNav ||
+    showMultiplayerMenu ||
+    showCafeMenu;
 
   // The title screen covers the whole app until the player hits Start.
   const menuVisible = !started;
@@ -1386,7 +1645,7 @@ export default function App() {
         icon: "🦴",
         energyBoost: 20,
         happinessBoost: 10,
-        hungerReduction: 25,
+        hungerReduction: 8,
         cost: 10,
         description: "Classic golden biscuit",
       });
@@ -1434,6 +1693,32 @@ export default function App() {
         lastFed: Date.now(),
       };
     });
+  };
+
+  // Café order: tea / coffee (25c, −25 hunger) or cake (50c, fills the bowl)
+  const handleCafeOrder = (item: CafeItemDef) => {
+    if (stats.coins < item.price) {
+      showToast(`Not enough coins for ${item.name} — need ${item.price} 🪙`);
+      return;
+    }
+    setStats((prev) => {
+      const nextXp = prev.xp + 10;
+      return {
+        ...prev,
+        coins: Math.max(0, prev.coins - item.price),
+        hunger: Math.max(0, prev.hunger - item.hunger),
+        energy: Math.min(100, prev.energy + 5),
+        happiness: Math.min(100, prev.happiness + 3),
+        xp: nextXp,
+        level: levelFromXp(nextXp),
+        lastFed: Date.now(),
+      };
+    });
+    stampInteraction();
+    sound.playCrunch();
+    confetti({ particleCount: 30, spread: 50, origin: { y: 0.75 } });
+    showToast(`${item.emoji} ${item.name} served! −${item.hunger}% hunger, −${item.price} coins`);
+    setShowCafeMenu(false);
   };
 
   // 4. BUTTON: Train Action — opens the trick training modal
@@ -1500,7 +1785,7 @@ export default function App() {
       const nextCoins = prev.coins - skill.cost;
       const nextSkills = [...(prev.unlockedSkills || []), skill.id];
       const nextXp = prev.xp + 30;
-      const nextLevel = Math.floor(nextXp / 100) + 1;
+      const nextLevel = levelFromXp(nextXp);
 
       return {
         ...prev,
@@ -1619,7 +1904,11 @@ export default function App() {
   const handleSatNavPick = (dest: CarDestination) => {
     setShowSatNav(false);
     playCartoonTransition(
-      dest === "cakestore" ? "Off to the Cake Store! 🎂🚗" : "Off to the Supermarket! 🛒🚗",
+      dest === "cakestore"
+        ? "Off to the Cake Store! 🎂🚗"
+        : dest === "airport"
+        ? "Off to the Airport! ✈️🚗"
+        : "Off to the Supermarket! 🛒🚗",
       () => {
         parkSceneRef.current?.startCarRideWithDestination(dest);
       }
@@ -1639,6 +1928,42 @@ export default function App() {
       // Step back out of the Cake Store (fires onCakeStoreExited → city)
       playCartoonTransition("Leaving the Cake Store... 🎂", () => {
         parkSceneRef.current!.exitCakeStore();
+      });
+      return;
+    }
+    if (viewMode === "musicschool") {
+      playCartoonTransition("Leaving the Music School... 🎵", () => {
+        parkSceneRef.current!.exitMusicSchool();
+      });
+      return;
+    }
+    if (viewMode === "townhall") {
+      playCartoonTransition("Leaving the Town Hall... 🏛️", () => {
+        parkSceneRef.current!.exitTownHall();
+      });
+      return;
+    }
+    if (viewMode === "library") {
+      playCartoonTransition("Leaving the Library... 📚", () => {
+        parkSceneRef.current!.exitLibrary();
+      });
+      return;
+    }
+    if (viewMode === "clothing") {
+      playCartoonTransition("Leaving the Boutique... 👗", () => {
+        parkSceneRef.current!.exitClothingStore();
+      });
+      return;
+    }
+    if (viewMode === "toolshop") {
+      playCartoonTransition("Leaving the Tool Store... 🪓", () => {
+        parkSceneRef.current!.exitToolStore();
+      });
+      return;
+    }
+    if (viewMode === "cafe") {
+      playCartoonTransition("Leaving Happy Café... ☕", () => {
+        parkSceneRef.current!.exitCafe();
       });
       return;
     }
@@ -1802,7 +2127,7 @@ export default function App() {
     confetti({ particleCount: 70, spread: 75, origin: { y: 0.65 } });
     setStats((prev) => {
       const nextXp = prev.xp + meal.xp;
-      const newLevel = Math.floor(nextXp / 100) + 1;
+      const newLevel = levelFromXp(nextXp);
       if (newLevel > prev.level) {
         showToast(`🌟 Level Up! ${prev.name} is now Level ${newLevel}!`);
       }
@@ -1985,6 +2310,100 @@ export default function App() {
     setShowWardrobe(false);
   };
 
+  // ---- Boutique Row: buy / wear clothing from the 3D mannequins ----
+  const handleClothingItem = (id: string) => {
+    const item = getClothingItem(id);
+    if (!item) return;
+    const current = statsRef.current;
+    const owned = (current.ownedAccessories || []).includes(id);
+
+    if (owned) {
+      const isEquipped = current.equippedAccessory === id;
+      const next = isEquipped ? undefined : id;
+      const nextOwned = current.ownedAccessories || [];
+      setStats((prev) => ({ ...prev, equippedAccessory: next }));
+      parkSceneRef.current?.dog.setAccessory(next || null);
+      parkSceneRef.current?.setClothingState(nextOwned, next);
+      showToast(isEquipped ? `Took off the ${item.name}.` : `👗 Wearing the ${item.name}!`);
+      return;
+    }
+
+    if (current.coins < item.price) {
+      showToast(`Not enough coins — the ${item.name} costs ${item.price}.`);
+      return;
+    }
+
+    const nextOwned = [...(current.ownedAccessories || []), id];
+    setStats((prev) => ({
+      ...prev,
+      coins: prev.coins - item.price,
+      ownedAccessories: [...(prev.ownedAccessories || []), id],
+      equippedAccessory: id,
+    }));
+    parkSceneRef.current?.dog.setAccessory(id);
+    parkSceneRef.current?.setClothingState(nextOwned, id);
+    confetti({ particleCount: 70, spread: 70, origin: { y: 0.6 } });
+    showToast(`👗 Bought & wearing the ${item.name}! (-${item.price} coins)`);
+  };
+
+  // ---- Tool Store: buy the axe, then chop the woodpile ----
+  const handleBuyAxe = (cost: number) => {
+    const current = statsRef.current;
+    if ((current.ownedTools || []).includes("axe")) return;
+    if (current.coins < cost) {
+      showToast("Not enough coins for the axe.");
+      return;
+    }
+    setStats((prev) => ({
+      ...prev,
+      coins: prev.coins - cost,
+      ownedTools: [...(prev.ownedTools || []).filter((t) => t !== "axe"), "axe"],
+    }));
+    parkSceneRef.current?.setHasAxe(true);
+    setShowToolShop(false);
+    showToast("🪓 Bought the Lumberjack Axe! Chop the woodpile for coins.");
+  };
+
+  const handleChopLog = () => {
+    setStats((prev) => ({
+      ...prev,
+      coins: prev.coins + 12,
+      happiness: Math.min(100, prev.happiness + 2),
+    }));
+    confetti({ particleCount: 18, spread: 40, origin: { y: 0.6 } });
+    showToast("🪓 Chop! +12 coins · +2 Joy");
+  };
+
+  // ---- The 4 NPC birthday presents on the Cake Store table ----
+  const PRESENT_REWARDS: { label: string; treat?: string; qty?: number; coins?: number }[] = [
+    { label: "2× Crunchy Golden Bones", treat: "biscuit", qty: 2 },
+    { label: "a Golden Honey Jar", treat: "honeyjar", qty: 1 },
+    { label: "80 shiny coins", coins: 80 },
+    { label: "a Roast Chicken Feast", treat: "chicken_drum", qty: 1 },
+  ];
+
+  const handlePresentOpened = (index: number) => {
+    const reward = PRESENT_REWARDS[index];
+    if (!reward) return;
+    if ((statsRef.current.openedPresents || []).includes(index)) return;
+    setStats((prev) => {
+      if ((prev.openedPresents || []).includes(index)) return prev;
+      const treats = { ...(prev.treatsInventory || {}) };
+      if (reward.treat) {
+        treats[reward.treat] = (treats[reward.treat] || 0) + (reward.qty || 1);
+      }
+      return {
+        ...prev,
+        treatsInventory: treats,
+        coins: prev.coins + (reward.coins || 0),
+        openedPresents: [...(prev.openedPresents || []), index],
+        happiness: Math.min(100, prev.happiness + 8),
+      };
+    });
+    confetti({ particleCount: 90, spread: 80, origin: { y: 0.55 } });
+    showToast(`🎁 You opened a present: ${reward.label}!`);
+  };
+
   // Leave the tabletop table entirely (close the menu AND any open game).
   const handleLeaveTabletop = () => {
     setShowTabletopMenu(false);
@@ -2115,7 +2534,7 @@ export default function App() {
     if (!alreadyLinked) {
       setStats((prev) => {
         const nextXp = prev.xp + 100;
-        const newLevel = Math.floor(nextXp / 100) + 1;
+        const newLevel = levelFromXp(nextXp);
         return {
           ...prev,
           linkedAccount: acc,
@@ -2421,6 +2840,7 @@ export default function App() {
         <PetChatModal
           petStats={stats}
           holiday={holiday}
+          language={language}
           onSecretCodeFound={handleSecretCodeFound}
           onClose={() => setShowChatModal(false)}
           onTriggerDogAction={(act) => {
@@ -2757,15 +3177,23 @@ export default function App() {
         />
       )}
 
-      {/* House Shop Modal: bed, accessories, toys + lumberjack axe tools */}
+      {/* House Shop Modal: bed colours & floor toys (clothes moved to the city Boutique) */}
       {showShopModal && (
         <HouseShopModal
           stats={stats}
           onClose={() => setShowShopModal(false)}
           onUpdateBedColors={handleUpdateBedColors}
-          onBuyAccessory={handleBuyAccessory}
-          onEquipAccessory={handleEquipAccessory}
           onBuyToy={handleBuyToy}
+        />
+      )}
+
+      {/* Tool Store counter menu: "Do you want to buy an Axe?" */}
+      {showToolShop && (
+        <ToolShopModal
+          coins={stats.coins}
+          ownsAxe={(stats.ownedTools || []).includes("axe")}
+          onBuyAxe={handleBuyAxe}
+          onClose={() => setShowToolShop(false)}
         />
       )}
 
@@ -2939,6 +3367,50 @@ export default function App() {
           dogName={stats.name}
           initialStory={story}
           onClose={() => setShowStoryBook(false)}
+        />
+      )}
+
+      {/* Café: 3D-styled bottom-sheet menu when Happy sits down */}
+      {showCafeMenu && (
+        <CafeMenuModal
+          coins={stats.coins}
+          place={cafePlace}
+          onOrder={handleCafeOrder}
+          onClose={() => setShowCafeMenu(false)}
+        />
+      )}
+
+      {/* Town Hall: Bruno the clerk dog's game tutorial */}
+      {showTutorial && (
+        <TutorialModal dogName={stats.name} onClose={() => setShowTutorial(false)} />
+      )}
+
+      {/* The little path machine: Multiplayer group menu (design-only for now) */}
+      {showMultiplayerMenu && (
+        <MultiplayerManager
+          stage="menu"
+          snapshot={null}
+          youId={null}
+          error={mpMenuError}
+          searchingCode={null}
+          overlayVisible={false}
+          showMembers={false}
+          showScoreboard={false}
+          onCreate={() => {
+            setMpGroupSize(4);
+            setMpMenuError("Preview: your group of 4 has its convoy parked in the park! 🚗 Real group servers go live when you host one.");
+          }}
+          onJoin={() => {
+            setMpGroupSize(2);
+            setMpMenuError("Preview: joined a group of 2 — two convoy cars are waiting in the park! 🚗 Real servers go live when a host is online.");
+          }}
+          onCancelSearch={() => setMpMenuError(null)}
+          onLeave={() => setShowMultiplayerMenu(false)}
+          onStartExpedition={() => {}}
+          onEnterWorld={() => {}}
+          onCloseMenu={() => setShowMultiplayerMenu(false)}
+          onToggleMembers={() => {}}
+          onToggleScoreboard={() => {}}
         />
       )}
     </div>

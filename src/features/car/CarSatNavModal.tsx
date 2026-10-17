@@ -1,7 +1,7 @@
 import React from "react";
-import { X, ShoppingCart, Cake, Home } from "lucide-react";
+import { X, ShoppingCart, Cake, Home, Plane } from "lucide-react";
 
-export type CarDestination = "supermarket" | "cakestore";
+export type CarDestination = "supermarket" | "cakestore" | "airport";
 
 interface CarSatNavModalProps {
   /** Chosen stop: the Supermarket lot or the lot behind the Cake Store. */
@@ -102,6 +102,20 @@ export const CarSatNavModal: React.FC<CarSatNavModalProps> = ({ onPick, onCancel
                   <span className="block font-black text-sm text-pink-100">Cake Store</span>
                   <span className="block text-[11px] text-slate-400 font-bold">
                     Drive around the pink shop &amp; park right behind it
+                  </span>
+                </span>
+              </button>
+              <button
+                onClick={() => onPick("airport")}
+                className="w-full flex items-center gap-3 p-3 rounded-2xl bg-white/5 hover:bg-sky-500/15 border border-white/10 hover:border-sky-400/60 transition-all cursor-pointer active:scale-[0.99] text-left"
+              >
+                <span className="w-11 h-11 rounded-xl bg-sky-500/20 border border-sky-400/30 flex items-center justify-center shrink-0">
+                  <Plane className="w-5 h-5 text-sky-300" />
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className="block font-black text-sm text-sky-100">Airport</span>
+                  <span className="block text-[11px] text-slate-400 font-bold">
+                    West past the fountain &amp; park under the big roof
                   </span>
                 </span>
               </button>

@@ -26,10 +26,19 @@ import {
   resetAudioSchedule,
 } from "../../utils/geminiLiveVoice";
 import { VoiceJournal } from "./VoiceJournal";
+import type { LanguageId } from "../i18n/i18n";
+import {
+  getCommunityButtonLabel,
+  getCommunityCaption,
+  getCommunityGreeting,
+  getCommunityInvite,
+  getCommunityLink,
+} from "../community/community";
 
 interface PetChatModalProps {
   petStats: PetStats;
   holiday?: HolidayId;
+  language?: LanguageId;
   onSecretCodeFound?: (codeId: string) => void;
   onClose: () => void;
   onTriggerDogAction: (action: DogAction) => void;
@@ -52,21 +61,30 @@ const QUICK_PROMPTS = [
 export const PetChatModal: React.FC<PetChatModalProps> = ({
   petStats,
   holiday = "none" as HolidayId,
+  language = "en-US" as LanguageId,
   onSecretCodeFound,
   onClose,
   onTriggerDogAction,
 }) => {
   const [activeTab, setActiveTab] = useState<"chat" | "live" | "journal">("chat");
   const holidayMeta = getHolidayMeta(holiday);
+  const communityLink = getCommunityLink(language);
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "initial",
       sender: "dog",
       text:
-        (holidayMeta?.chatGreeting ??
-          `*Perks up floppy ears eagerly, smiling with a happy tail wag* Woof! Hey best friend! I'm ${petStats.name}! What are we going to do together today?`
-        ).replace("{name}", petStats.name),
+        (holidayMeta?.chatGreeting ?? getCommunityGreeting(language, petStats.name)).replace(
+          "{name}",
+          petStats.name
+        ),
       timestamp: Date.now(),
+    },
+    {
+      id: "community",
+      sender: "dog",
+      text: getCommunityInvite(language),
+      timestamp: Date.now() + 1,
     },
   ]);
   const [inputText, setInputText] = useState<string>("");
@@ -479,6 +497,32 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
         ) : (
           /* TEXT & COMMANDS STREAM */
           <>
+            {/* Happy's community channel — press to join */}
+            <a
+              href={communityLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => {
+                e.preventDefault();
+                window.open(communityLink, "_blank", "noopener,noreferrer");
+              }}
+              className="flex items-center gap-3 px-4 py-2.5 bg-[#128C7E] hover:bg-[#0f7a6d] text-white transition-colors cursor-pointer"
+            >
+              <span className="w-8 h-8 rounded-full bg-white/15 flex items-center justify-center text-lg shrink-0">
+                💬
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-xs font-black leading-tight">
+                  {getCommunityButtonLabel(language)}
+                </span>
+                <span className="block text-[10px] text-white/80 font-medium">
+                  {getCommunityCaption(language)}
+                </span>
+              </span>
+              <span className="text-[10px] font-black bg-white/15 px-2 py-1 rounded-full shrink-0">
+                {language.toLowerCase().startsWith("de") ? "DE" : "EN"}
+              </span>
+            </a>
             <div className="flex-1 p-4 overflow-y-auto space-y-3 bg-[#F2E8CF]/60">
               {messages.map((m) => {
                 const isDog = m.sender === "dog";
@@ -518,7 +562,31 @@ export const PetChatModal: React.FC<PetChatModalProps> = ({
                               );
                             }
                             const clean = segment.replace(/\[ACTION:[^\]]+\]/g, "");
-                            return <span key={`${m.id}-text-${idx}`}>{clean}</span>;
+                            // Make any channel URLs tappable inside the bubble.
+                            const parts = clean.split(/(https?:\/\/[^\s]+)/g);
+                            return (
+                              <span key={`${m.id}-text-${idx}`} className="whitespace-pre-line">
+                                {parts.map((part, pi) =>
+                                  /^https?:\/\//.test(part) ? (
+                                    <a
+                                      key={`${m.id}-link-${idx}-${pi}`}
+                                      href={part}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        window.open(part, "_blank", "noopener,noreferrer");
+                                      }}
+                                      className="inline-flex items-center gap-1 font-bold text-[#128C7E] underline decoration-dotted break-all cursor-pointer"
+                                    >
+                                      {part}
+                                    </a>
+                                  ) : (
+                                    <React.Fragment key={`${m.id}-frag-${idx}-${pi}`}>{part}</React.Fragment>
+                                  )
+                                )}
+                              </span>
+                            );
                           })}
                           {m.actionTriggered && (
                             <div className="flex items-center gap-1 text-[11px] font-bold text-[#386641] bg-[#A7C957]/40 border border-[#6A994E]/40 px-2 py-0.5 rounded-full mt-1.5 w-fit">

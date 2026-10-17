@@ -169,13 +169,16 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   const isCity = viewMode === "city";
   const isArcade = viewMode === "arcade";
   const isCakeStore = viewMode === "cakestore";
-  const isAway = isCity || isArcade || isCakeStore; // away-from-home worlds (city, arcade & cake store)
+  const isCafe = viewMode === "cafe";
+  const isAway = isCity || isArcade || isCakeStore || isCafe; // away-from-home worlds
   const isKitchen = isHouse && houseRoom === "kitchen";
   const isHallway = isHouse && houseRoom === "hallway";
   const isBathroom = isHouse && houseRoom === "bathroom";
   const isBedroom = isHouse && houseRoom === "upstairs";
   const roomLabel = isCakeStore
     ? "🎂 Cake Store"
+    : isCafe
+    ? "☕ Café"
     : isArcade
     ? "🌌 Galaxy Arcade"
     : isCity
@@ -259,12 +262,21 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
                     <Flame className="w-3 h-3 text-orange-500 fill-orange-400" /> {streakDays}d
                   </span>
                 )}
-                <span
-                  title={getEmotionMeta(emotion).blurb}
-                  className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${getEmotionMeta(emotion).badge}`}
-                >
-                  {getEmotionMeta(emotion).emoji} {stats.name} feels {getEmotionMeta(emotion).label}
-                </span>
+                {illnessId === "cold" ? (
+                  <span
+                    title="Happy got soaked in the rain and caught a cold. A glass of chocolate milk will fix it!"
+                    className="text-[10px] font-black px-2 py-0.5 rounded-full border bg-sky-100 text-sky-800 border-sky-300"
+                  >
+                    🤧 {stats.name} has a cold — wants chocolate milk
+                  </span>
+                ) : (
+                  <span
+                    title={getEmotionMeta(emotion).blurb}
+                    className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${getEmotionMeta(emotion).badge}`}
+                  >
+                    {getEmotionMeta(emotion).emoji} {stats.name} feels {getEmotionMeta(emotion).label}
+                  </span>
+                )}
               </div>
 
               {/* Coin Rewards / Shop */}

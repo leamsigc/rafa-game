@@ -4,6 +4,7 @@ import { DogAction, DogBreed, BedColors, HouseViewMode, HouseRoom } from "../../
 import type { TabletopGameId } from "../tabletop/tabletopData";
 import { getCurrentSeason } from "../seasonal/holidays";
 import { sound } from "../../utils/audio";
+import { CLOTHING_CATALOG } from "../clothing/clothingData";
 
 /**
  * Optional real "Star" logo. Drop the artwork into the repo as
@@ -90,6 +91,9 @@ export class ParkScene {
   // The little car (parked in front of the house — drives to the City!)
   private carGroup: THREE.Group = new THREE.Group();
   private carWheels: THREE.Object3D[] = [];
+  // Multiplayer convoy: one friendly car per extra group member.
+  private convoyGroup: THREE.Group = new THREE.Group();
+  private convoyCars: THREE.Group[] = [];
   private carRide: {
     phase: "none" | "hopIn" | "driveToCity" | "cityDrive" | "driveHome" | "highwayToCity" | "lotPullIn" | "highwayHome" | "homeArrival";
     midwayFired: boolean;
@@ -103,9 +107,9 @@ export class ParkScene {
   // ---- Car sat-nav: choose the stop before driving off -------------------
   // The dashboard sat-nav pops up after Happy walks to the car and offers
   // two stops: the Supermarket lot or the new lot BEHIND the Cake Store.
-  public carDestination: "supermarket" | "cakestore" = "supermarket";
+  public carDestination: "supermarket" | "cakestore" | "airport" = "supermarket";
   /** Where the car is currently parked in the city (picks the way home). */
-  private carParkedLot: "supermarket" | "cakestore" = "supermarket";
+  private carParkedLot: "supermarket" | "cakestore" | "airport" = "supermarket";
   private satNavPending = false;
   public onCarSatNav?: () => void;
   public onCarRideMidway?: () => void;
@@ -149,6 +153,122 @@ export class ParkScene {
   public onCakeStoreClicked?: () => void;
   public onStoreDogTalked?: () => void;
   public onCakeStoreExited?: () => void;
+
+  // ---- NEW CITY DISTRICT: interactive benches + working street lamps ----
+  // Benches you can actually rest on — all of them out in the city.
+  private benches: { group: THREE.Group; x: number; z: number; world: "park" | "city" }[] = [];
+  public onBenchRest?: () => void;
+  // Street lamps whose shades really light the street after sunset.
+  private streetLamps: { light: THREE.PointLight; bulb: THREE.Mesh; mat: THREE.MeshStandardMaterial }[] = [];
+  private lampFlickerT = 0;
+
+  // ---- MUSIC SCHOOL (playable instruments) ----
+  private musicSchoolGroup: THREE.Group = new THREE.Group();
+  private musicSchoolInteriorGroup: THREE.Group = new THREE.Group();
+  private musicSchoolFloorMesh!: THREE.Mesh;
+  private musicSchoolDoorMesh!: THREE.Mesh;
+  private instruments: {
+    kind: "piano" | "guitar" | "drum" | "xylophone" | "flute";
+    label: string;
+    mesh: THREE.Object3D;
+  }[] = [];
+  public onMusicSchoolClicked?: () => void;
+  public onMusicSchoolExited?: () => void;
+  public onInstrumentPlayed?: (label: string) => void;
+  // Floating music-note sprites above a played instrument
+  private noteSprites: { sprite: THREE.Sprite; vy: number; life: number; spin: number }[] = [];
+
+  // ---- TOWN HALL (the clerk dog gives the whole game tutorial) ----
+  private townHallGroup: THREE.Group = new THREE.Group();
+  private townHallInteriorGroup: THREE.Group = new THREE.Group();
+  private townHallFloorMesh!: THREE.Mesh;
+  private townHallDoorMesh!: THREE.Mesh;
+  private clerkDog: Dog3D | null = null;
+  private clerkBubble: THREE.Sprite | null = null;
+  private clerkBubbleTimer = 0;
+  public onTownHallClicked?: () => void;
+  public onTownHallExited?: () => void;
+  public onClerkTalked?: () => void;
+
+  // ---- LIBRARY (interactive story books) ----
+  private libraryGroup: THREE.Group = new THREE.Group();
+  private libraryInteriorGroup: THREE.Group = new THREE.Group();
+  private libraryFloorMesh!: THREE.Mesh;
+  private libraryDoorMesh!: THREE.Mesh;
+  private libraryGlowBooks: THREE.Object3D[] = [];
+  private libraryFairyLights: THREE.PointLight[] = [];
+  public onLibraryClicked?: () => void;
+  public onLibraryExited?: () => void;
+  public onBookPicked?: () => void;
+
+  // ---- BOUTIQUE ROW HOUSES (neighbours + Halloween trick-or-treat) ----
+  private boutiqueHouseDoors: { mesh: THREE.Mesh; name: string; index: number }[] = [];
+  private boutiqueHouseWindows: THREE.MeshStandardMaterial[] = [];
+  private boutiqueHousePumpkins: THREE.Object3D[] = [];
+  private trickOrTreated = new Set<number>();
+  private treatBubble: THREE.Sprite | null = null;
+  private treatBubbleTimer = 0;
+  public onTrickOrTreat?: (houseName: string, firstVisit: boolean) => void;
+
+  // ---- CLOTHING BOUTIQUE (3D hat mannequins — the only place to buy wearables) ----
+  private clothingStoreGroup: THREE.Group = new THREE.Group();
+  private clothingStoreInteriorGroup: THREE.Group = new THREE.Group();
+  private clothingStoreFloorMesh!: THREE.Mesh;
+  private clothingStoreDoorMesh!: THREE.Mesh;
+  private clothingMannequins: { id: string; mat: THREE.MeshStandardMaterial }[] = [];
+  public onClothingStoreClicked?: () => void;
+  public onClothingStoreExited?: () => void;
+  public onClothingItemClicked?: (id: string) => void;
+
+  // ---- TOOL STORE (buy an axe, then chop the woodpile for coins) ----
+  private toolStoreGroup: THREE.Group = new THREE.Group();
+  private toolStoreInteriorGroup: THREE.Group = new THREE.Group();
+  private toolStoreFloorMesh!: THREE.Mesh;
+  private toolStoreDoorMesh!: THREE.Mesh;
+  private toolStoreDog: Dog3D | null = null;
+  private axeDisplayGroup: THREE.Group = new THREE.Group();
+  private choppingBlockGroup: THREE.Group = new THREE.Group();
+  private chopCooldown = 0;
+  private woodChips: { mesh: THREE.Mesh; vel: THREE.Vector3; spin: THREE.Vector3; life: number }[] = [];
+  public hasAxe = false;
+  public onToolStoreClicked?: () => void;
+  public onToolStoreExited?: () => void;
+  public onAxeClicked?: () => void;
+  public onChopLog?: () => void;
+
+  // ---- CAFE (outdoor patio + full interior, tea/coffee/cake menu) ----
+  private cafeGroup: THREE.Group = new THREE.Group();
+  private cafeInteriorGroup: THREE.Group = new THREE.Group();
+  private cafeFloorMesh!: THREE.Mesh;
+  private cafeDoorMesh!: THREE.Mesh;
+  private cafeCounterGroup: THREE.Group = new THREE.Group();
+  private cafeBarista: Dog3D | null = null;
+  private cafeOutdoorSeats: { group: THREE.Group; x: number; z: number; rot: number }[] = [];
+  private cafeIndoorSeats: { group: THREE.Group; x: number; z: number; rot: number }[] = [];
+  private cafeTalkDogs: { model: Dog3D; lines: { woof: string; meaning: string }[]; idx: number }[] = [];
+  private cafeBubble: THREE.Sprite | null = null;
+  private cafeBubbleTimer = 0;
+  private cafeTalkCooldown = 0;
+  public onCafeClicked?: () => void;
+  public onCafeExited?: () => void;
+  public onCafeSit?: (place: "patio" | "inside") => void;
+  public onCafeDogTalked?: () => void;
+
+  // ---- AIRPORT (big terminal, covered parking, control towers, runway) ----
+  private airportGroup: THREE.Group = new THREE.Group();
+  private airportDoorMesh!: THREE.Mesh;
+  private airportPlanes: { group: THREE.Group; offset: number; speed: number }[] = [];
+  private airportBlinkers: THREE.MeshStandardMaterial[] = [];
+  public onAirportClicked?: () => void;
+
+  // ---- PRESENT TABLE in the Cake Store (4 NPC birthday presents) ----
+  private presentTableGroup: THREE.Group = new THREE.Group();
+  private presents: { group: THREE.Group; lid: THREE.Group; opened: boolean; baseLidY: number }[] = [];
+  private presentLidAnims: { lid: THREE.Group; t: number; baseY: number }[] = [];
+  private presentBursts: { sprite: THREE.Sprite; vy: number; life: number }[] = [];
+  private presentCamLock = false;
+  private openedPresentIdx: number[] = [];
+  public onPresentOpened?: (index: number) => void;
 
   // ---- Strolling city dog NPCs in the fountain park (they only WOOF!) ----
   private cityNpcs: CityNpc[] = [];
@@ -221,6 +341,10 @@ export class ParkScene {
   // Trees are never interactive: they cannot be chopped or picked in ANY
   // world, and hidden copies in the City / Galaxy Arcade are unreachable.
   private treeGroups: THREE.Group[] = [];
+  /** Choppable park trees: alive flag + respawn timer + original scale. */
+  private treeData: { id: string; alive: boolean; respawnAt: number; baseScale: number }[] = [];
+  public onTreeChopped?: (treeId: string) => void;
+  public onTreeClickedNoAxe?: () => void;
   private forestBorderGroup: THREE.Group = new THREE.Group();
   // Cooking-ready beacon above the dog house (red highlight + pot icon)
   private cookBeaconGroup: THREE.Group = new THREE.Group();
@@ -503,7 +627,7 @@ export class ParkScene {
     // 2. Camera setup
     const width = container.clientWidth || 800;
     const height = container.clientHeight || 600;
-    this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
+    this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 400);
 
     // 3. Renderer setup
     this.renderer = new THREE.WebGLRenderer({
@@ -543,6 +667,7 @@ export class ParkScene {
     // The City (park + supermarket + gym), the little car & the Galaxy Arcade
     this.setupCity();
     this.setupCakeStoreInterior();
+    this.setupCivicDistrict();
     this.buildCar();
     this.setupGalaxyArcade();
     this.setupHighway();
@@ -577,6 +702,12 @@ export class ParkScene {
     this.scene.add(this.bathroomGroup);
     this.scene.add(this.cityGroup);
     this.scene.add(this.cakeStoreInteriorGroup);
+    this.scene.add(this.musicSchoolInteriorGroup);
+    this.scene.add(this.townHallInteriorGroup);
+    this.scene.add(this.libraryInteriorGroup);
+    this.scene.add(this.clothingStoreInteriorGroup);
+    this.scene.add(this.toolStoreInteriorGroup);
+    this.scene.add(this.cafeInteriorGroup);
     this.scene.add(this.galaxyGroup);
     this.houseGroup.visible = false; // Initially outdoors
     this.kitchenGroup.visible = false;
@@ -585,6 +716,12 @@ export class ParkScene {
     this.bathroomGroup.visible = false;
     this.cityGroup.visible = false;
     this.cakeStoreInteriorGroup.visible = false;
+    this.musicSchoolInteriorGroup.visible = false;
+    this.townHallInteriorGroup.visible = false;
+    this.libraryInteriorGroup.visible = false;
+    this.clothingStoreInteriorGroup.visible = false;
+    this.toolStoreInteriorGroup.visible = false;
+    this.cafeInteriorGroup.visible = false;
     this.galaxyGroup.visible = false;
 
     // 9. Dog model
@@ -657,7 +794,7 @@ export class ParkScene {
   private setupSky() {
     // Green-and-blue forest sky: blue up top melting into soft green at the
     // horizon so the treeline blends naturally into the sky.
-    const skyGeom = new THREE.SphereGeometry(60, 32, 24);
+    const skyGeom = new THREE.SphereGeometry(140, 32, 24);
     const skyMat = new THREE.MeshBasicMaterial({
       map: this.makeSkyGradientTexture("#4aa8ec", "#a8e0c8"),
       side: THREE.BackSide,
@@ -835,6 +972,42 @@ export class ParkScene {
     g.traverse((o) => {
       o.userData = { type: "mpMachine" };
     });
+
+    // ---- Generous click area -------------------------------------------------
+    // The machine itself is small and up on its landing, which made it fiddly
+    // to tap. Add a big glowing "interaction pad" at the base plus a roomy
+    // invisible hitbox so the whole footprint opens the multiplayer menu.
+    const pad = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.35, 1.45, 0.06, 28),
+      new THREE.MeshStandardMaterial({
+        color: 0x8b5cf6,
+        emissive: 0x8b5cf6,
+        emissiveIntensity: 0.55,
+        transparent: true,
+        opacity: 0.55,
+        roughness: 0.35,
+      })
+    );
+    pad.position.y = 0.03;
+    pad.userData = { type: "mpMachine" };
+    g.add(pad);
+    const padRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1.38, 0.06, 10, 40),
+      new THREE.MeshStandardMaterial({ color: 0xfacc15, emissive: 0xfacc15, emissiveIntensity: 0.7 })
+    );
+    padRing.rotation.x = Math.PI / 2;
+    padRing.position.y = 0.07;
+    padRing.userData = { type: "mpMachine" };
+    g.add(padRing);
+    // Invisible box: not rendered, but raycastable, so a wide tap still works.
+    const hitbox = new THREE.Mesh(
+      new THREE.BoxGeometry(3.4, 3.0, 3.4),
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false })
+    );
+    hitbox.position.y = 1.2;
+    hitbox.userData = { type: "mpMachine" };
+    g.add(hitbox);
+
     this.multiplayerMachineGroup = g;
     this.parkGroup.add(g);
   }
@@ -1837,19 +2010,22 @@ export class ParkScene {
     ];
 
     this.treeGroups = [];
+    this.treeData = [];
     treePositions.forEach(([x, y, z], i) => {
       const baseScale = 0.9 + ((i * 37) % 30) / 100;
       const tree = this.makeOneTree(baseScale, i % 3 === 0);
       tree.position.set(x, y, z);
       const id = `tree${i}`;
-      tree.userData = { type: "scenery" };
+      // Choppable with the Lumberjack Axe (only in the park overworld — the
+      // click handler is scoped to park mode, so hidden trees can never be
+      // felled from the city / arcade).
+      tree.userData = { type: "tree", treeId: id };
       tree.traverse((c) => {
-        c.userData = { type: "scenery" };
+        c.userData = { type: "tree", treeId: id };
       });
       this.parkGroup.add(tree);
       this.treeGroups.push(tree);
-      // NOTE: intentionally NOT registered as editable and NOT tagged as a
-      // "tree" hit target — trees are decoration only.
+      this.treeData.push({ id, alive: true, respawnAt: 0, baseScale });
     });
 
     // ---- Distant forest border: little trees ringing the back + sides ----
@@ -4738,6 +4914,64 @@ export class ParkScene {
     this.scene.add(car);
   }
 
+  /**
+   * Multiplayer convoy: for a group of `n` dogs, park `n - 1` friend cars in a
+   * row behind Happy's car. Each car gets its own colour so every pup in the
+   * group is easy to spot. Called by React with the live group size; with no
+   * group (n <= 0) the convoy is hidden entirely.
+   */
+  public setConvoySize(n: number) {
+    const wanted = Math.max(0, Math.min(4, Math.floor(n)));
+    this.convoyGroup.visible = wanted > 0;
+    if (this.convoyCars.length === 0) {
+      this.convoyGroup.position.set(0, 0, 0);
+      this.scene.add(this.convoyGroup);
+    }
+    const palette = [0x3b82f6, 0xfacc15, 0xa855f7, 0x22c55e];
+    const cabins = [0xbfdbfe, 0xfef3c7, 0xe9d5ff, 0xbbf7d0];
+    while (this.convoyCars.length < wanted) {
+      const idx = this.convoyCars.length;
+      const car = new THREE.Group();
+      const bodyMat = new THREE.MeshStandardMaterial({ color: palette[idx], roughness: 0.35, metalness: 0.25 });
+      const cabMat = new THREE.MeshStandardMaterial({ color: cabins[idx], roughness: 0.25, metalness: 0.3 });
+      const tireMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.9 });
+      const body = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.6, 2.7), bodyMat);
+      body.position.y = 0.6;
+      body.castShadow = true;
+      car.add(body);
+      const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.24, 0.5, 1.2), cabMat);
+      cabin.position.set(0, 1.1, 0.2);
+      cabin.castShadow = true;
+      car.add(cabin);
+      [[-0.78, 0.95], [0.78, 0.95], [-0.78, -0.95], [0.78, -0.95]].forEach(([wx, wz]) => {
+        const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.22, 12), tireMat);
+        wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(wx, 0.3, wz);
+        car.add(wheel);
+      });
+      // Soft headlight glows so the convoy reads as "ready to roll"
+      [-0.4, 0.4].forEach((lx) => {
+        const light = new THREE.Mesh(
+          new THREE.SphereGeometry(0.07, 8, 8),
+          new THREE.MeshStandardMaterial({ color: 0xfff7cc, emissive: 0xffe082, emissiveIntensity: 0.8 })
+        );
+        light.position.set(lx, 0.6, 1.36);
+        car.add(light);
+      });
+      const f = this.convoyCars.length; // 0-based slot
+      car.position.set(-9.2 + f * 2.9, 0, 12.6);
+      car.rotation.y = 0;
+      car.userData = { type: "convoyCar" };
+      car.traverse((c) => (c.userData = { type: "convoyCar" }));
+      car.visible = true;
+      this.convoyGroup.add(car);
+      this.convoyCars.push(car);
+    }
+    this.convoyCars.forEach((car, i) => {
+      car.visible = i < wanted;
+    });
+  }
+
   /** Click the parked car: Happy walks over and the dashboard sat-nav opens. */
   public startCarRideToCity() {
     if (this.viewMode !== "park" || this.carRide.phase !== "none" || this.satNavPending) return;
@@ -4753,7 +4987,7 @@ export class ParkScene {
   }
 
   /** The sat-nav destination was picked — hop in and roll out of the park. */
-  public startCarRideWithDestination(dest: "supermarket" | "cakestore") {
+  public startCarRideWithDestination(dest: "supermarket" | "cakestore" | "airport") {
     if (this.viewMode !== "park" || !this.satNavPending) return;
     this.satNavPending = false;
     this.carDestination = dest;
@@ -4791,6 +5025,21 @@ export class ParkScene {
           new THREE.Vector3(4.4, 0, 0),
           new THREE.Vector3(4.35, 0, 8.6),
           new THREE.Vector3(3.2, 0, 11),
+          new THREE.Vector3(3, 0, 16),
+          new THREE.Vector3(3, 0, 26),
+        ];
+      } else if (this.carParkedLot === "airport") {
+        // Back out of the covered bay, out to the airport road, then east to
+        // the street and south home through the forest.
+        this.carPath = [
+          new THREE.Vector3(-44, 0, -12),
+          new THREE.Vector3(-40, 0, -5),
+          new THREE.Vector3(-34, 0, 0),
+          new THREE.Vector3(-26, 0, 1),
+          new THREE.Vector3(-16, 0, 1),
+          new THREE.Vector3(-6, 0, 1),
+          new THREE.Vector3(2.4, 0, 1.8),
+          new THREE.Vector3(3.4, 0, 6),
           new THREE.Vector3(3, 0, 16),
           new THREE.Vector3(3, 0, 26),
         ];
@@ -4973,6 +5222,23 @@ export class ParkScene {
         new THREE.Vector3(17.0, 0, -33.55),
         new THREE.Vector3(21.2, 0, -33.55),
       ];
+    } else if (this.carDestination === "airport") {
+      // Roll north, hang a left off the street onto the airport road, cruise
+      // west past the fountain and the music school, then into the COVERED
+      // airport car park and nose into a bay under the roof.
+      this.carPath = [
+        new THREE.Vector3(3, 0, 11),
+        new THREE.Vector3(3.4, 0, 9.2),
+        new THREE.Vector3(3.6, 0, 4),
+        new THREE.Vector3(2.4, 0, 1.6),
+        new THREE.Vector3(-6, 0, 1),
+        new THREE.Vector3(-16, 0, 1),
+        new THREE.Vector3(-26, 0, 1),
+        new THREE.Vector3(-34, 0, 0),
+        new THREE.Vector3(-40, 0, -6),
+        new THREE.Vector3(-44, 0, -13),
+        new THREE.Vector3(-44, 0, -20),
+      ];
     } else {
       // Roll up the street, swing into the lot driveway, cruise down the lane
       // PAST the blue, yellow and purple cars, then nose into the free spot.
@@ -5054,6 +5320,15 @@ export class ParkScene {
           // the pink shop's east side all read — never inside the shop!
           this.spherical.set(12.5, 0.95, -0.35);
           this.cameraTarget.set(20.9, 1.2, -30.6);
+        } else if (this.carDestination === "airport") {
+          // Parked under the covered airport car park — step out beside the
+          // car and frame the long terminal wall + control towers.
+          this.carParkedLot = "airport";
+          this.carGroup.rotation.y = Math.PI; // nose-in along the bay
+          this.dog.group.position.set(-41.5, 0, -15.5);
+          this.dog.group.rotation.y = -Math.PI / 2;
+          this.spherical.set(12.0, 1.05, -1.1);
+          this.cameraTarget.set(-36.5, 2.0, -16.5);
         } else {
           // Parked in the hedge lot by the supermarket: Happy hops out in
           // the lane beside his car and the blue/yellow/purple neighbours.
@@ -5122,9 +5397,9 @@ export class ParkScene {
     const groundTex = new THREE.CanvasTexture(groundCanvas);
     groundTex.wrapS = THREE.RepeatWrapping;
     groundTex.wrapT = THREE.RepeatWrapping;
-    groundTex.repeat.set(12, 12);
+    groundTex.repeat.set(20, 20);
     this.cityGroundMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(96, 96),
+      new THREE.PlaneGeometry(160, 160),
       new THREE.MeshStandardMaterial({ map: groundTex, roughness: 0.95 })
     );
     this.cityGroundMesh.geometry.rotateX(-Math.PI / 2);
@@ -5187,6 +5462,50 @@ export class ParkScene {
       p.userData = { type: "city_floor" };
       park.add(p);
     });
+    // ---- Strolling paths: fountain ➜ Music School, and the safe crossing ----
+    // A walkway links the plaza to the Music School door in the south-west.
+    [
+      [-5, 6.5, 1.6, 11],   // plaza ➜ south, past the flower beds
+      [-9.25, 11, 8.5, 1.6], // then west ➜ Music School steps
+    ].forEach(([x, z, w, d]) => {
+      const p = new THREE.Mesh(new THREE.PlaneGeometry(w, d), pathMat);
+      p.geometry.rotateX(-Math.PI / 2);
+      p.position.set(x, 0.06, z);
+      p.userData = { type: "city_floor" };
+      park.add(p);
+    });
+    // The little path from the fountain's north side up to the street...
+    const crossPath = new THREE.Mesh(new THREE.PlaneGeometry(5.8, 1.6), pathMat);
+    crossPath.geometry.rotateX(-Math.PI / 2);
+    crossPath.position.set(-2.2, 0.06, -8.4);
+    crossPath.userData = { type: "city_floor" };
+    park.add(crossPath);
+    // ...then the ONE zebra crossing in town, carrying dogs safely over the
+    // street to the supermarket side.
+    {
+      const zebra = new THREE.Group();
+      const stripeMat = new THREE.MeshBasicMaterial({ color: 0xf8fafc });
+      const startX = 0.6;
+      for (let i = 0; i < 6; i++) {
+        const stripe = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 3.1), stripeMat);
+        stripe.geometry.rotateX(-Math.PI / 2);
+        stripe.position.set(startX + i * 0.95, 0.045, -8.4);
+        stripe.userData = { type: "city_floor" };
+        zebra.add(stripe);
+      }
+      city.add(zebra);
+    }
+    // Path on the far side of the crossing, running up to the supermarket door.
+    [
+      [9.4, -8.4, 6.6, 1.6],
+      [12.6, -6.6, 1.6, 3.6],
+    ].forEach(([x, z, w, d]) => {
+      const p = new THREE.Mesh(new THREE.PlaneGeometry(w, d), pathMat);
+      p.geometry.rotateX(-Math.PI / 2);
+      p.position.set(x, 0.06, z);
+      p.userData = { type: "city_floor" };
+      city.add(p);
+    });
     // Fountain centerpiece
     const fountain = new THREE.Group();
     const fBase = new THREE.Mesh(
@@ -5210,22 +5529,10 @@ export class ParkScene {
     fountain.position.set(-5, 0, 1);
     park.add(fountain);
     // Benches, lamps, flower beds & trees around the plaza
-    const benchMat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.7 });
+    // (Benches are INTERACTIVE: Happy can walk over and rest on them.)
     [
       [-8.5, -1.8, 0], [-1.5, -1.8, 0], [-8.5, 3.8, Math.PI], [-1.5, 3.8, Math.PI],
-    ].forEach(([x, z, r]) => {
-      const bench = new THREE.Group();
-      const seat = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.1, 0.5), benchMat);
-      seat.position.y = 0.45;
-      bench.add(seat);
-      const back = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.5, 0.08), benchMat);
-      back.position.set(0, 0.7, -0.22);
-      bench.add(back);
-      bench.position.set(x, 0, z);
-      bench.rotation.y = r;
-      bench.traverse((c) => (c.castShadow = true));
-      park.add(bench);
-    });
+    ].forEach(([x, z, r]) => this.addBench(this.cityGroup, x, z, r, "city"));
     const lampMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.6, roughness: 0.4 });
     [[-10, -2.5], [0, -2.5], [-10, 4.5], [0, 4.5]].forEach(([x, z]) => {
       const lamp = new THREE.Group();
@@ -5258,12 +5565,15 @@ export class ParkScene {
         park.add(fl);
       }
     });
-    [[-12.5, -3], [-12.5, 5], [2.5, 7.5]].forEach(([x, z], i) => {
+    [[-19.0, -4.5], [-12.5, 5]].forEach(([x, z], i) => {
       const tree = this.makeOneTree(0.8 + i * 0.06, i % 2 === 0);
       tree.position.set(x, 0, z);
       park.add(tree);
     });
     city.add(park);
+
+    // ---- AIRPORT (west of the music school & gym, behind the city park) ----
+    this.buildAirport();
 
     // ---- Shared sign-maker: rounded canvas plate with emoji + text ----
     const makeSignPlane = (w: number, signText: string, signBg: string, signFg: string) => {
@@ -5292,108 +5602,145 @@ export class ParkScene {
       );
     };
 
-    // ---- SUPERMARKET: long beige market hall with brick roof + corner pillars ----
+    // ---- SUPERMARKET: modern glass-front market hall with a curved canopy ----
     {
       const market = new THREE.Group();
-      const w = 13;          // long facade (east-west)
+      const w = 13;          // facade width (east-west)
       const h = 3.8;         // wall height
-      const d = 6;           // depth
-      const ov = 0.8;        // roof overhang
-      const rh = 1.7;        // ridge height
+      const d = 6;           // depth (north-south)
+      const ov = 0.5;        // roof slab overhang
 
-      const beigeMat = new THREE.MeshStandardMaterial({ color: 0xe4d5ae, roughness: 0.75 });
-      const pillarMat = new THREE.MeshStandardMaterial({ color: 0xcdb98a, roughness: 0.7 });
-      const stoneMat = new THREE.MeshStandardMaterial({ color: 0xb3a077, roughness: 0.8 });
+      const glassMat = new THREE.MeshStandardMaterial({
+        color: 0xbfe6f5, roughness: 0.08, metalness: 0.5,
+        transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+      });
+      const frameMat = new THREE.MeshStandardMaterial({ color: 0xe8e8ec, metalness: 0.5, roughness: 0.35 });
+      const bandMat = new THREE.MeshStandardMaterial({ color: 0x0e7490, roughness: 0.6 });
+      const bandMat2 = new THREE.MeshStandardMaterial({ color: 0x0891b2, roughness: 0.6 });
+      const stoneMat = new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.8 });
 
-      // Walls
-      const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), beigeMat);
-      body.position.y = h / 2;
+      // Solid upper band (walls) with a glass curtain wall below it
+      const body = new THREE.Mesh(new THREE.BoxGeometry(w, h - 2.7, d), bandMat);
+      body.position.y = 2.7 + (h - 2.7) / 2;
       body.castShadow = true;
       body.receiveShadow = true;
       market.add(body);
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(w + 0.06, 0.28, d + 0.06), bandMat2);
+      stripe.position.y = h - 0.14;
+      market.add(stripe);
 
-      // Four corner pillars (with little stone feet + caps)
+      // ---- Glass curtain wall (ground floor) with a doorway gap in the middle ----
+      const glassSegW = (w - 3.3) / 2;
+      [-1, 1].forEach((sx) => {
+        const gf = new THREE.Mesh(new THREE.PlaneGeometry(glassSegW, 2.55), glassMat);
+        gf.position.set(sx * (1.65 + glassSegW / 2), 1.4, d / 2 - 0.02);
+        market.add(gf);
+      });
+      [-1, 1].forEach((sx) => {
+        const glassSide = new THREE.Mesh(new THREE.PlaneGeometry(d - 0.1, 2.55), glassMat);
+        glassSide.rotation.y = (sx * Math.PI) / 2;
+        glassSide.position.set(sx * (w / 2 - 0.02), 1.4, 0);
+        market.add(glassSide);
+      });
+      // ---- Solid BACK wall (north side) — closes the market hall so it is not
+      // see-through from behind. Pale wall panels + a teal trim line.
+      const wallMat = new THREE.MeshStandardMaterial({ color: 0xdbeafe, roughness: 0.9 });
+      const backWall = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.3), wallMat);
+      backWall.position.set(0, h / 2, -d / 2 + 0.15);
+      backWall.castShadow = true;
+      backWall.receiveShadow = true;
+      market.add(backWall);
+      // Vertical panel seams so the back wall reads as a real interior wall
+      [-w / 2 + 1.6, 0, w / 2 - 1.6].forEach((px) => {
+        const seam = new THREE.Mesh(new THREE.BoxGeometry(0.08, h - 0.4, 0.14), frameMat);
+        seam.position.set(px, (h - 0.4) / 2 + 0.2, -d / 2 + 0.32);
+        market.add(seam);
+      });
+      const backTrim = new THREE.Mesh(new THREE.BoxGeometry(w, 0.26, 0.14), bandMat2);
+      backTrim.position.set(0, 2.6, -d / 2 + 0.32);
+      market.add(backTrim);
+      [-2, -1, 1, 2].forEach((i) => {
+        const mull = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.7, 0.16), frameMat);
+        mull.position.set(i * 3.1, 1.4, d / 2 + 0.01);
+        market.add(mull);
+      });
+      [-d / 2 + 1.2, 0, d / 2 - 1.2].forEach((mz) => {
+        [1, -1].forEach((sx) => {
+          const mull = new THREE.Mesh(new THREE.BoxGeometry(0.16, 2.7, 0.12), frameMat);
+          mull.position.set(sx * (w / 2 + 0.01), 1.4, mz);
+          market.add(mull);
+        });
+      });
       [[-w / 2, -d / 2], [w / 2, -d / 2], [-w / 2, d / 2], [w / 2, d / 2]].forEach(([px, pz]) => {
-        const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.5, h, 0.5), pillarMat);
-        pillar.position.set(px, h / 2, pz);
-        pillar.castShadow = true;
-        market.add(pillar);
-        const foot = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.34, 0.72), stoneMat);
-        foot.position.set(px, 0.17, pz);
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.42, h, 0.42), frameMat);
+        post.position.set(px, h / 2, pz);
+        post.castShadow = true;
+        market.add(post);
+        const foot = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.3, 0.6), stoneMat);
+        foot.position.set(px, 0.15, pz);
         market.add(foot);
-        const cap = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.24, 0.72), stoneMat);
-        cap.position.set(px, h - 0.12, pz);
-        market.add(cap);
       });
 
-      // Brick roof: two slanted slabs (brick canvas) meeting at a ridge
-      const brickCanvas = document.createElement("canvas");
-      brickCanvas.width = 256;
-      brickCanvas.height = 128;
-      const bCtx = brickCanvas.getContext("2d")!;
-      bCtx.fillStyle = "#7f3b2d"; // mortar
-      bCtx.fillRect(0, 0, 256, 128);
-      for (let row = 0; row < 8; row++) {
-        const y = row * 16;
-        const offset = (row % 2) * 24;
-        for (let col = 0; col < 6; col++) {
-          const shade = [0xa8553f, 0x9c4c38, 0xb05a42][(row + col) % 3];
-          bCtx.fillStyle = `#${shade.toString(16).padStart(6, "0")}`;
-          bCtx.fillRect(offset + col * 48 - 24, y + 2, 44, 12);
-          if (offset + col * 48 - 24 < 0) bCtx.fillRect(offset + col * 48 - 24 + 256, y + 2, 44, 12);
-        }
-      }
-      const brickTex = new THREE.CanvasTexture(brickCanvas);
-      brickTex.wrapS = THREE.RepeatWrapping;
-      brickTex.wrapT = THREE.RepeatWrapping;
-      brickTex.repeat.set(5, 2);
-      const brickMat = new THREE.MeshStandardMaterial({ map: brickTex, roughness: 0.85 });
-
-      const run = d / 2 + ov;
-      const slope = Math.hypot(run, rh);
-      const angle = Math.atan2(rh, run);
-      const L = w + ov * 2;
-      [1, -1].forEach((side) => {
-        const slab = new THREE.Mesh(new THREE.BoxGeometry(L, 0.22, slope), brickMat);
-        slab.position.set(0, h + rh / 2, (side * run) / 2);
-        slab.rotation.x = side * angle;
-        slab.castShadow = true;
-        market.add(slab);
+      // ---- Flat roof slab + parapet + rooftop AC units ----
+      const roof = new THREE.Mesh(
+        new THREE.BoxGeometry(w + ov * 2, 0.34, d + ov * 2),
+        new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.8 })
+      );
+      roof.position.y = h + 0.17;
+      roof.receiveShadow = true;
+      roof.castShadow = true;
+      market.add(roof);
+      [[0, -d / 2 - ov, w + ov * 2], [0, d / 2 + ov, w + ov * 2]].forEach(([px, pz, len]) => {
+        const par = new THREE.Mesh(new THREE.BoxGeometry(len, 0.4, 0.18), bandMat);
+        par.position.set(px, h + 0.54, pz);
+        market.add(par);
       });
-      const ridge = new THREE.Mesh(new THREE.BoxGeometry(L + 0.2, 0.2, 0.4), brickMat);
-      ridge.position.set(0, h + rh + 0.02, 0);
-      market.add(ridge);
-
-      // Gable end triangles (beige) so the roof tent looks solid
-      const gableShape = new THREE.Shape();
-      gableShape.moveTo(-run, 0);
-      gableShape.lineTo(run, 0);
-      gableShape.lineTo(0, rh);
-      gableShape.closePath();
-      const gableGeom = new THREE.ShapeGeometry(gableShape);
-      [1, -1].forEach((side) => {
-        const gable = new THREE.Mesh(
-          gableGeom,
-          new THREE.MeshStandardMaterial({ color: 0xe4d5ae, roughness: 0.75, side: THREE.DoubleSide })
-        );
-        gable.rotation.y = (side * Math.PI) / 2;
-        gable.position.set((side * w) / 2, h, 0);
-        market.add(gable);
+      [-w / 2 - ov, w / 2 + ov].forEach((px) => {
+        const par = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.4, d + ov * 2), bandMat);
+        par.position.set(px, h + 0.54, 0);
+        market.add(par);
+      });
+      const acMat = new THREE.MeshStandardMaterial({ color: 0xd1d5db, metalness: 0.3, roughness: 0.6 });
+      [-3.6, 0, 3.6].forEach((ax) => {
+        const ac = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.7, 1.2), acMat);
+        ac.position.set(ax, h + 0.7, -1.2);
+        ac.castShadow = true;
+        market.add(ac);
+        const fan = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.06, 14), frameMat);
+        fan.rotation.x = Math.PI / 2;
+        fan.position.set(ax, h + 0.7, -0.59);
+        market.add(fan);
       });
 
-      // Entrance sign directly over the glass doors (the big rooftop display
-      // carries the name; this one marks the way in)
+      // ---- Modern entrance canopy over the doors ----
+      const canopy = new THREE.Mesh(new THREE.BoxGeometry(5.4, 0.16, 1.7), bandMat2);
+      canopy.position.set(0, 3.05, d / 2 + 0.75);
+      canopy.castShadow = true;
+      market.add(canopy);
+      const canopyLip = new THREE.Mesh(new THREE.BoxGeometry(5.4, 0.3, 0.14), bandMat);
+      canopyLip.position.set(0, 2.92, d / 2 + 1.58);
+      market.add(canopyLip);
+      [-2.35, 2.35].forEach((cx) => {
+        const cPost = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 2.95, 10), frameMat);
+        cPost.position.set(cx, 1.48, d / 2 + 1.4);
+        market.add(cPost);
+      });
+
+      // Entrance sign (over the canopy) + a lit OPEN board
       const sign = makeSignPlane(4.2, "🛒 SUPERMARKET", "#0369a1", "#ffffff");
-      sign.position.set(0, 3.25, d / 2 + 0.04);
+      sign.position.set(0, h - 0.35, d / 2 + 0.06);
       market.add(sign);
-      const doorMat = new THREE.MeshStandardMaterial({
-        color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.72,
-        side: THREE.DoubleSide,
-      });
-      const frameMat = new THREE.MeshStandardMaterial({ color: 0xe8e8ec, metalness: 0.4, roughness: 0.4 });
+      const openBoard = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.0, 0.42),
+        new THREE.MeshBasicMaterial({ color: 0xffedd5 })
+      );
+      openBoard.position.set(3.9, 2.35, d / 2 + 0.05);
+      market.add(openBoard);
+      const openSign = makeSignPlane(0.95, "OPEN", "#16a34a", "#ffffff");
+      openSign.position.set(3.9, 2.35, d / 2 + 0.07);
+      market.add(openSign);
 
-      // ---- Sliding GLASS DOORS: click them and they open for Happy to walk in ----
-      // Dark recess behind the opening (a little peek into the lit shop)
+      // ---- Sliding GLASS DOORS (the entry choreography uses these panels) ----
       const recess = new THREE.Mesh(
         new THREE.PlaneGeometry(3.1, 2.5),
         new THREE.MeshBasicMaterial({ color: 0x241d18 })
@@ -5406,7 +5753,6 @@ export class ParkScene {
       );
       glow.position.set(0, 2.3, d / 2 - 0.15);
       market.add(glow);
-      // Header beam + side jambs around the entrance opening
       const header = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.3, 0.18), frameMat);
       header.position.set(0, 2.72, d / 2 + 0.02);
       market.add(header);
@@ -5415,10 +5761,9 @@ export class ParkScene {
         jamb.position.set(jx, 1.3, d / 2 + 0.02);
         market.add(jamb);
       });
-      // The two sliding panels (grouped — they slide apart when the store opens)
       const mkDoorPanel = (side: 1 | -1) => {
         const panel = new THREE.Group();
-        const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.32, 2.5), doorMat);
+        const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.32, 2.5), glassMat);
         glass.position.set(0, 1.3, 0);
         panel.add(glass);
         const edge = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2.5, 0.1), frameMat);
@@ -5441,39 +5786,73 @@ export class ParkScene {
       market.add(this.supermarketDoorL);
       market.add(this.supermarketDoorR);
 
-      // Shop windows flanking the entrance
-      [-4.4, 4.4].forEach((wx) => {
-        const win = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 1.5), doorMat);
-        win.position.set(wx, 2.0, d / 2 + 0.05);
-        market.add(win);
-        const winFrame = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.7, 0.1), frameMat);
-        winFrame.position.set(wx, 2.0, d / 2 + 0.01);
-        market.add(winFrame);
-      });
-
-      // ---- ROOFTOP DISPLAY: a big SUPERMARKET billboard hanging over the roof ----
+      // ---- Rooftop display: big SUPERMARKET billboard ----
       {
         const postMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.6, roughness: 0.35 });
         [-3.2, 3.2].forEach((px) => {
-          const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.1, 0.18), postMat);
-          post.position.set(px, h + rh + 0.7, 0);
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.0, 0.18), postMat);
+          post.position.set(px, h + 1.6, 0);
           market.add(post);
         });
         const board = new THREE.Mesh(
           new THREE.BoxGeometry(8.8, 2.3, 0.2),
           new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.5 })
         );
-        board.position.set(0, h + rh + 1.55, 0);
+        board.position.set(0, h + 2.45, 0);
         board.castShadow = true;
         market.add(board);
         const bigSign = makeSignPlane(8.0, "🛒 SUPERMARKET", "#0369a1", "#ffffff");
-        bigSign.position.set(0, h + rh + 1.55, 0.14);
+        bigSign.position.set(0, h + 2.45, 0.14);
         market.add(bigSign);
         const bigSignBack = makeSignPlane(8.0, "🛒 SUPERMARKET", "#0369a1", "#ffffff");
-        bigSignBack.position.set(0, h + rh + 1.55, -0.14);
+        bigSignBack.position.set(0, h + 2.45, -0.14);
         bigSignBack.rotation.y = Math.PI;
         market.add(bigSignBack);
       }
+
+      // ---- Sidewalk props: produce crates, a cart & a planter ----
+      const crateMat = new THREE.MeshStandardMaterial({ color: 0x9a6a3a, roughness: 0.85 });
+      const fruitColors = [0xef4444, 0xf59e0b, 0x84cc16, 0xf97316];
+      [-5.2, -6.3].forEach((cx, ci) => {
+        const crate = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.5, 0.7), crateMat);
+        crate.position.set(cx, 0.25, d / 2 + 1.1);
+        crate.castShadow = true;
+        market.add(crate);
+        for (let f = 0; f < 5; f++) {
+          const fruit = new THREE.Mesh(
+            new THREE.SphereGeometry(0.12, 8, 8),
+            new THREE.MeshStandardMaterial({ color: fruitColors[(ci + f) % fruitColors.length], roughness: 0.5 })
+          );
+          fruit.position.set(cx - 0.3 + f * 0.15, 0.56, d / 2 + 1.1 + (f % 2 ? 0.14 : -0.14));
+          market.add(fruit);
+        }
+      });
+      const cart = new THREE.Group();
+      const cartMat = new THREE.MeshStandardMaterial({ color: 0xc7ccd4, metalness: 0.7, roughness: 0.35 });
+      const basket = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.5, 1.0), cartMat);
+      basket.position.y = 0.7;
+      cart.add(basket);
+      const cartHandle = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.06, 0.06), cartMat);
+      cartHandle.position.set(0, 1.05, -0.55);
+      cart.add(cartHandle);
+      [[-0.3, 0.4], [0.3, 0.4], [-0.3, -0.4], [0.3, -0.4]].forEach(([wx, wz]) => {
+        const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.06, 8), frameMat);
+        wheel.rotation.z = Math.PI / 2;
+        wheel.position.set(wx, 0.09, wz);
+        cart.add(wheel);
+      });
+      cart.position.set(4.6, 0, d / 2 + 1.3);
+      cart.rotation.y = 0.4;
+      market.add(cart);
+      const planter = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.4, 0.7, 12), stoneMat);
+      planter.position.set(-2.9, 0.35, d / 2 + 1.2);
+      market.add(planter);
+      const bush = new THREE.Mesh(
+        new THREE.SphereGeometry(0.55, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0x3f7d3a, roughness: 0.95 })
+      );
+      bush.position.set(-2.9, 1.0, d / 2 + 1.2);
+      market.add(bush);
 
       market.position.set(13.5, 0, -10);
       this.supermarketGroup = market;
@@ -5482,35 +5861,90 @@ export class ParkScene {
       city.add(this.supermarketGroup);
     }
 
-    // ---- GYM: orange training hall with a GIANT dumbbell sign on the roof ----
+
+    // ---- GYM: modern glass-front fitness club with a neon dumbbell sign ----
     {
       const gym = new THREE.Group();
       const gw = 8;
       const gh = 4.2;
       const gd = 5;
-      const body = new THREE.Mesh(
-        new THREE.BoxGeometry(gw, gh, gd),
-        new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.6 })
-      );
+      const doorMat = new THREE.MeshStandardMaterial({
+        color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.6, side: THREE.DoubleSide,
+      });
+      const frameMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.6, roughness: 0.35 });
+      const darkMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.7 });
+      const orangeMat = new THREE.MeshStandardMaterial({ color: 0xf97316, roughness: 0.5 });
+      const accentMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.45 });
+      const metalMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.7, roughness: 0.35 });
+      const plateMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, metalness: 0.5, roughness: 0.45 });
+
+      // Solid dark body
+      const body = new THREE.Mesh(new THREE.BoxGeometry(gw, gh, gd), darkMat);
       body.position.y = gh / 2;
       body.castShadow = true;
       body.receiveShadow = true;
       gym.add(body);
-      const sign = makeSignPlane(6.5, "🏋️ DOGGY GYM", "#9a3412", "#ffffff");
-      sign.position.set(0, gh - 0.9, gd / 2 + 0.04);
-      gym.add(sign);
-      const doorMat = new THREE.MeshStandardMaterial({
-        color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85,
+
+      // Orange accent fins on the front corners
+      [-1, 1].forEach((sx) => {
+        const fin = new THREE.Mesh(new THREE.BoxGeometry(0.5, gh, 0.5), orangeMat);
+        fin.position.set(sx * (gw / 2 - 0.25), gh / 2, gd / 2 - 0.25);
+        fin.castShadow = true;
+        gym.add(fin);
       });
+      // Amber top band + stripe
+      const topBand = new THREE.Mesh(new THREE.BoxGeometry(gw + 0.1, 0.5, gd + 0.1), orangeMat);
+      topBand.position.y = gh - 0.25;
+      gym.add(topBand);
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(gw + 0.16, 0.14, gd + 0.16), accentMat);
+      stripe.position.y = gh - 0.55;
+      gym.add(stripe);
+
+      // ---- Front glass curtain wall (doorway gap in the middle) ----
+      const glassSegW = (gw - 2.8) / 2;
+      [-1, 1].forEach((sx) => {
+        const pane = new THREE.Mesh(new THREE.PlaneGeometry(glassSegW, gh - 1.4), doorMat);
+        pane.position.set(sx * (1.4 + glassSegW / 2), (gh - 1.4) / 2 + 1.0, gd / 2 + 0.06);
+        gym.add(pane);
+        const mull = new THREE.Mesh(new THREE.BoxGeometry(0.1, gh - 1.3, 0.14), frameMat);
+        mull.position.set(sx * (1.4 + glassSegW / 2), (gh - 1.4) / 2 + 1.0, gd / 2 + 0.09);
+        gym.add(mull);
+      });
+      const header = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.22, 0.2), frameMat);
+      header.position.set(0, 3.1, gd / 2 + 0.06);
+      gym.add(header);
       [-0.65, 0.65].forEach((dx) => {
-        const door = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 2.0), doorMat);
-        door.position.set(dx, 1.0, gd / 2 + 0.04);
+        const door = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 2.4), doorMat);
+        door.position.set(dx, 1.5, gd / 2 + 0.1);
         gym.add(door);
+        const edge = new THREE.Mesh(new THREE.BoxGeometry(0.08, 2.4, 0.08), frameMat);
+        edge.position.set(dx + Math.sign(dx) * 0.54, 1.5, gd / 2 + 0.11);
+        gym.add(edge);
       });
 
-      // The giant "handle": a chunky dumbbell resting on two rooftop posts
-      const metalMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.7, roughness: 0.35 });
-      const plateMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, metalness: 0.5, roughness: 0.45 });
+      // Entrance canopy + valance
+      const canopy = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.14, 1.5), orangeMat);
+      canopy.position.set(0, 2.95, gd / 2 + 0.8);
+      canopy.castShadow = true;
+      gym.add(canopy);
+      const valance = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.28, 0.1), accentMat);
+      valance.position.set(0, 2.78, gd / 2 + 1.53);
+      gym.add(valance);
+      [-1.6, 1.6].forEach((cx) => {
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 2.9, 10), metalMat);
+        post.position.set(cx, 1.45, gd / 2 + 1.45);
+        gym.add(post);
+      });
+
+      // Neon sign on the top band
+      const sign = makeSignPlane(6.5, "🏋 DOGGY GYM", "#9a3412", "#ffffff");
+      sign.position.set(0, gh - 0.25, gd / 2 + 0.12);
+      gym.add(sign);
+      const signGlow = new THREE.PointLight(0xfb923c, 0.6, 8);
+      signGlow.position.set(0, gh - 0.25, gd / 2 + 0.7);
+      gym.add(signGlow);
+
+      // ---- Rooftop dumbbell (spins in the render loop) ----
       const dumbbell = new THREE.Group();
       const bar = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.17, 4.6, 12), metalMat);
       bar.rotation.z = Math.PI / 2;
@@ -5530,7 +5964,6 @@ export class ParkScene {
       const grip = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 1.1, 12), metalMat);
       grip.rotation.z = Math.PI / 2;
       dumbbell.add(grip);
-      // Two posts holding it up like a rooftop sign
       [-1.5, 1.5].forEach((px) => {
         const post = new THREE.Mesh(new THREE.BoxGeometry(0.24, 1.1, 0.24), metalMat);
         post.position.set(px, gh + 0.55, 0);
@@ -5540,12 +5973,88 @@ export class ParkScene {
       this.gymDumbbell = dumbbell;
       gym.add(dumbbell);
 
+      // ---- Outdoor training corner on the sidewalk ----
+      const rig = new THREE.Group();
+      [-1.2, 1.2].forEach((rx) => {
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.4, 10), metalMat);
+        post.position.set(rx, 1.2, 0);
+        rig.add(post);
+      });
+      const topBar = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 2.6, 10), metalMat);
+      topBar.rotation.z = Math.PI / 2;
+      topBar.position.y = 2.3;
+      rig.add(topBar);
+      rig.position.set(-4.6, 0, gd / 2 + 1.4);
+      gym.add(rig);
+
+      const mat = new THREE.Mesh(
+        new THREE.BoxGeometry(1.6, 0.08, 0.9),
+        new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.9 })
+      );
+      mat.position.set(-2.2, 0.05, gd / 2 + 1.5);
+      gym.add(mat);
+
+      const kettle = new THREE.Group();
+      const kBall = new THREE.Mesh(new THREE.SphereGeometry(0.3, 14, 14), plateMat);
+      kBall.position.y = 0.32;
+      kettle.add(kBall);
+      const kHandle = new THREE.Mesh(new THREE.TorusGeometry(0.18, 0.05, 8, 14, Math.PI), metalMat);
+      kHandle.position.y = 0.62;
+      kettle.add(kHandle);
+      kettle.position.set(2.3, 0, gd / 2 + 1.4);
+      gym.add(kettle);
+
+      const outDumbbells: [number, number, number][] = [[3.2, 0.2, 0xf97316], [3.9, 0.0, 0x22c55e]];
+      outDumbbells.forEach(([dx, dz, col]) => {
+        const db = new THREE.Group();
+        const b = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.5, 10), metalMat);
+        b.rotation.z = Math.PI / 2;
+        b.position.y = 0.12;
+        db.add(b);
+        [-0.28, 0.28].forEach((px) => {
+          const pl = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.14, 0.14, 0.08, 12),
+            new THREE.MeshStandardMaterial({ color: col, roughness: 0.5 })
+          );
+          pl.rotation.z = Math.PI / 2;
+          pl.position.set(px, 0.12, 0);
+          db.add(pl);
+        });
+        db.position.set(dx, 0, gd / 2 + 1.4 + dz);
+        gym.add(db);
+      });
+
+      const tire = new THREE.Mesh(
+        new THREE.TorusGeometry(0.6, 0.28, 12, 20),
+        new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.95 })
+      );
+      tire.rotation.x = Math.PI / 2;
+      tire.position.set(5.0, 0.3, gd / 2 + 1.6);
+      gym.add(tire);
+
+      const bagFrame = new THREE.Group();
+      const arm = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.12, 0.12), metalMat);
+      arm.position.set(0, 2.5, 0);
+      bagFrame.add(arm);
+      const poleF = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 2.5, 10), metalMat);
+      poleF.position.set(0.7, 1.25, 0);
+      bagFrame.add(poleF);
+      const bag = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.24, 0.3, 1.3, 14),
+        new THREE.MeshStandardMaterial({ color: 0x7f1d1d, roughness: 0.75 })
+      );
+      bag.position.set(-0.3, 1.8, 0);
+      bagFrame.add(bag);
+      bagFrame.position.set(-6.0, 0, gd / 2 + 1.6);
+      gym.add(bagFrame);
+
       gym.position.set(-13, 0, -10);
       this.gymGroup = gym;
       this.gymGroup.userData = { type: "gym" };
       this.gymGroup.traverse((c) => (c.userData = { type: "gym" }));
       city.add(this.gymGroup);
     }
+
 
     // ---- Skyline backdrop (north edge) ----
     const skyline = new THREE.Group();
@@ -5570,7 +6079,7 @@ export class ParkScene {
         new THREE.BoxGeometry(3.4, h, 3.4),
         new THREE.MeshStandardMaterial({ map: windowTex, roughness: 0.7 })
       );
-      tower.position.set(-28 + i * 7, h / 2, -42 - Math.random() * 3);
+      tower.position.set(-28 + i * 7, h / 2, -45.5 - Math.random() * 2.5);
       skyline.add(tower);
     }
     city.add(skyline);
@@ -5997,6 +6506,2046 @@ export class ParkScene {
     const cityLight = new THREE.PointLight(0xfff1b8, 1.4, 30);
     cityLight.position.set(-5, 6, 1);
     city.add(cityLight);
+
+    // A brand-new, roomy city car park with several parked cars
+    this.buildCityParkingLot();
+
+    // New east street past the Cake Store: Boutique Row + Tool Store
+    this.buildShoppingRow();
+  }
+
+  // ================= BIG CITY CAR PARK =================
+
+  /** A tidy parked car (body + cabin + windscreen + wheels) for the car park. */
+  private makeParkedCarModel(
+    bodyColor: number,
+    cabinColor: number,
+    kind: "sedan" | "van" | "pickup" | "hatch" = "sedan"
+  ): THREE.Group {
+    const park = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({ color: bodyColor, roughness: 0.35, metalness: 0.3 });
+    const cabMat = new THREE.MeshStandardMaterial({ color: cabinColor, roughness: 0.25, metalness: 0.35 });
+    const tireMat = new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.9 });
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0x93c5fd, roughness: 0.1, metalness: 0.4, transparent: true, opacity: 0.7,
+    });
+
+    let bodyLen = 2.75;
+    let bodyH = 0.58;
+    let cabLen = 1.25;
+    let cabH = 0.52;
+    let cabZ = -0.25;
+    let wheelZ = 0.95;
+    if (kind === "van") { bodyLen = 3.3; bodyH = 0.75; cabLen = 2.2; cabH = 0.85; cabZ = -0.35; wheelZ = 1.1; }
+    if (kind === "pickup") { bodyLen = 3.0; bodyH = 0.5; cabLen = 1.1; cabH = 0.6; cabZ = 0.35; }
+    if (kind === "hatch") { bodyLen = 2.3; bodyH = 0.55; cabLen = 1.15; cabH = 0.5; cabZ = -0.15; wheelZ = 0.85; }
+
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.6, bodyH, bodyLen), bodyMat);
+    body.position.y = bodyH / 2 + 0.18;
+    body.castShadow = true;
+    park.add(body);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.32, cabH, cabLen), cabMat);
+    cabin.position.set(0, bodyH + 0.18 + cabH / 2 - 0.02, cabZ);
+    cabin.castShadow = true;
+    park.add(cabin);
+    const screen = new THREE.Mesh(new THREE.BoxGeometry(1.22, cabH * 0.7, 0.06), glassMat);
+    screen.position.set(0, bodyH + 0.18 + cabH / 2 - 0.02, cabZ + cabLen / 2 + 0.02);
+    park.add(screen);
+    [[-0.82, wheelZ], [0.82, wheelZ], [-0.82, -wheelZ], [0.82, -wheelZ]].forEach(([x, z]) => {
+      const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.22, 12), tireMat);
+      wheel.rotation.z = Math.PI / 2;
+      wheel.position.set(x, 0.3, z);
+      wheel.castShadow = true;
+      park.add(wheel);
+    });
+    return park;
+  }
+
+  /**
+   * A big modern city car park south of the plaza, on the east side of the
+   * street: two rows of painted bays facing a central lane, seven colourful
+   * parked cars, wheel stops, an attendant booth, a P-tower, lamps & greenery.
+   */
+  private buildCityParkingLot() {
+    const lot = new THREE.Group();
+    const cx = 13.5;
+    const cz = 14.0;
+    const padW = 11.6;
+    const padD = 8.6;
+
+    // Asphalt pad
+    const pad = new THREE.Mesh(
+      new THREE.PlaneGeometry(padW, padD),
+      new THREE.MeshStandardMaterial({ color: 0x414a54, roughness: 0.95 })
+    );
+    pad.geometry.rotateX(-Math.PI / 2);
+    pad.position.set(cx, 0.02, cz);
+    pad.receiveShadow = true;
+    pad.userData = { type: "city_floor" };
+    lot.add(pad);
+
+    // Pale curb border (north, south & east — the west side stays open for the driveway)
+    const curbMat = new THREE.MeshStandardMaterial({ color: 0xc2c8cf, roughness: 0.9 });
+    ([[0, -padD / 2, padW + 0.5, 0.35], [0, padD / 2, padW + 0.5, 0.35], [padW / 2, 0, 0.35, padD + 0.5]] as
+      [number, number, number, number][]).forEach(([ox, oz, lw, lh]) => {
+      const curb = new THREE.Mesh(new THREE.BoxGeometry(lw, 0.28, lh), curbMat);
+      curb.position.set(cx + ox, 0.14, cz + oz);
+      lot.add(curb);
+    });
+
+    // Driveway apron crossing the sidewalk (street → lot)
+    const apron = new THREE.Mesh(
+      new THREE.PlaneGeometry(5.0, 3.2),
+      new THREE.MeshStandardMaterial({ color: 0x565d64, roughness: 0.95 })
+    );
+    apron.geometry.rotateX(-Math.PI / 2);
+    apron.position.set(cx - padW / 2 - 1.0, 0.025, cz);
+    apron.userData = { type: "city_floor" };
+    lot.add(apron);
+
+    // Painted bay dividers: 4 bays per row, running along z
+    const bayCenters = [cx - 3.0, cx - 1.0, cx + 1.0, cx + 3.0];
+    const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const lineXs = [cx - 4.0, cx - 2.0, cx, cx + 2.0, cx + 4.0];
+    [cz - 2.4, cz + 2.4].forEach((rowZ) => {
+      lineXs.forEach((lxp) => {
+        const line = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.01, 2.8), lineMat);
+        line.position.set(lxp, 0.035, rowZ);
+        lot.add(line);
+      });
+    });
+    for (let i = -2; i <= 2; i++) {
+      const dash = new THREE.Mesh(
+        new THREE.BoxGeometry(1.1, 0.01, 0.14),
+        new THREE.MeshBasicMaterial({ color: 0xfacc15 })
+      );
+      dash.position.set(cx + i * 2.2, 0.035, cz);
+      lot.add(dash);
+    }
+
+    // Wheel stops
+    const stopMat = new THREE.MeshStandardMaterial({ color: 0xd1d5db, roughness: 0.9 });
+    const addWheelStops = (rowZ: number, dir: 1 | -1) => {
+      bayCenters.forEach((bx) => {
+        const stop = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.16, 0.24), stopMat);
+        stop.position.set(bx, 0.08, rowZ + dir * 1.25);
+        lot.add(stop);
+      });
+    };
+    addWheelStops(cz - 2.4, -1);
+    addWheelStops(cz + 2.4, 1);
+
+    // Cars: 4 nose-in from the north row, 3 from the south row (7 in total)
+    const northCars: { color: number; cabin: number; kind: "sedan" | "van" | "pickup" | "hatch" }[] = [
+      { color: 0xef4444, cabin: 0xfecaca, kind: "sedan" },
+      { color: 0x3b82f6, cabin: 0xbfdbfe, kind: "hatch" },
+      { color: 0x22c55e, cabin: 0xbbf7d0, kind: "pickup" },
+      { color: 0xeab308, cabin: 0xfef3c7, kind: "sedan" },
+    ];
+    northCars.forEach(({ color, cabin, kind }, i2) => {
+      const car = this.makeParkedCarModel(color, cabin, kind);
+      car.rotation.y = 0;
+      car.position.set(bayCenters[i2], 0, cz - 2.5);
+      car.traverse((c) => (c.userData = { type: "city_floor" }));
+      lot.add(car);
+    });
+    const southCars: { color: number; cabin: number; kind: "sedan" | "van" | "pickup" | "hatch" }[] = [
+      { color: 0xa855f7, cabin: 0xe9d5ff, kind: "van" },
+      { color: 0xf97316, cabin: 0xffedd5, kind: "sedan" },
+      { color: 0x64748b, cabin: 0xcbd5e1, kind: "hatch" },
+    ];
+    southCars.forEach(({ color, cabin, kind }, i2) => {
+      const car = this.makeParkedCarModel(color, cabin, kind);
+      car.rotation.y = Math.PI;
+      car.position.set(bayCenters[i2], 0, cz + 2.5);
+      car.traverse((c) => (c.userData = { type: "city_floor" }));
+      lot.add(car);
+    });
+
+    // Attendant booth by the entrance
+    const booth = new THREE.Group();
+    const boothBody = new THREE.Mesh(
+      new THREE.BoxGeometry(1.6, 2.1, 1.6),
+      new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.7 })
+    );
+    boothBody.position.y = 1.05;
+    boothBody.castShadow = true;
+    booth.add(boothBody);
+    const boothGlass = new THREE.Mesh(
+      new THREE.BoxGeometry(1.68, 0.9, 1.68),
+      new THREE.MeshStandardMaterial({
+        color: 0x93c5fd, roughness: 0.1, metalness: 0.4, transparent: true, opacity: 0.6,
+      })
+    );
+    boothGlass.position.y = 1.4;
+    booth.add(boothGlass);
+    const boothRoof = new THREE.Mesh(
+      new THREE.BoxGeometry(1.9, 0.16, 1.9),
+      new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.6 })
+    );
+    boothRoof.position.y = 2.2;
+    booth.add(boothRoof);
+    booth.position.set(cx - padW / 2 + 1.2, 0, cz - padD / 2 + 1.2);
+    booth.traverse((c) => (c.userData = { type: "city_floor" }));
+    lot.add(booth);
+
+    // Tall blue "P" tower sign near the driveway
+    const towerPole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.09, 0.09, 4.2, 10),
+      new THREE.MeshStandardMaterial({ color: 0xb8bec7, metalness: 0.6, roughness: 0.4 })
+    );
+    towerPole.position.set(cx - padW / 2 - 0.4, 2.1, cz - padD / 2 - 0.4);
+    lot.add(towerPole);
+    const pCanvas = document.createElement("canvas");
+    pCanvas.width = 128;
+    pCanvas.height = 128;
+    const pctx = pCanvas.getContext("2d")!;
+    pctx.fillStyle = "#1d4ed8";
+    pctx.beginPath();
+    pctx.roundRect(4, 4, 120, 120, 18);
+    pctx.fill();
+    pctx.fillStyle = "#ffffff";
+    pctx.font = "bold 84px sans-serif";
+    pctx.textAlign = "center";
+    pctx.fillText("P", 64, 96);
+    const pTex = new THREE.CanvasTexture(pCanvas);
+    const pPlate = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.5, 1.5),
+      new THREE.MeshBasicMaterial({ map: pTex, side: THREE.DoubleSide })
+    );
+    pPlate.position.set(cx - padW / 2 - 0.4, 3.9, cz - padD / 2 - 0.4);
+    lot.add(pPlate);
+    const pPlate2 = pPlate.clone();
+    pPlate2.rotation.y = Math.PI;
+    lot.add(pPlate2);
+
+    // A little greenery + two working lamps
+    const shrubMat = new THREE.MeshStandardMaterial({ color: 0x3f7d3a, roughness: 0.95 });
+    [cx - 4.6, cx + 4.6].forEach((sx) => {
+      const shrub = new THREE.Mesh(new THREE.SphereGeometry(0.45, 10, 10), shrubMat);
+      shrub.position.set(sx, 0.45, cz + padD / 2 + 0.6);
+      lot.add(shrub);
+    });
+    this.makeStreetLamp(lot, cx - 5.2, cz - padD / 2 - 0.7, 3.1);
+    this.makeStreetLamp(lot, cx + 5.2, cz + padD / 2 + 0.7, 3.1);
+
+    lot.userData = { type: "city_floor" };
+    this.cityGroup.add(lot);
+  }
+
+
+  // ================= BOUTIQUE ROW (new east street) =================
+
+  /**
+   * Extends the city road north past the Cake Store, then turns right into a
+   * brand-new avenue: the Clothing Boutique and the Tool Store live here.
+   */
+  private buildShoppingRow() {
+    // Road connector up past the Cake Store
+    const connector = new THREE.Mesh(
+      new THREE.PlaneGeometry(5.5, 6),
+      new THREE.MeshStandardMaterial({ color: 0x3b4045, roughness: 0.95 })
+    );
+    connector.geometry.rotateX(-Math.PI / 2);
+    connector.position.set(3, 0.02, -39);
+    connector.userData = { type: "city_floor" };
+    this.cityGroup.add(connector);
+
+    // The new avenue running east
+    const avenue = new THREE.Mesh(
+      new THREE.PlaneGeometry(43, 5.5),
+      new THREE.MeshStandardMaterial({ color: 0x3b4045, roughness: 0.95 })
+    );
+    avenue.geometry.rotateX(-Math.PI / 2);
+    avenue.position.set(24.5, 0.02, -39);
+    avenue.userData = { type: "city_floor" };
+    this.cityGroup.add(avenue);
+
+    // Centre dashes
+    for (let i = 0; i < 9; i++) {
+      const dash = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.0, 0.18),
+        new THREE.MeshBasicMaterial({ color: 0xf7d45c })
+      );
+      dash.geometry.rotateX(-Math.PI / 2);
+      dash.position.set(6 + i * 4.4, 0.03, -39);
+      this.cityGroup.add(dash);
+    }
+
+    // Zebra crossing linking the shops (south) to the houses / café (north)
+    for (let i = 0; i < 6; i++) {
+      const stripe = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.8, 0.5),
+        new THREE.MeshBasicMaterial({ color: 0xf8fafc })
+      );
+      stripe.geometry.rotateX(-Math.PI / 2);
+      stripe.position.set(27.5, 0.045, -41.1 + i * 0.9);
+      this.cityGroup.add(stripe);
+    }
+
+    // Sidewalks on both sides of the avenue
+    const swMat = new THREE.MeshStandardMaterial({ color: 0xd4d4d8, roughness: 0.9 });
+    [[24.5, -36.0], [24.5, -42.0]].forEach(([x, z]) => {
+      const sw = new THREE.Mesh(new THREE.PlaneGeometry(43, 1.4), swMat);
+      sw.geometry.rotateX(-Math.PI / 2);
+      sw.position.set(x, 0.03, z);
+      sw.userData = { type: "city_floor" };
+      this.cityGroup.add(sw);
+    });
+
+    // Street lamps down Boutique Row
+    [12, 24, 36].forEach((x) => this.makeStreetLamp(this.cityGroup, x, -36.4));
+
+    // The two shops
+    this.buildClothingStoreExterior();
+    this.buildClothingStoreInterior();
+    this.buildToolStoreExterior();
+    this.buildToolStoreInterior();
+
+    // Cosy residential row across the avenue
+    this.buildBoutiqueHouses();
+
+    // The café next to the Tool Store: patio outside + cosy interior
+    this.buildCafeExterior();
+    this.buildCafeInterior();
+
+    // Benches so the row feels lived-in
+    this.addBench(this.cityGroup, 22, -36.1, Math.PI, "city");
+    this.addBench(this.cityGroup, 34, -36.1, Math.PI, "city");
+
+    // Street sign at the junction, properly mounted on a post beside the
+    // sidewalk (it used to float in the middle of the road).
+    const signPost = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07, 0.1, 2.6, 8),
+      new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.6, roughness: 0.4 })
+    );
+    signPost.position.set(7.2, 1.3, -35.85);
+    this.cityGroup.add(signPost);
+    const sign = this.civicSign("🛍️ BOUTIQUE ROW", "#7c3aed", "#ffffff", 2.8);
+    sign.position.set(7.2, 2.75, -35.83);
+    this.cityGroup.add(sign);
+  }
+
+  // ---------- BOUTIQUE ROW HOUSES ----------
+  /**
+   * A row of cheerful little homes on the north side of Boutique Row. Their
+   * windows glow after sunset, and on Halloween every porch turns into a
+   * trick-or-treat stop (tap a door!).
+   */
+  private buildBoutiqueHouses() {
+    const houses: { x: number; wall: number; roof: number; door: number; name: string }[] = [
+      { x: 11, wall: 0xf6d8c8, roof: 0xb4533a, door: 0x7c4a24, name: "Maple Cottage" },
+      { x: 19.5, wall: 0xd6e6f5, roof: 0x3f5f8a, door: 0x23415f, name: "Bluebell House" },
+      { x: 28, wall: 0xf6ecc2, roof: 0xb07b1f, door: 0x8a5a2b, name: "Sunny Nook" },
+      { x: 36.5, wall: 0xe7d8f3, roof: 0x6b4a8a, door: 0x4c2f6b, name: "Lavender Lodge" },
+    ];
+    const houseW = 6.2;
+    const houseH = 4.3;
+    const houseD = 5.6;
+
+    houses.forEach((spec, i) => {
+      const house = new THREE.Group();
+      house.position.set(spec.x, 0, -46.2);
+
+      // Body
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(houseW, houseH, houseD),
+        new THREE.MeshStandardMaterial({ color: spec.wall, roughness: 0.9 })
+      );
+      body.position.y = houseH / 2;
+      body.castShadow = true;
+      body.receiveShadow = true;
+      house.add(body);
+
+      // Stone base trim
+      const plinth = new THREE.Mesh(
+        new THREE.BoxGeometry(houseW + 0.2, 0.4, houseD + 0.2),
+        new THREE.MeshStandardMaterial({ color: 0xcfc6b0, roughness: 0.95 })
+      );
+      plinth.position.y = 0.2;
+      house.add(plinth);
+
+      // Pyramid roof + chimney
+      const roof = new THREE.Mesh(
+        new THREE.ConeGeometry(houseW * 0.82, 2.3, 4),
+        new THREE.MeshStandardMaterial({ color: spec.roof, roughness: 0.85 })
+      );
+      roof.rotation.y = Math.PI / 4;
+      roof.position.y = houseH + 1.15;
+      roof.castShadow = true;
+      house.add(roof);
+      const chimney = new THREE.Mesh(
+        new THREE.BoxGeometry(0.5, 1.2, 0.5),
+        new THREE.MeshStandardMaterial({ color: 0x9c6b4f, roughness: 0.95 })
+      );
+      chimney.position.set(-1.8, houseH + 1.7, -1.0);
+      chimney.castShadow = true;
+      house.add(chimney);
+
+      // Front door + frame + knob (clickable Halloween stop)
+      const doorFrame = new THREE.Mesh(
+        new THREE.BoxGeometry(1.7, 2.65, 0.16),
+        new THREE.MeshStandardMaterial({ color: 0xf8f1e4, roughness: 0.8 })
+      );
+      doorFrame.position.set(0, 1.32, houseD / 2 + 0.04);
+      house.add(doorFrame);
+      const door = new THREE.Mesh(
+        new THREE.BoxGeometry(1.35, 2.45, 0.12),
+        new THREE.MeshStandardMaterial({ color: spec.door, roughness: 0.65 })
+      );
+      door.position.set(0, 1.22, houseD / 2 + 0.12);
+      door.userData = { type: "treat_door", houseIndex: i, houseName: spec.name };
+      house.add(door);
+      this.boutiqueHouseDoors.push({ mesh: door, name: spec.name, index: i });
+      const knob = new THREE.Mesh(
+        new THREE.SphereGeometry(0.07, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0xfacc15, metalness: 0.9, roughness: 0.2 })
+      );
+      knob.position.set(0.45, 1.2, houseD / 2 + 0.2);
+      house.add(knob);
+      // Porch step
+      const step = new THREE.Mesh(
+        new THREE.BoxGeometry(2.1, 0.18, 0.7),
+        new THREE.MeshStandardMaterial({ color: 0xcfc6b0, roughness: 0.95 })
+      );
+      step.position.set(0, 0.09, houseD / 2 + 0.35);
+      house.add(step);
+
+      // Two glowing front windows + flower boxes
+      [-1.75, 1.75].forEach((wx) => {
+        const winMat = new THREE.MeshStandardMaterial({
+          color: 0xfff3c4,
+          emissive: 0xffc861,
+          emissiveIntensity: 0.15,
+          roughness: 0.2,
+        });
+        this.boutiqueHouseWindows.push(winMat);
+        const win = new THREE.Mesh(new THREE.PlaneGeometry(1.25, 1.15), winMat);
+        win.position.set(wx, 2.7, houseD / 2 + 0.011);
+        house.add(win);
+        const wf = new THREE.Mesh(
+          new THREE.BoxGeometry(1.42, 1.32, 0.08),
+          new THREE.MeshStandardMaterial({ color: 0xf8f1e4, roughness: 0.8 })
+        );
+        wf.position.set(wx, 2.7, houseD / 2 + 0.02);
+        house.add(wf);
+        // Cross mullions
+        const mv = new THREE.Mesh(new THREE.BoxGeometry(0.07, 1.15, 0.05), new THREE.MeshStandardMaterial({ color: 0xf8f1e4 }));
+        mv.position.set(wx, 2.7, houseD / 2 + 0.05);
+        house.add(mv);
+        const mh = new THREE.Mesh(new THREE.BoxGeometry(1.25, 0.07, 0.05), new THREE.MeshStandardMaterial({ color: 0xf8f1e4 }));
+        mh.position.set(wx, 2.7, houseD / 2 + 0.05);
+        house.add(mh);
+        // Flower box
+        const box = new THREE.Mesh(
+          new THREE.BoxGeometry(1.35, 0.26, 0.32),
+          new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.9 })
+        );
+        box.position.set(wx, 2.02, houseD / 2 + 0.16);
+        house.add(box);
+        [0xef4444, 0xfacc15, 0xa855f7].forEach((c, fi) => {
+          const flower = new THREE.Mesh(
+            new THREE.SphereGeometry(0.09, 8, 8),
+            new THREE.MeshStandardMaterial({ color: c, roughness: 0.6 })
+          );
+          flower.position.set(wx - 0.4 + fi * 0.4, 2.22, houseD / 2 + 0.18);
+          house.add(flower);
+        });
+      });
+
+      // Porch lamp
+      const porchLamp = new THREE.Mesh(
+        new THREE.SphereGeometry(0.12, 10, 10),
+        new THREE.MeshStandardMaterial({
+          color: 0xfff7cc,
+          emissive: 0xffe082,
+          emissiveIntensity: 0.6,
+        })
+      );
+      porchLamp.position.set(1.0, 2.0, houseD / 2 + 0.15);
+      house.add(porchLamp);
+
+      // Halloween pumpkin on the step (only visible on Halloween)
+      const pumpkin = new THREE.Group();
+      const pbody = new THREE.Mesh(
+        new THREE.SphereGeometry(0.3, 14, 12),
+        new THREE.MeshStandardMaterial({ color: 0xea580c, roughness: 0.7 })
+      );
+      pbody.scale.set(1, 0.82, 1);
+      pbody.position.y = 0.26;
+      pumpkin.add(pbody);
+      const pstem = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.04, 0.06, 0.16, 6),
+        new THREE.MeshStandardMaterial({ color: 0x166534 })
+      );
+      pstem.position.y = 0.5;
+      pumpkin.add(pstem);
+      const face = new THREE.MeshStandardMaterial({ color: 0xfde047, emissive: 0xfacc15, emissiveIntensity: 1.4 });
+      [-0.1, 0.1].forEach((fx) => {
+        const eye = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.1, 4), face);
+        eye.rotation.x = Math.PI;
+        eye.position.set(fx, 0.3, 0.26);
+        pumpkin.add(eye);
+      });
+      const grin = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.05, 0.04), face);
+      grin.position.set(0, 0.18, 0.27);
+      pumpkin.add(grin);
+      pumpkin.position.set(-0.95, 0.18, houseD / 2 + 0.35);
+      pumpkin.visible = false;
+      house.add(pumpkin);
+      this.boutiqueHousePumpkins.push(pumpkin);
+
+      // House number plate
+      const num = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.5, 0.3),
+        new THREE.MeshBasicMaterial({ color: 0xf8f1e4 })
+      );
+      num.position.set(-1.0, 2.0, houseD / 2 + 0.14);
+      house.add(num);
+
+      this.cityGroup.add(house);
+    });
+  }
+
+  // ---------- CAFE (patio + interior) ----------
+  /** Round bistro table, modelled on the garden tabletop table. */
+  private makeCafeTable(): THREE.Group {
+    const g = new THREE.Group();
+    const wood = new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.7 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x7c2d12, roughness: 0.7 });
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.6, 0.09, 24), wood);
+    top.position.y = 0.98;
+    top.castShadow = true;
+    g.add(top);
+    const column = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.1, 0.9, 12), dark);
+    column.position.y = 0.5;
+    g.add(column);
+    const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.38, 0.06, 16), dark);
+    foot.position.y = 0.03;
+    g.add(foot);
+    return g;
+  }
+
+  /** Simple wooden bistro chair. */
+  private makeCafeChair(): THREE.Group {
+    const g = new THREE.Group();
+    const wood = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.75 });
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.08, 0.56), wood);
+    seat.position.y = 0.5;
+    seat.castShadow = true;
+    g.add(seat);
+    const back = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.55, 0.08), wood);
+    back.position.set(0, 0.78, -0.25);
+    g.add(back);
+    [[-0.22, -0.22], [0.22, -0.22], [-0.22, 0.22], [0.22, 0.22]].forEach(([lx, lz]) => {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.5, 0.07), wood);
+      leg.position.set(lx, 0.25, lz);
+      g.add(leg);
+    });
+    g.userData = { type: "cafe_seat" };
+    g.traverse((c) => (c.userData = { type: "cafe_seat" }));
+    return g;
+  }
+
+  /** Cosy café next to the Tool Store, with a roadside patio. */
+  private buildCafeExterior() {
+    // Ground patch so the north row + café sit on solid concrete
+    const pad = new THREE.Mesh(
+      new THREE.PlaneGeometry(60, 24),
+      new THREE.MeshStandardMaterial({ color: 0x9aa1a8, roughness: 0.95 })
+    );
+    pad.geometry.rotateX(-Math.PI / 2);
+    pad.position.set(26, 0.008, -49);
+    pad.receiveShadow = true;
+    pad.userData = { type: "city_floor" };
+    this.cityGroup.add(pad);
+
+    const g = new THREE.Group();
+    const w = 5.6;
+    const h = 4.2;
+    const d = 5.6;
+    const cream = new THREE.MeshStandardMaterial({ color: 0xfbf0dc, roughness: 0.88 });
+    const brown = new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.8 });
+    const darkBrown = new THREE.MeshStandardMaterial({ color: 0x5c3a1e, roughness: 0.85 });
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+    });
+
+    const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), cream);
+    body.position.y = h / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const plinth = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, 0.45, d + 0.2), brown);
+    plinth.position.y = 0.22;
+    g.add(plinth);
+    // Flat roof with a brown fascia
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(w + 0.5, 0.3, d + 0.5), darkBrown);
+    roof.position.y = h + 0.15;
+    roof.castShadow = true;
+    g.add(roof);
+    // Parapet + rooftop sign board
+    const signBoard = this.civicSign("☕ HAPPY CAFE", "#7c2d12", "#fde68a", 4.2);
+    signBoard.position.set(0, h - 0.5, -d / 2 - 0.06);
+    signBoard.rotation.y = Math.PI;
+    g.add(signBoard);
+    // Big warm front window + door (front = -z, facing the avenue)
+    const win = new THREE.Mesh(new THREE.PlaneGeometry(w - 2.6, 1.9), glassMat);
+    win.position.set(-1.1, 1.85, -d / 2 - 0.02);
+    win.rotation.y = Math.PI;
+    g.add(win);
+    const winFrame = new THREE.Mesh(new THREE.BoxGeometry(w - 2.3, 2.15, 0.1), brown);
+    winFrame.position.set(-1.1, 1.85, -d / 2 - 0.01);
+    g.add(winFrame);
+    const door = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 2.5), glassMat);
+    door.position.set(1.6, 1.3, -d / 2 - 0.05);
+    door.rotation.y = Math.PI;
+    door.userData = { type: "cafe_entrance" };
+    g.add(door);
+    this.cafeDoorMesh = door;
+    const doorFrame = new THREE.Mesh(new THREE.BoxGeometry(1.5, 2.7, 0.1), brown);
+    doorFrame.position.set(1.6, 1.32, -d / 2 - 0.01);
+    g.add(doorFrame);
+    // Striped awning over the window
+    const awning = new THREE.Mesh(new THREE.BoxGeometry(w - 1.2, 0.14, 1.15), brown);
+    awning.position.set(0, 3.05, -d / 2 - 0.55);
+    awning.castShadow = true;
+    g.add(awning);
+    // Hanging lantern by the door
+    const lantern = new THREE.Mesh(
+      new THREE.SphereGeometry(0.14, 10, 10),
+      new THREE.MeshStandardMaterial({ color: 0xfff7cc, emissive: 0xffb020, emissiveIntensity: 0.8 })
+    );
+    lantern.position.set(2.6, 2.6, -d / 2 - 0.12);
+    g.add(lantern);
+
+    g.position.set(45.2, 0, -45.8);
+    g.rotation.y = Math.PI; // front (window/door/sign) faces the avenue
+    g.userData = { type: "cafe" };
+    g.traverse((c) => (c.userData = { type: "cafe" }));
+    // Keep the door's own tag
+    door.userData = { type: "cafe_entrance" };
+    this.cafeGroup = g;
+    this.cityGroup.add(g);
+
+    // ---- Patio in front of the café ----
+    const patio = new THREE.Mesh(
+      new THREE.CylinderGeometry(3.1, 3.15, 0.12, 24),
+      new THREE.MeshStandardMaterial({ color: 0xb08968, roughness: 0.9 })
+    );
+    patio.position.set(45.2, 0.06, -42.1);
+    patio.userData = { type: "city_floor" };
+    this.cityGroup.add(patio);
+    // Low railing at the street edge
+    const railMat = new THREE.MeshStandardMaterial({ color: 0x5c3a1e, roughness: 0.6 });
+    for (let i = 0; i < 9; i++) {
+      const a = (i / 8) * Math.PI;
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.55, 6), railMat);
+      post.position.set(45.2 + Math.cos(a) * 3.0, 0.33, -42.1 - Math.sin(a) * 1.6);
+      this.cityGroup.add(post);
+    }
+
+    // Two bistro sets, two chairs each, plus chatting dogs
+    const setDefs: { x: number; z: number }[] = [
+      { x: 43.9, z: -42.2 },
+      { x: 46.5, z: -42.2 },
+    ];
+    const talkLines = [
+      { woof: "Woof woof!", meaning: "I'm telling you, the cake here fills you up for the WHOLE day." },
+      { woof: "Yip! Woof…", meaning: "Tea is 25 coins. Coffee, too. But the cake? Worth every coin." },
+      { woof: "Woof woof woof!", meaning: "The barista puts a little biscuit on the saucer. Best part of the whole town." },
+    ];
+    setDefs.forEach((s, si) => {
+      const table = this.makeCafeTable();
+      table.position.set(s.x, 0, s.z);
+      this.cityGroup.add(table);
+      // A little teapot + cup on each table
+      const pot = new THREE.Mesh(
+        new THREE.SphereGeometry(0.13, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0xf8f1e4, roughness: 0.4 })
+      );
+      pot.position.set(s.x, 1.11, s.z);
+      pot.scale.set(1, 0.8, 1);
+      this.cityGroup.add(pot);
+      // Two chairs + two sitting dogs per table
+      [-1, 1].forEach((side, ci) => {
+        const chair = this.makeCafeChair();
+        chair.position.set(s.x + side * 0.95, 0, s.z);
+        chair.rotation.y = side < 0 ? Math.PI / 2 : -Math.PI / 2;
+        this.cityGroup.add(chair);
+        this.cafeOutdoorSeats.push({
+          group: chair,
+          x: s.x + side * 0.95,
+          z: s.z,
+          rot: side < 0 ? Math.PI / 2 : -Math.PI / 2,
+        });
+        // Put a chatting dog on the first chair of each table
+        if (ci === 0) {
+          const model = new Dog3D(si === 0 ? "corgi" : "dalmatian", si === 0 ? "#e11d48" : "#0284c7");
+          model.group.scale.setScalar(0.78);
+          model.group.position.set(s.x + side * 0.95, 0.48, s.z);
+          model.group.rotation.y = side < 0 ? Math.PI / 2 : -Math.PI / 2;
+          model.setAction("sit", 9999);
+          model.group.userData = { type: "cafe_talk_dog", talkIndex: this.cafeTalkDogs.length };
+          model.group.traverse((c) => {
+            c.userData = { type: "cafe_talk_dog", talkIndex: this.cafeTalkDogs.length };
+          });
+          this.cityGroup.add(model.group);
+          this.cafeTalkDogs.push({ model, lines: talkLines, idx: si });
+        }
+      });
+    });
+  }
+
+  /** The interior: counter, barista, coffee machine, cakes and indoor tables. */
+  private buildCafeInterior() {
+    const room = this.cafeInteriorGroup;
+    const shell = this.buildCityInteriorShell(
+      room,
+      0xf3e3c8,
+      0x7c2d12,
+      0x8a5a2b,
+      "☕ HAPPY CAFE",
+      "#7c2d12"
+    );
+    this.cafeFloorMesh = shell.floor;
+    // The shell's exit door is the way out; own it here.
+    this.cafeDoorMesh = shell.door;
+
+    const wood = new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.65 });
+    const woodDark = new THREE.MeshStandardMaterial({ color: 0x5c3a1e, roughness: 0.7 });
+    const metal = new THREE.MeshStandardMaterial({ color: 0xb0b6bf, metalness: 0.8, roughness: 0.25 });
+
+    // ---- Counter at the north end ----
+    this.cafeCounterGroup = new THREE.Group();
+    const base = new THREE.Mesh(new THREE.BoxGeometry(8.5, 1.0, 1.2), wood);
+    base.position.y = 0.5;
+    base.castShadow = true;
+    this.cafeCounterGroup.add(base);
+    const top = new THREE.Mesh(new THREE.BoxGeometry(8.8, 0.12, 1.4), woodDark);
+    top.position.y = 1.06;
+    this.cafeCounterGroup.add(top);
+    // Coffee machine
+    const espresso = new THREE.Group();
+    const emBody = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.85, 0.6), metal);
+    emBody.position.y = 0.42;
+    espresso.add(emBody);
+    const emTop = new THREE.Mesh(new THREE.BoxGeometry(1.15, 0.18, 0.65), woodDark);
+    emTop.position.y = 0.92;
+    espresso.add(emTop);
+    [-0.3, 0.3].forEach((ex) => {
+      const spout = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.22, 8), metal);
+      spout.position.set(ex, 0.02, 0.32);
+      espresso.add(spout);
+      const cup = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.08, 0.065, 0.11, 10),
+        new THREE.MeshStandardMaterial({ color: 0xf8f1e4, roughness: 0.4 })
+      );
+      cup.position.set(ex, 0.06, 0.48);
+      espresso.add(cup);
+    });
+    espresso.position.set(-2.4, 1.12, 0.15);
+    this.cafeCounterGroup.add(espresso);
+    // Three cakes on stands behind/along the counter
+    const cakeColors = [0xf9a8d4, 0xd9b382, 0xfde68a];
+    [-0.4, 0.9, 2.2].forEach((cx, ci) => {
+      const stand = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.26, 0.14, 14),
+        new THREE.MeshStandardMaterial({ color: 0xf8f1e4, roughness: 0.4 })
+      );
+      stand.position.set(cx, 1.19, 0.1);
+      this.cafeCounterGroup.add(stand);
+      const cake = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.34, 0.34, 0.24, 18),
+        new THREE.MeshStandardMaterial({ color: cakeColors[ci], roughness: 0.6 })
+      );
+      cake.position.set(cx, 1.38, 0.1);
+      this.cafeCounterGroup.add(cake);
+      const icing = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.29, 0.29, 0.08, 18),
+        new THREE.MeshStandardMaterial({ color: 0xfff7f9, roughness: 0.5 })
+      );
+      icing.position.set(cx, 1.53, 0.1);
+      this.cafeCounterGroup.add(icing);
+    });
+    this.cafeCounterGroup.position.set(0, 0, -4.9);
+    this.cafeCounterGroup.userData = { type: "cafe_counter" };
+    this.cafeCounterGroup.traverse((c) => (c.userData = { type: "cafe_counter" }));
+    room.add(this.cafeCounterGroup);
+
+    // Barista dog behind the counter, facing the room
+    const barista = new Dog3D("golden", "#16a34a");
+    barista.group.scale.setScalar(0.9);
+    barista.group.position.set(0.6, 0, -6.0);
+    barista.group.rotation.y = 0;
+    barista.setAction("idle");
+    barista.group.userData = { type: "cafe_barista" };
+    barista.group.traverse((c) => (c.userData = { type: "cafe_barista" }));
+    room.add(barista.group);
+    this.cafeBarista = barista;
+
+    // Indoor bistro sets
+    const setDefs: { x: number; z: number }[] = [
+      { x: -4.2, z: 1.6 },
+      { x: 4.2, z: 1.6 },
+    ];
+    setDefs.forEach((s) => {
+      const table = this.makeCafeTable();
+      table.position.set(s.x, 0, s.z);
+      room.add(table);
+      [-1, 1].forEach((side) => {
+        const chair = this.makeCafeChair();
+        chair.position.set(s.x, 0, s.z + side * 1.05);
+        chair.rotation.y = side < 0 ? 0 : Math.PI;
+        room.add(chair);
+        this.cafeIndoorSeats.push({
+          group: chair,
+          x: s.x,
+          z: s.z + side * 1.05,
+          rot: side < 0 ? 0 : Math.PI,
+        });
+      });
+    });
+
+    // A potted plant + wall art
+    const pot = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.28, 0.22, 0.5, 12),
+      new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.8 })
+    );
+    pot.position.set(-8.4, 0.25, -5.6);
+    room.add(pot);
+    const leaves = new THREE.Mesh(
+      new THREE.SphereGeometry(0.5, 10, 10),
+      new THREE.MeshStandardMaterial({ color: 0x3f7d3a, roughness: 0.9 })
+    );
+    leaves.position.set(-8.4, 0.9, -5.6);
+    room.add(leaves);
+  }
+
+  public enterCafe() {
+    this.viewMode = "cafe";
+    this.houseRoom = "living";
+    this.hideForInterior();
+    this.cafeInteriorGroup.visible = true;
+    this.cafeBarista?.setAction("idle");
+  }
+
+  public exitCafe() {
+    if (this.viewMode !== "cafe") return;
+    this.exitToCity(45.2, -42.6);
+    if (this.onCafeExited) this.onCafeExited();
+  }
+
+  /** Walk to a café chair, sit down and let React open the menu. */
+  private sitAtCafe(seat: { x: number; z: number; rot: number }, place: "patio" | "inside") {
+    const offX = Math.sin(seat.rot) * 0.55;
+    const offZ = Math.cos(seat.rot) * 0.55;
+    const spot = new THREE.Vector3(seat.x - offX, 0, seat.z - offZ);
+    this.walkTo(spot, () => {
+      this.dog.group.position.set(seat.x, place === "inside" ? 0 : 0.12, seat.z);
+      this.dog.group.rotation.y = seat.rot;
+      this.dog.setAction("sit", 9999);
+      sound.playSoftWoof();
+      if (this.onCafeSit) this.onCafeSit(place);
+    });
+  }
+
+  /** An outdoor patron tells Happy what's good on the menu. */
+  private talkToCafeDog(idx: number) {
+    const d = this.cafeTalkDogs[idx];
+    if (!d || this.cafeTalkCooldown > 0) return;
+    d.model.setAction("bark", 1.4);
+    sound.playBark("high");
+    const line = d.lines[d.idx % d.lines.length];
+    this.disposeSprite(this.cafeBubble);
+    this.cafeBubble = this.makeSpeechSprite({
+      canvasW: 640,
+      canvasH: 280,
+      bg: "rgba(255, 247, 237, 0.97)",
+      border: "#7c2d12",
+      lines: [
+        { text: "☕ Café chatter", size: 26, color: "#7c2d12", bold: true },
+        { text: `${line.woof} — “${line.meaning}”`, size: 30, color: "#111827", bold: true },
+      ],
+    });
+    const p = d.model.group.position;
+    this.cafeBubble.position.set(p.x, 2.5, p.z);
+    this.cityGroup.add(this.cafeBubble);
+    this.cafeBubbleTimer = 7;
+    this.cafeTalkCooldown = 1.2;
+    if (this.onCafeDogTalked) this.onCafeDogTalked();
+  }
+
+  private updateCafe(delta: number, elapsed: number) {
+    if (this.cafeTalkCooldown > 0) this.cafeTalkCooldown -= delta;
+    if (this.cafeBubbleTimer > 0) {
+      this.cafeBubbleTimer -= delta;
+      if (this.cafeBubbleTimer <= 0) {
+        this.disposeSprite(this.cafeBubble);
+        this.cafeBubble = null;
+      }
+    }
+    this.cafeTalkDogs.forEach((d) => d.model.update(delta, elapsed));
+    if (this.cafeBarista && this.viewMode === "cafe") this.cafeBarista.update(delta, elapsed);
+  }
+
+  // ---------- AIRPORT ----------
+  /**
+   * A big flat airport west of the music school & gym: a long terminal wall
+   * with one oversized glass door (walk-in "coming soon"), a covered car park
+   * you can actually drive into, two control towers and a runway where planes
+   * land and take off.
+   */
+  private buildAirport() {
+    const g = this.airportGroup;
+    const asphalt = new THREE.MeshStandardMaterial({ color: 0x4a5057, roughness: 0.95 });
+    const darkAsphalt = new THREE.MeshStandardMaterial({ color: 0x3b4045, roughness: 0.95 });
+    const concrete = new THREE.MeshStandardMaterial({ color: 0xb9bfc6, roughness: 0.9 });
+    const white = new THREE.MeshBasicMaterial({ color: 0xf8fafc });
+    const yellow = new THREE.MeshBasicMaterial({ color: 0xf7d45c });
+
+    // ---- The huge tarmac rectangle (long side toward the music school) ----
+    const tarmac = new THREE.Mesh(new THREE.PlaneGeometry(52, 60), asphalt);
+    tarmac.geometry.rotateX(-Math.PI / 2);
+    tarmac.position.set(-56, 0.015, -4);
+    tarmac.receiveShadow = true;
+    tarmac.userData = { type: "city_floor" };
+    g.add(tarmac);
+
+    // ---- Access road from the city park / fountain out to the airport ----
+    const road = new THREE.Mesh(new THREE.PlaneGeometry(30, 5.5), darkAsphalt);
+    road.geometry.rotateX(-Math.PI / 2);
+    road.position.set(-25, 0.02, 1);
+    road.userData = { type: "city_floor" };
+    g.add(road);
+    for (let i = 0; i < 6; i++) {
+      const dash = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 0.18), yellow);
+      dash.geometry.rotateX(-Math.PI / 2);
+      dash.position.set(-13 - i * 4.6, 0.03, 1);
+      g.add(dash);
+    }
+
+    // ---- Long terminal wall (east edge, facing the city) with ONE big door ----
+    const wallH = 6.4;
+    const wallLen = 40;
+    const wallMat = new THREE.MeshStandardMaterial({ color: 0xe7ecf2, roughness: 0.85 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.6 });
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(0.8, wallH, wallLen), wallMat);
+    wall.position.set(-30.4, wallH / 2, -4);
+    wall.castShadow = true;
+    wall.receiveShadow = true;
+    wall.userData = { type: "airport_wall" };
+    g.add(wall);
+    // Blue ribbon trim along the top
+    const ribbon = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.5, wallLen + 0.2), trimMat);
+    ribbon.position.set(-30.4, wallH - 0.25, -4);
+    g.add(ribbon);
+    // Terminal roof slab over the building behind the wall
+    const termRoof = new THREE.Mesh(new THREE.BoxGeometry(12, 0.5, wallLen), wallMat);
+    termRoof.position.set(-36.4, wallH, -4);
+    termRoof.castShadow = true;
+    g.add(termRoof);
+    // Runway-side windows (small, dark) so the wall reads as a terminal
+    for (let i = 0; i < 10; i++) {
+      const wz = -20 + i * 4.2;
+      if (Math.abs(wz) < 3.2) continue; // leave room for the door
+      const win = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.4, 1.1),
+        new THREE.MeshStandardMaterial({ color: 0xbfe6f5, roughness: 0.1, metalness: 0.5 })
+      );
+      win.position.set(-29.98, 4.4, wz);
+      win.rotation.y = Math.PI / 2;
+      g.add(win);
+    }
+    // THE big glass door (a bit wider than the supermarket's 3.1m)
+    const doorW = 4.4;
+    const doorGlass = new THREE.Mesh(
+      new THREE.PlaneGeometry(doorW, 3.4),
+      new THREE.MeshStandardMaterial({
+        color: 0xbfe6f5, roughness: 0.06, metalness: 0.55, transparent: true, opacity: 0.6, side: THREE.DoubleSide,
+      })
+    );
+    doorGlass.position.set(-29.97, 1.75, 0);
+    doorGlass.rotation.y = Math.PI / 2;
+    doorGlass.userData = { type: "airport_door" };
+    g.add(doorGlass);
+    this.airportDoorMesh = doorGlass;
+    const doorFrame = new THREE.Mesh(new THREE.BoxGeometry(0.35, 3.8, doorW + 0.6), trimMat);
+    doorFrame.position.set(-30.2, 1.9, 0);
+    g.add(doorFrame);
+    const doorHeader = this.civicSign("✈️ AIRPORT — COMING SOON", "#1d4ed8", "#ffffff", 6.0);
+    doorHeader.position.set(-29.9, 5.2, 0);
+    doorHeader.rotation.y = Math.PI / 2;
+    g.add(doorHeader);
+
+    // ---- Covered car park (roof on pillars, painted spots, no hinges) ----
+    const lotX = -44;
+    const lotZ = -20;
+    const lotW = 22;
+    const lotD = 12;
+    const lotRoof = new THREE.Mesh(new THREE.BoxGeometry(lotW, 0.4, lotD), concrete);
+    lotRoof.position.set(lotX, 4.3, lotZ);
+    lotRoof.castShadow = true;
+    g.add(lotRoof);
+    const pillarMat = new THREE.MeshStandardMaterial({ color: 0xdfe3e8, roughness: 0.7 });
+    [
+      [lotX - lotW / 2 + 1, lotZ - lotD / 2 + 1],
+      [lotX + lotW / 2 - 1, lotZ - lotD / 2 + 1],
+      [lotX - lotW / 2 + 1, lotZ + lotD / 2 - 1],
+      [lotX + lotW / 2 - 1, lotZ + lotD / 2 - 1],
+      [lotX, lotZ - lotD / 2 + 1],
+      [lotX, lotZ + lotD / 2 - 1],
+    ].forEach(([px, pz]) => {
+      const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.5, 4.3, 0.5), pillarMat);
+      pillar.position.set(px, 2.15, pz);
+      pillar.castShadow = true;
+      g.add(pillar);
+    });
+    // Painted parking spots under the roof (6 bays)
+    for (let i = 0; i < 7; i++) {
+      const line = new THREE.Mesh(new THREE.PlaneGeometry(0.14, lotD - 1.4), white);
+      line.geometry.rotateX(-Math.PI / 2);
+      line.position.set(lotX - lotW / 2 + 1.6 + i * 3.1, 0.03, lotZ);
+      g.add(line);
+    }
+    const pSign = this.civicSign("🅿️ AIRPORT PARKING", "#1d4ed8", "#ffffff", 4.2);
+    pSign.position.set(lotX, 4.9, lotZ + lotD / 2 + 0.3);
+    g.add(pSign);
+
+    // ---- Two control towers ----
+    const makeTower = (tx: number, tz: number, hgt: number) => {
+      const t = new THREE.Group();
+      const shaft = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.1, 1.5, hgt, 14),
+        new THREE.MeshStandardMaterial({ color: 0xf1f5f9, roughness: 0.7 })
+      );
+      shaft.position.y = hgt / 2;
+      shaft.castShadow = true;
+      t.add(shaft);
+      // Red/white bands
+      [0.35, 0.65].forEach((f) => {
+        const band = new THREE.Mesh(
+          new THREE.CylinderGeometry(1.2 - f * 0.2, 1.3 - f * 0.2, 1.1, 14),
+          new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.6 })
+        );
+        band.position.y = hgt * f;
+        t.add(band);
+      });
+      const cab = new THREE.Mesh(
+        new THREE.CylinderGeometry(2.0, 2.0, 1.6, 16),
+        new THREE.MeshStandardMaterial({ color: 0xbfe6f5, roughness: 0.1, metalness: 0.5, transparent: true, opacity: 0.7 })
+      );
+      cab.position.y = hgt + 0.6;
+      t.add(cab);
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(2.1, 2.1, 0.3, 16), concrete);
+      cap.position.y = hgt + 1.55;
+      t.add(cap);
+      const mast = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.06, 0.06, 3.0, 6),
+        new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.6 })
+      );
+      mast.position.y = hgt + 3.1;
+      t.add(mast);
+      const beaconMat = new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xef4444, emissiveIntensity: 1.4 });
+      this.airportBlinkers.push(beaconMat);
+      const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 10), beaconMat);
+      beacon.position.y = hgt + 4.7;
+      t.add(beacon);
+      t.position.set(tx, 0, tz);
+      t.userData = { type: "airport" };
+      t.traverse((c) => (c.userData = { type: "airport" }));
+      g.add(t);
+    };
+    makeTower(-72, -24, 13);
+    makeTower(-72, 16, 13);
+
+    // ---- Runway: a long take-off/landing strip at the back ----
+    const rwX = -64;
+    const rwLen = 54;
+    const runway = new THREE.Mesh(new THREE.PlaneGeometry(11, rwLen), darkAsphalt);
+    runway.geometry.rotateX(-Math.PI / 2);
+    runway.position.set(rwX, 0.02, -4);
+    runway.userData = { type: "city_floor" };
+    g.add(runway);
+    // Centre dashes + threshold bars
+    for (let i = 0; i < 14; i++) {
+      const dash = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 2.4), white);
+      dash.geometry.rotateX(-Math.PI / 2);
+      dash.position.set(rwX, 0.03, -28 + i * 3.6);
+      g.add(dash);
+    }
+    [-1, 1].forEach((s) => {
+      const edge = new THREE.Mesh(new THREE.PlaneGeometry(0.3, rwLen), white);
+      edge.geometry.rotateX(-Math.PI / 2);
+      edge.position.set(rwX + s * 5.2, 0.03, -4);
+      g.add(edge);
+    });
+
+    // ---- Planes (take off, climb, circle back and land — looped) ----
+    const makePlane = (body: number, accent: number) => {
+      const p = new THREE.Group();
+      const fuselage = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.55, 4.6, 8, 14),
+        new THREE.MeshStandardMaterial({ color: body, roughness: 0.4, metalness: 0.3 })
+      );
+      fuselage.rotation.x = Math.PI / 2;
+      fuselage.position.y = 0.6;
+      fuselage.castShadow = true;
+      p.add(fuselage);
+      const nose = new THREE.Mesh(
+        new THREE.ConeGeometry(0.55, 1.0, 14),
+        new THREE.MeshStandardMaterial({ color: body, roughness: 0.4 })
+      );
+      nose.rotation.x = Math.PI / 2;
+      nose.position.set(0, 0.6, 3.1);
+      p.add(nose);
+      const wing = new THREE.Mesh(
+        new THREE.BoxGeometry(9.0, 0.18, 1.5),
+        new THREE.MeshStandardMaterial({ color: 0xdfe3e8, roughness: 0.5 })
+      );
+      wing.position.set(0, 0.55, 0.3);
+      wing.castShadow = true;
+      p.add(wing);
+      const tailWing = new THREE.Mesh(
+        new THREE.BoxGeometry(3.4, 0.14, 0.9),
+        new THREE.MeshStandardMaterial({ color: 0xdfe3e8, roughness: 0.5 })
+      );
+      tailWing.position.set(0, 0.7, -2.6);
+      p.add(tailWing);
+      const fin = new THREE.Mesh(
+        new THREE.BoxGeometry(0.16, 1.5, 1.2),
+        new THREE.MeshStandardMaterial({ color: accent, roughness: 0.5 })
+      );
+      fin.position.set(0, 1.4, -2.8);
+      p.add(fin);
+      [-2.6, 2.6].forEach((ex) => {
+        const engine = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.32, 0.32, 1.0, 12),
+          new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.6, roughness: 0.3 })
+        );
+        engine.rotation.x = Math.PI / 2;
+        engine.position.set(ex, 0.32, 0.2);
+        p.add(engine);
+      });
+      p.userData = { type: "airport" };
+      p.traverse((c) => (c.userData = { type: "airport" }));
+      return p;
+    };
+    const planeA = makePlane(0xf8fafc, 0xdc2626);
+    const planeB = makePlane(0xe2e8f0, 0x1d4ed8);
+    g.add(planeA);
+    g.add(planeB);
+    this.airportPlanes.push({ group: planeA, offset: 0, speed: 0.09 });
+    this.airportPlanes.push({ group: planeB, offset: 0.5, speed: 0.075 });
+
+    g.userData = { type: "airport" };
+    g.traverse((c) => {
+      if (!(c.userData as { type?: string }).type) c.userData = { type: "airport" };
+    });
+    // Keep the door tagged for the "coming soon" click
+    doorGlass.userData = { type: "airport_door" };
+    this.cityGroup.add(g);
+  }
+
+  private updateAirport(delta: number, elapsed: number) {
+    // Blinking tower beacons
+    const blink = 0.5 + 0.5 * Math.sin(elapsed * 3.0);
+    this.airportBlinkers.forEach((m) => (m.emissiveIntensity = 0.4 + blink * 1.6));
+    // Planes: roll along the runway, climb, loop round and touch down again.
+    this.airportPlanes.forEach((p) => {
+      const t = ((elapsed * p.speed + p.offset) % 1 + 1) % 1;
+      const z = -30 + t * 60;
+      // Climb after the halfway point, glide back down near the end.
+      const climb = t < 0.45 ? 0 : Math.sin(((t - 0.45) / 0.55) * Math.PI) * 7;
+      p.group.position.set(-64, 0.05 + climb, z);
+      p.group.rotation.x = -climb * 0.02;
+      p.group.rotation.y = 0; // nose toward +z (take-off direction)
+    });
+  }
+
+  // ---------- CLOTHING BOUTIQUE ----------
+  private buildClothingStoreExterior() {
+    const g = new THREE.Group();
+    const w = 8;
+    const h = 4.6;
+    const d = 7;
+    const cream = 0xfdf2f8;
+    const pink = 0xbe185d;
+
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(w, h, d),
+      new THREE.MeshStandardMaterial({ color: cream, roughness: 0.85 })
+    );
+    body.position.y = h / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const skirt = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.25, 0.6, d + 0.25),
+      new THREE.MeshStandardMaterial({ color: pink, roughness: 0.7 })
+    );
+    skirt.position.y = 0.3;
+    g.add(skirt);
+    const roof = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.6, 0.35, d + 0.6),
+      new THREE.MeshStandardMaterial({ color: 0x9d174d, roughness: 0.8 })
+    );
+    roof.position.y = h + 0.17;
+    roof.castShadow = true;
+    g.add(roof);
+
+    // Glass shopfront on the north (-z) face
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.6, side: THREE.DoubleSide,
+    });
+    const frameMat = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.3, roughness: 0.4 });
+    const glass = new THREE.Mesh(new THREE.PlaneGeometry(w - 1.0, 2.6), glassMat);
+    glass.position.set(0, 1.65, -d / 2 - 0.02);
+    glass.rotation.y = Math.PI;
+    g.add(glass);
+    const door = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 2.5), glassMat);
+    door.position.set(0, 1.3, -d / 2 - 0.05);
+    door.rotation.y = Math.PI;
+    g.add(door);
+    const dh = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.16, 0.18), frameMat);
+    dh.position.set(0, 2.6, -d / 2 - 0.02);
+    g.add(dh);
+    [-0.95, 0.95].forEach((dx) => {
+      const j = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.6, 0.18), frameMat);
+      j.position.set(dx, 1.3, -d / 2 - 0.02);
+      g.add(j);
+    });
+    [-2.6, -1.3, 1.3, 2.6].forEach((mx) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2.6, 0.14), frameMat);
+      m.position.set(mx, 1.65, -d / 2 - 0.02);
+      g.add(m);
+    });
+
+    // Pink awning
+    const awning = new THREE.Mesh(
+      new THREE.BoxGeometry(w - 0.6, 0.16, 1.3),
+      new THREE.MeshStandardMaterial({ color: pink, roughness: 0.6 })
+    );
+    awning.position.set(0, 3.15, -d / 2 - 0.65);
+    awning.castShadow = true;
+    g.add(awning);
+
+    const sign = this.civicSign("👗 DOGGY BOUTIQUE", "#be185d", "#ffffff", 5.0);
+    sign.position.set(0, h - 0.55, -d / 2 - 0.08);
+    sign.rotation.y = Math.PI;
+    g.add(sign);
+
+    // A big pink bow on the roof
+    const bow = new THREE.Mesh(
+      new THREE.TorusGeometry(0.55, 0.14, 8, 20),
+      new THREE.MeshStandardMaterial({ color: pink, roughness: 0.5 })
+    );
+    bow.position.set(0, h + 0.75, 0);
+    g.add(bow);
+
+    g.position.set(30, 0, -32);
+    g.userData = { type: "clothing" };
+    g.traverse((c) => (c.userData = { type: "clothing" }));
+    this.clothingStoreGroup = g;
+    this.cityGroup.add(g);
+  }
+
+  /** A little cream dog-head mannequin bust (no body — a proper hat stand). */
+  private makeDogHeadBust(): THREE.Group {
+    const bust = new THREE.Group();
+    const fur = new THREE.MeshStandardMaterial({ color: 0xf3e3cf, roughness: 0.85 });
+    const fur2 = new THREE.MeshStandardMaterial({ color: 0xe7d3b8, roughness: 0.85 });
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.38, 18, 18), fur);
+    head.scale.set(0.96, 1.0, 1.02);
+    head.castShadow = true;
+    bust.add(head);
+    const snout = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.22, 0.3), fur2);
+    snout.position.set(0, -0.07, 0.32);
+    bust.add(snout);
+    const nose = new THREE.Mesh(
+      new THREE.SphereGeometry(0.06, 10, 10),
+      new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.4 })
+    );
+    nose.position.set(0, -0.04, 0.48);
+    bust.add(nose);
+    [-1, 1].forEach((s) => {
+      const ear = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.26, 8), fur2);
+      ear.position.set(s * 0.27, 0.28, 0);
+      ear.rotation.z = -s * 0.35;
+      ear.castShadow = true;
+      bust.add(ear);
+      const eye = new THREE.Mesh(
+        new THREE.SphereGeometry(0.045, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.3 })
+      );
+      eye.position.set(s * 0.15, 0.08, 0.34);
+      bust.add(eye);
+    });
+    return bust;
+  }
+
+  /** The 3D hat/clothing model shown on a mannequin bust. */
+  private makeDisplayHat(id: string): THREE.Group {
+    const g = new THREE.Group();
+    const black = new THREE.MeshStandardMaterial({ color: 0x18181b, roughness: 0.5 });
+    const red = new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.4 });
+    const gold = new THREE.MeshStandardMaterial({ color: 0xf59e0b, metalness: 0.8, roughness: 0.2 });
+    const purple = new THREE.MeshStandardMaterial({ color: 0x4c1d95, roughness: 0.55 });
+    const amber = new THREE.MeshStandardMaterial({ color: 0xd97706, roughness: 0.8 });
+
+    if (id === "tophat") {
+      const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.03, 18), black);
+      brim.position.y = 0.4;
+      g.add(brim);
+      const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.21, 0.23, 0.32, 18), black);
+      crown.position.y = 0.57;
+      crown.castShadow = true;
+      g.add(crown);
+      const band = new THREE.Mesh(new THREE.CylinderGeometry(0.235, 0.235, 0.06, 18), red);
+      band.position.y = 0.45;
+      g.add(band);
+    } else if (id === "crown") {
+      // Jewelled imperial crown displayed on the bust
+      const goldBright = new THREE.MeshStandardMaterial({
+        color: 0xffd24a,
+        metalness: 0.95,
+        roughness: 0.16,
+        emissive: 0x6b4a00,
+        emissiveIntensity: 0.3,
+      });
+      const goldDark = new THREE.MeshStandardMaterial({ color: 0xd69412, metalness: 0.9, roughness: 0.3 });
+      const ruby = new THREE.MeshStandardMaterial({
+        color: 0xe11d48, metalness: 0.4, roughness: 0.15, emissive: 0x7f0d24, emissiveIntensity: 0.5,
+      });
+      const sapphire = new THREE.MeshStandardMaterial({
+        color: 0x2563eb, metalness: 0.4, roughness: 0.15, emissive: 0x0b2a72, emissiveIntensity: 0.5,
+      });
+      const cap = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.2, 0.22, 0.16, 18),
+        new THREE.MeshStandardMaterial({ color: 0xb3122f, roughness: 0.85 })
+      );
+      cap.position.y = 0.46;
+      g.add(cap);
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.255, 0.245, 0.17, 22), goldBright);
+      base.position.y = 0.4;
+      base.castShadow = true;
+      g.add(base);
+      [0.48, 0.32].forEach((y) => {
+        const rim = new THREE.Mesh(new THREE.TorusGeometry(0.252, 0.022, 8, 26), goldDark);
+        rim.rotation.x = Math.PI / 2;
+        rim.position.y = y;
+        g.add(rim);
+      });
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        const jewel = new THREE.Mesh(new THREE.OctahedronGeometry(0.045, 0), i % 2 === 0 ? ruby : sapphire);
+        jewel.position.set(Math.sin(a) * 0.255, 0.4, Math.cos(a) * 0.255);
+        jewel.scale.set(0.7, 1.1, 0.7);
+        g.add(jewel);
+        const tall = i % 2 === 0;
+        const archH = tall ? 0.24 : 0.16;
+        const arch = new THREE.Mesh(new THREE.ConeGeometry(0.062, archH, 6), goldBright);
+        arch.position.set(Math.sin(a) * 0.215, 0.485 + archH / 2, Math.cos(a) * 0.215);
+        g.add(arch);
+        const pearl = new THREE.Mesh(new THREE.SphereGeometry(0.045, 12, 12), goldBright);
+        pearl.position.set(Math.sin(a) * 0.215, 0.485 + archH + 0.03, Math.cos(a) * 0.215);
+        g.add(pearl);
+      }
+      const finial = new THREE.Mesh(new THREE.SphereGeometry(0.06, 14, 14), goldBright);
+      finial.position.y = 0.6;
+      g.add(finial);
+    } else if (id === "witchhat") {
+      const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.4, 0.045, 20), purple);
+      brim.position.y = 0.4;
+      g.add(brim);
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.5, 16), purple);
+      cone.position.y = 0.66;
+      cone.rotation.z = 0.16;
+      cone.castShadow = true;
+      g.add(cone);
+      const band = new THREE.Mesh(new THREE.CylinderGeometry(0.235, 0.235, 0.06, 16), black);
+      band.position.y = 0.45;
+      g.add(band);
+    } else if (id === "sunglasses") {
+      const lensMat = new THREE.MeshStandardMaterial({ color: 0x0284c7, metalness: 0.8, roughness: 0.15 });
+      [-1, 1].forEach((s) => {
+        const lens = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.09, 0.03), lensMat);
+        lens.position.set(s * 0.14, 0.06, 0.36);
+        g.add(lens);
+      });
+      const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.02, 0.02), black);
+      bridge.position.set(0, 0.06, 0.36);
+      g.add(bridge);
+    } else if (id === "bowtie") {
+      const knot = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 8), red);
+      knot.position.set(0, -0.4, 0.3);
+      g.add(knot);
+      [-1, 1].forEach((s) => {
+        const wing = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.13, 6), red);
+        wing.rotation.z = (s * Math.PI) / 2;
+        wing.position.set(s * 0.1, -0.4, 0.3);
+        g.add(wing);
+      });
+    } else if (id === "scarf") {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.36, 0.08, 10, 24), amber);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = -0.34;
+      g.add(ring);
+      const tail = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.28, 0.05), amber);
+      tail.position.set(0.22, -0.5, 0.28);
+      tail.rotation.z = 0.2;
+      g.add(tail);
+    } else if (id === "bell") {
+      const bell = new THREE.Mesh(new THREE.SphereGeometry(0.07, 12, 12), gold);
+      bell.position.set(0, -0.4, 0.3);
+      g.add(bell);
+    }
+    return g;
+  }
+
+  private makeStoreLabel(name: string, sub: string): THREE.Sprite {
+    const c = document.createElement("canvas");
+    c.width = 256;
+    c.height = 110;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
+    ctx.beginPath();
+    ctx.roundRect(4, 4, 248, 102, 16);
+    ctx.fill();
+    ctx.strokeStyle = "#f9a8d4";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    ctx.fillStyle = "#831843";
+    ctx.textAlign = "center";
+    let size = 28;
+    ctx.font = "bold " + size + "px sans-serif";
+    while (ctx.measureText(name).width > 226 && size > 13) {
+      size--;
+      ctx.font = "bold " + size + "px sans-serif";
+    }
+    ctx.fillText(name, 128, 44);
+    ctx.fillStyle = "#be185d";
+    ctx.font = "bold 24px sans-serif";
+    ctx.fillText(sub, 128, 82);
+    const tex = new THREE.CanvasTexture(c);
+    const sp = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false })
+    );
+    sp.scale.set(1.7, 0.73, 1);
+    sp.renderOrder = 999;
+    return sp;
+  }
+
+  private buildClothingStoreInterior() {
+    const room = this.clothingStoreInteriorGroup;
+    const shell = this.buildCityInteriorShell(
+      room,
+      0xfdf2f8,
+      0xbe185d,
+      0xa8755a,
+      "👗 DOGGY BOUTIQUE",
+      "#be185d"
+    );
+    this.clothingStoreFloorMesh = shell.floor;
+    this.clothingStoreDoorMesh = shell.door;
+
+    // Hat display: a row of dog-head mannequins on pedestals
+    this.clothingMannequins = [];
+    const creamMat = new THREE.MeshStandardMaterial({ color: 0xfce7f3, roughness: 0.7 });
+    CLOTHING_CATALOG.forEach((item, i) => {
+      const x = -6.6 + i * 2.2;
+      const ped = new THREE.Group();
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.6, 1.0, 18), creamMat);
+      base.position.y = 0.5;
+      base.castShadow = true;
+      ped.add(base);
+      const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.2, 0.5, 12), creamMat);
+      neck.position.y = 1.25;
+      ped.add(neck);
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x94a3b8,
+        roughness: 0.4,
+        emissive: 0x000000,
+        emissiveIntensity: 0.05,
+      });
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.05, 8, 24), mat);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = 1.02;
+      ped.add(ring);
+      const bust = this.makeDogHeadBust();
+      bust.position.y = 1.5;
+      ped.add(bust);
+      bust.add(this.makeDisplayHat(item.id));
+      const label = this.makeStoreLabel(item.name, item.price + " coins");
+      label.position.set(0, 2.6, 0.05);
+      ped.add(label);
+      ped.position.set(x, 0, -5.0);
+      ped.userData = { type: "clothing_item", clothingId: item.id };
+      room.add(ped);
+      this.clothingMannequins.push({ id: item.id, mat });
+    });
+
+    // Mirror on the east wall
+    const mirrorFrame = new THREE.Mesh(
+      new THREE.BoxGeometry(0.14, 3.0, 2.0),
+      new THREE.MeshStandardMaterial({ color: 0xbe185d, roughness: 0.5 })
+    );
+    mirrorFrame.position.set(9.8, 1.8, 0);
+    room.add(mirrorFrame);
+    const mirror = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.8, 2.8),
+      new THREE.MeshStandardMaterial({ color: 0xdbeafe, metalness: 0.9, roughness: 0.05 })
+    );
+    mirror.rotation.y = -Math.PI / 2;
+    mirror.position.set(9.72, 1.8, 0);
+    room.add(mirror);
+
+    // A clothes rack with colourful garments
+    const rack = new THREE.Group();
+    const railMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.7, roughness: 0.3 });
+    [-1.2, 1.2].forEach((rx) => {
+      const post = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.8, 10), railMat);
+      post.position.set(rx, 0.9, 0);
+      rack.add(post);
+    });
+    const rail = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 2.5, 10), railMat);
+    rail.rotation.z = Math.PI / 2;
+    rail.position.y = 1.75;
+    rack.add(rail);
+    [0xef4444, 0x3b82f6, 0x22c55e, 0xfacc15, 0xa855f7].forEach((col, i) => {
+      const garment = new THREE.Mesh(
+        new THREE.BoxGeometry(0.36, 1.0, 0.12),
+        new THREE.MeshStandardMaterial({ color: col, roughness: 0.8 })
+      );
+      garment.position.set(-0.9 + i * 0.45, 1.2, 0);
+      rack.add(garment);
+    });
+    rack.position.set(-8.4, 0, 2.4);
+    room.add(rack);
+
+    // Friendly shopkeeper dog
+    const shopDog = new Dog3D("dalmatian", "#be185d");
+    shopDog.group.position.set(6.8, 0, 1.4);
+    shopDog.group.rotation.y = -Math.PI / 2;
+    shopDog.setAction("idle");
+    room.add(shopDog.group);
+
+    const fill = new THREE.PointLight(0xff9bc7, 0.9, 16);
+    fill.position.set(-3, 3.4, 1.5);
+    room.add(fill);
+  }
+
+  /** Recolour the mannequin rings to show owned / equipped clothing. */
+  public setClothingState(owned: string[], equipped?: string) {
+    this.clothingMannequins.forEach(({ id, mat }) => {
+      if (equipped === id) {
+        mat.color.setHex(0xf59e0b);
+        mat.emissive.setHex(0xf59e0b);
+        mat.emissiveIntensity = 0.7;
+      } else if (owned.includes(id)) {
+        mat.color.setHex(0x22c55e);
+        mat.emissive.setHex(0x22c55e);
+        mat.emissiveIntensity = 0.35;
+      } else {
+        mat.color.setHex(0x94a3b8);
+        mat.emissive.setHex(0x000000);
+        mat.emissiveIntensity = 0.05;
+      }
+    });
+  }
+
+  // ---------- TOOL STORE ----------
+  private makeAxeModel(): THREE.Group {
+    const axe = new THREE.Group();
+    const handleMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.7 });
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0xd1d5db, metalness: 0.8, roughness: 0.3 });
+    const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 1.2, 10), handleMat);
+    handle.position.y = 0.6;
+    axe.add(handle);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.3, 0.13), steelMat);
+    head.position.set(0.12, 1.2, 0);
+    axe.add(head);
+    const blade = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.5, 4), steelMat);
+    blade.rotation.z = -Math.PI / 2;
+    blade.position.set(0.47, 1.2, 0);
+    axe.add(blade);
+    return axe;
+  }
+
+  private buildToolStoreExterior() {
+    const g = new THREE.Group();
+    const w = 7.5;
+    const h = 4.0;
+    const d = 7;
+    const stone = 0xd6d3d1;
+    const rust = 0x9a3412;
+
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(w, h, d),
+      new THREE.MeshStandardMaterial({ color: stone, roughness: 0.92 })
+    );
+    body.position.y = h / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const skirt = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.25, 0.7, d + 0.25),
+      new THREE.MeshStandardMaterial({ color: 0x57534e, roughness: 0.8 })
+    );
+    skirt.position.y = 0.35;
+    g.add(skirt);
+    const roof = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.6, 0.4, d + 0.6),
+      new THREE.MeshStandardMaterial({ color: rust, roughness: 0.8 })
+    );
+    roof.position.y = h + 0.2;
+    roof.castShadow = true;
+    g.add(roof);
+
+    const glassMat = new THREE.MeshStandardMaterial({
+      color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+    });
+    const frameMat = new THREE.MeshStandardMaterial({ color: 0x57534e, metalness: 0.5, roughness: 0.4 });
+    const win = new THREE.Mesh(new THREE.PlaneGeometry(w - 1.4, 1.8), glassMat);
+    win.position.set(0, 2.0, -d / 2 - 0.02);
+    win.rotation.y = Math.PI;
+    g.add(win);
+    const door = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 2.4), glassMat);
+    door.position.set(0, 1.25, -d / 2 - 0.05);
+    door.rotation.y = Math.PI;
+    g.add(door);
+    const dh = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.16, 0.18), frameMat);
+    dh.position.set(0, 2.5, -d / 2 - 0.02);
+    g.add(dh);
+    [-0.85, 0.85].forEach((dx) => {
+      const j = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.5, 0.18), frameMat);
+      j.position.set(dx, 1.25, -d / 2 - 0.02);
+      g.add(j);
+    });
+
+    // Tool-store awning
+    const awning = new THREE.Mesh(
+      new THREE.BoxGeometry(w - 0.8, 0.16, 1.1),
+      new THREE.MeshStandardMaterial({ color: rust, roughness: 0.6 })
+    );
+    awning.position.set(0, 2.95, -d / 2 - 0.55);
+    awning.castShadow = true;
+    g.add(awning);
+
+    const sign = this.civicSign("🪓 TOOL STORE", "#9a3412", "#ffffff", 4.4);
+    sign.position.set(0, h - 0.5, -d / 2 - 0.08);
+    sign.rotation.y = Math.PI;
+    g.add(sign);
+
+    // Giant axe over the roof
+    const bigAxe = this.makeAxeModel();
+    bigAxe.scale.setScalar(1.6);
+    bigAxe.position.set(0, h + 0.3, 0);
+    bigAxe.rotation.z = Math.PI;
+    g.add(bigAxe);
+
+    g.position.set(39, 0, -32);
+    g.userData = { type: "toolshop" };
+    g.traverse((c) => (c.userData = { type: "toolshop" }));
+    this.toolStoreGroup = g;
+    this.cityGroup.add(g);
+  }
+
+  private buildToolStoreInterior() {
+    const room = this.toolStoreInteriorGroup;
+    const shell = this.buildCityInteriorShell(
+      room,
+      0xe7e5e4,
+      0x57534e,
+      0x8a6f52,
+      "🪓 TOOL STORE",
+      "#57534e"
+    );
+    this.toolStoreFloorMesh = shell.floor;
+    this.toolStoreDoorMesh = shell.door;
+
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.75 });
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0x9ca3af, metalness: 0.7, roughness: 0.35 });
+
+    // Display board on the back wall
+    const board = new THREE.Mesh(new THREE.BoxGeometry(4.6, 2.6, 0.18), woodMat);
+    board.position.set(0, 2.4, -6.7);
+    board.userData = { type: "axe_display" };
+    room.add(board);
+    const axe = this.makeAxeModel();
+    axe.position.set(-0.9, 1.2, -6.55);
+    axe.scale.setScalar(1.2);
+    axe.traverse((c) => (c.userData = { type: "axe_display" }));
+    this.axeDisplayGroup = axe;
+    room.add(axe);
+    const axeLabel = this.makeStoreLabel("Lumberjack Axe", "60 coins");
+    axeLabel.position.set(0.9, 2.6, -6.5);
+    room.add(axeLabel);
+
+    // Counter + shopkeeper dog
+    const counter = new THREE.Mesh(new THREE.BoxGeometry(3.0, 1.0, 0.9), woodMat);
+    counter.position.set(5.6, 0.5, -3.0);
+    counter.castShadow = true;
+    room.add(counter);
+    this.toolStoreDog = new Dog3D("husky", "#57534e");
+    this.toolStoreDog.group.position.set(5.6, 0, -4.1);
+    this.toolStoreDog.group.rotation.y = 0;
+    this.toolStoreDog.setAction("idle");
+    room.add(this.toolStoreDog.group);
+
+    // The chopping block / woodpile
+    const block = new THREE.Group();
+    const stump = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.55, 0.62, 0.75, 16),
+      new THREE.MeshStandardMaterial({ color: 0x6b4426, roughness: 0.85 })
+    );
+    stump.position.y = 0.375;
+    stump.castShadow = true;
+    block.add(stump);
+    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.95, 14), woodMat);
+    log.rotation.z = Math.PI / 2;
+    log.position.y = 0.88;
+    log.castShadow = true;
+    block.add(log);
+    const stuckAxe = this.makeAxeModel();
+    stuckAxe.scale.setScalar(0.75);
+    stuckAxe.position.set(0.12, 0.72, 0.1);
+    stuckAxe.rotation.z = -0.5;
+    block.add(stuckAxe);
+    block.position.set(4.6, 0, 1.4);
+    block.userData = { type: "chop_block" };
+    block.traverse((c) => (c.userData = { type: "chop_block" }));
+    this.choppingBlockGroup = block;
+    room.add(block);
+    const chopLabel = this.makeStoreLabel("Chopping Block", "chop for coins");
+    chopLabel.position.set(4.6, 2.2, 1.4);
+    room.add(chopLabel);
+
+    // A few barrels & crates for atmosphere
+    [0x8b5a2b, 0x6b4426].forEach((col, i) => {
+      const barrel = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.4, 0.4, 0.9, 14),
+        new THREE.MeshStandardMaterial({ color: col, roughness: 0.85 })
+      );
+      barrel.position.set(-7.6 + i * 1.1, 0.45, 3.2);
+      barrel.castShadow = true;
+      room.add(barrel);
+    });
+    const toolShelf = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.12, 0.6), woodMat);
+    toolShelf.position.set(-7.4, 2.0, -4.5);
+    room.add(toolShelf);
+    [-8.4, -7.4, -6.4].forEach((x) => {
+      const tool = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.7, 0.12), steelMat);
+      tool.position.set(x, 2.4, -4.5);
+      room.add(tool);
+    });
+
+    const fill = new THREE.PointLight(0xffd9a0, 1.0, 16);
+    fill.position.set(0, 3.4, 1.5);
+    room.add(fill);
+  }
+
+  public setHasAxe(v: boolean) {
+    this.hasAxe = v;
+  }
+
+  /** Swing the axe at the chopping block (only if the axe was bought). */
+  private chopWoodpile() {
+    if (!this.hasAxe) {
+      if (this.onAxeClicked) this.onAxeClicked();
+      return;
+    }
+    if (this.chopCooldown > 0) return;
+    this.chopCooldown = 1.4;
+    this.dog.setAction("bark", 0.7);
+    sound.playBark("normal");
+    const origin = new THREE.Vector3(4.6, 1.0, 1.4);
+    for (let i = 0; i < 10; i++) {
+      const chip = new THREE.Mesh(
+        new THREE.BoxGeometry(0.09, 0.04, 0.16),
+        new THREE.MeshStandardMaterial({ color: i % 2 ? 0xb5793a : 0x8b5a2b, roughness: 0.8 })
+      );
+      chip.position
+        .copy(origin)
+        .add(new THREE.Vector3((Math.random() - 0.5) * 0.5, 0, (Math.random() - 0.5) * 0.5));
+      this.toolStoreInteriorGroup.add(chip);
+      this.woodChips.push({
+        mesh: chip,
+        vel: new THREE.Vector3(
+          (Math.random() - 0.5) * 2.2,
+          2.2 + Math.random() * 1.6,
+          (Math.random() - 0.5) * 2.2
+        ),
+        spin: new THREE.Vector3(Math.random() * 6, Math.random() * 6, Math.random() * 6),
+        life: 1.3,
+      });
+    }
+    if (this.onChopLog) this.onChopLog();
+  }
+
+  /** Fell a park tree with the Lumberjack Axe (it grows back after a while). */
+  public chopTree(treeId: string): boolean {
+    const idx = this.treeData.findIndex((t) => t.id === treeId);
+    if (idx < 0) return false;
+    const data = this.treeData[idx];
+    if (!data.alive) return false;
+    if (!this.hasAxe) {
+      if (this.onTreeClickedNoAxe) this.onTreeClickedNoAxe();
+      return false;
+    }
+    data.alive = false;
+    data.respawnAt = performance.now() + 60000;
+    const tree = this.treeGroups[idx];
+    // Falling-timber animation: tip over, then hide + schedule a respawn.
+    const startRot = tree.rotation.z;
+    const startY = tree.position.y;
+    const t0 = performance.now();
+    const fall = () => {
+      const k = Math.min(1, (performance.now() - t0) / 700);
+      tree.rotation.z = startRot + k * 1.35;
+      tree.position.y = startY - k * 0.4;
+      if (k < 1) {
+        requestAnimationFrame(fall);
+      } else {
+        tree.visible = false;
+        tree.rotation.z = startRot;
+        tree.position.y = startY;
+      }
+    };
+    requestAnimationFrame(fall);
+    sound.playChop();
+    this.spawnHeartParticles(tree.position.clone().add(new THREE.Vector3(0, 2.2, 0)));
+    if (this.selectedEditId === treeId) this.selectEditable(null);
+    if (this.onTreeChopped) this.onTreeChopped(treeId);
+    return true;
+  }
+
+  private updateTreeRespawns() {
+    const now = performance.now();
+    this.treeData.forEach((data, i) => {
+      if (!data.alive && now >= data.respawnAt) {
+        data.alive = true;
+        const tree = this.treeGroups[i];
+        tree.visible = true;
+        tree.scale.setScalar(0.01);
+        const t0 = performance.now();
+        const target = data.baseScale || 1;
+        const grow = () => {
+          const k = Math.min(1, (performance.now() - t0) / 1200);
+          tree.scale.setScalar(Math.max(0.01, k * target));
+          if (k < 1) requestAnimationFrame(grow);
+          else tree.scale.setScalar(target);
+        };
+        requestAnimationFrame(grow);
+      }
+    });
+  }
+
+  private updateToolStore(delta: number) {
+    if (this.chopCooldown > 0) this.chopCooldown -= delta;
+    for (let i = this.woodChips.length - 1; i >= 0; i--) {
+      const c = this.woodChips[i];
+      c.life -= delta;
+      c.vel.y -= 9 * delta;
+      c.mesh.position.addScaledVector(c.vel, delta);
+      c.mesh.rotation.x += c.spin.x * delta;
+      c.mesh.rotation.z += c.spin.z * delta;
+      if (c.life <= 0) {
+        this.toolStoreInteriorGroup.remove(c.mesh);
+        c.mesh.geometry.dispose();
+        (c.mesh.material as THREE.Material).dispose();
+        this.woodChips.splice(i, 1);
+      }
+    }
+  }
+
+  public enterClothingStore() {
+    this.viewMode = "clothing";
+    this.houseRoom = "living";
+    this.hideForInterior();
+    this.clothingStoreInteriorGroup.visible = true;
+  }
+
+  public exitClothingStore() {
+    if (this.viewMode !== "clothing") return;
+    this.exitToCity(30, -36.6);
+    if (this.onClothingStoreExited) this.onClothingStoreExited();
+  }
+
+  public enterToolStore() {
+    this.viewMode = "toolshop";
+    this.houseRoom = "living";
+    this.hideForInterior();
+    this.toolStoreInteriorGroup.visible = true;
+    if (this.toolStoreDog) this.toolStoreDog.setAction("idle");
+  }
+
+  public exitToolStore() {
+    if (this.viewMode !== "toolshop") return;
+    this.exitToCity(39, -36.6);
+    if (this.onToolStoreExited) this.onToolStoreExited();
+  }
+
+  // ================= PRESENT TABLE (Cake Store) =================
+
+  private setupPresentTable() {
+    const room = this.cakeStoreInteriorGroup;
+    const table = new THREE.Group();
+    const wood = new THREE.MeshStandardMaterial({ color: 0x9a6a3a, roughness: 0.7 });
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(1.5, 1.5, 0.14, 28), wood);
+    top.position.y = 0.92;
+    top.castShadow = true;
+    top.receiveShadow = true;
+    table.add(top);
+    const cloth = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.58, 1.58, 0.04, 28),
+      new THREE.MeshStandardMaterial({ color: 0xfdf2f8, roughness: 0.9 })
+    );
+    cloth.position.y = 1.0;
+    table.add(cloth);
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.32, 0.9, 16), wood);
+    leg.position.y = 0.45;
+    table.add(leg);
+    table.userData = { type: "present_table" };
+
+    const colors = [0xef4444, 0x3b82f6, 0x22c55e, 0xa855f7];
+    const spots: [number, number][] = [
+      [-0.65, 0],
+      [0.65, 0],
+      [0, -0.65],
+      [0, 0.65],
+    ];
+    const ribbonMat = new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.4 });
+    spots.forEach(([ox, oz], i) => {
+      const grp = new THREE.Group();
+      const box = new THREE.Mesh(
+        new THREE.BoxGeometry(0.62, 0.52, 0.62),
+        new THREE.MeshStandardMaterial({ color: colors[i], roughness: 0.55 })
+      );
+      box.position.y = 0.26;
+      box.castShadow = true;
+      grp.add(box);
+      const vRibbonA = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.54, 0.66), ribbonMat);
+      vRibbonA.position.y = 0.26;
+      grp.add(vRibbonA);
+      const vRibbonB = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.54, 0.12), ribbonMat);
+      vRibbonB.position.y = 0.26;
+      grp.add(vRibbonB);
+
+      const lid = new THREE.Group();
+      const slab = new THREE.Mesh(
+        new THREE.BoxGeometry(0.68, 0.14, 0.68),
+        new THREE.MeshStandardMaterial({ color: 0xfff7f9, roughness: 0.5 })
+      );
+      slab.position.y = 0.07;
+      lid.add(slab);
+      const lRibbonA = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.74), ribbonMat);
+      lRibbonA.position.y = 0.16;
+      lid.add(lRibbonA);
+      const lRibbonB = new THREE.Mesh(new THREE.BoxGeometry(0.74, 0.08, 0.12), ribbonMat);
+      lRibbonB.position.y = 0.16;
+      lid.add(lRibbonB);
+      const bow = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 10), ribbonMat);
+      bow.position.y = 0.23;
+      lid.add(bow);
+      lid.position.y = 0.52;
+      grp.add(lid);
+
+      grp.position.set(ox, 1.02, oz);
+      grp.userData = { type: "present", presentIndex: i };
+      table.add(grp);
+      this.presents.push({ group: grp, lid, opened: false, baseLidY: 0.52 });
+    });
+
+    table.position.set(-7.0, 0, -1.0);
+    this.presentTableGroup = table;
+    room.add(table);
+
+    const glow = new THREE.PointLight(0xffd9a0, 0.9, 10);
+    glow.position.set(-7.0, 2.4, -1.0);
+    room.add(glow);
+  }
+
+  /** Camera framing: Happy in front, the present table beyond him. */
+  private focusPresentTable() {
+    const t = this.presentTableGroup.position;
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    this.dog.group.position.set(t.x, 0, t.z + 2.0);
+    this.dog.group.rotation.y = Math.PI;
+    this.dog.setAction("idle");
+    this.presentCamLock = true;
+    this.cameraTarget.set(t.x, 0.9, t.z + 0.45);
+    this.updateCameraPosition();
+    sound.playSoftWoof();
+  }
+
+  private spawnPresentSparkles(center: THREE.Vector3) {
+    ["🎉", "✨", "🎁"].forEach((char, i) => {
+      for (let n = 0; n < 4; n++) {
+        const sprite = new THREE.Sprite(
+          new THREE.SpriteMaterial({
+            map: this.emojiTexture(char),
+            transparent: true,
+            depthTest: false,
+          })
+        );
+        sprite.scale.set(0.55, 0.55, 1);
+        sprite.position.copy(center).add(
+          new THREE.Vector3((Math.random() - 0.5) * 1.2, Math.random() * 0.6, (Math.random() - 0.5) * 1.2)
+        );
+        sprite.renderOrder = 998;
+        this.cakeStoreInteriorGroup.add(sprite);
+        this.presentBursts.push({ sprite, vy: 1.3 + Math.random(), life: 1.4 + i * 0.1 });
+      }
+    });
+  }
+
+  private openPresent(index: number) {
+    const p = this.presents[index];
+    if (!p || p.opened) return;
+    p.opened = true;
+    this.presentLidAnims.push({ lid: p.lid, t: 0, baseY: p.baseLidY });
+    sound.playRewardFanfare();
+    this.spawnPresentSparkles(
+      p.group.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 0.4, 0))
+    );
+    if (this.onPresentOpened) this.onPresentOpened(index);
+  }
+
+  /** Restore already-opened presents when the save is loaded. */
+  public setOpenedPresents(indices: number[]) {
+    this.openedPresentIdx = [...indices];
+    this.presents.forEach((p, i) => {
+      if (this.openedPresentIdx.includes(i)) {
+        p.opened = true;
+        p.lid.position.y = p.baseLidY + 0.55;
+        p.lid.rotation.z = 0.35;
+      }
+    });
+  }
+
+  private updatePresentTable(delta: number) {
+    for (let i = this.presentLidAnims.length - 1; i >= 0; i--) {
+      const a = this.presentLidAnims[i];
+      a.t += delta;
+      const k = Math.min(1, a.t / 0.5);
+      const e = 1 - Math.pow(1 - k, 3);
+      a.lid.position.y = a.baseY + e * 0.55;
+      a.lid.rotation.z = e * 0.35;
+      if (k >= 1) this.presentLidAnims.splice(i, 1);
+    }
+    for (let i = this.presentBursts.length - 1; i >= 0; i--) {
+      const b = this.presentBursts[i];
+      b.life -= delta;
+      b.sprite.position.y += b.vy * delta;
+      (b.sprite.material as THREE.SpriteMaterial).opacity = Math.max(0, Math.min(1, b.life));
+      if (b.life <= 0) {
+        (b.sprite.material as THREE.SpriteMaterial).dispose();
+        this.cakeStoreInteriorGroup.remove(b.sprite);
+        this.presentBursts.splice(i, 1);
+      }
+    }
   }
 
   // ================= SUPERMARKET GLASS DOORS =================
@@ -6116,6 +8665,62 @@ export class ParkScene {
         partyLines: [
           { woof: "WOOOOF! Woof!", meaning: "Happy birthday, friend! I wished for you to catch your tail one day. Dreams are important." },
           { woof: "Woof… woof!", meaning: "The fountain is spraying in rhythm with the birthday song. I think. Or I'm just very happy." },
+        ],
+      },
+      {
+        name: "Pip",
+        breed: "golden",
+        collar: "#16a34a",
+        home: [-11.2, -20],
+        radius: 3.2,
+        lines: [
+          { woof: "Woof woof!", meaning: "This is the Town Hall. The clerk dog Bruno gives the best tours — tell him Pip sent you!" },
+          { woof: "Yip! Woof…", meaning: "I have a library card. I can't read. I just like the quiet and the smell of the pages." },
+        ],
+        partyLines: [
+          { woof: "WOOF! Woof!", meaning: "Happy birthday! The Mayor himself said 'arf' in your honour. Very official." },
+        ],
+      },
+      {
+        name: "Luna",
+        breed: "husky",
+        collar: "#0ea5e9",
+        home: [-11.4, -30.5],
+        radius: 3.2,
+        lines: [
+          { woof: "Woooof!", meaning: "Shhh — the library is right there. I only bark in whispers after dark." },
+          { woof: "Woof-woof!", meaning: "The storyteller book glows when you touch it. Magic, I'm telling you." },
+        ],
+        partyLines: [
+          { woof: "Woof! Wooo!", meaning: "Happy birthday! I howled so loud the librarian gave me a 'please whisper' sticker." },
+        ],
+      },
+      {
+        name: "Nova",
+        breed: "corgi",
+        collar: "#f97316",
+        home: [-8.4, -10],
+        radius: 3.4,
+        lines: [
+          { woof: "Yip yip!", meaning: "That's the Doggy Gym! Coach Max makes even the little legs feel mighty." },
+          { woof: "Woof!", meaning: "I'm warming up for leg day. Every day is leg day when your legs are this short." },
+        ],
+        partyLines: [
+          { woof: "Yip! WOOF!", meaning: "Happy birthday! I did a little party squat for you. One whole squat." },
+        ],
+      },
+      {
+        name: "Biscuit",
+        breed: "chocolate",
+        collar: "#e11d48",
+        home: [3.2, -8.4],
+        radius: 4.6,
+        lines: [
+          { woof: "Woof woof!", meaning: "Always cross at the zebra stripes — that's the only crossing in town and the cars actually stop!" },
+          { woof: "Woooof… woof!", meaning: "I'm heading over to the supermarket side. Their sample counter knows me by name." },
+        ],
+        partyLines: [
+          { woof: "WOOF WOOF!", meaning: "Happy birthday! I brought you something from the supermarket. It's... mostly crumbs now. Sorry." },
         ],
       },
     ];
@@ -6727,6 +9332,1045 @@ export class ParkScene {
     const backLight = new THREE.PointLight(0xfff1d6, 0.9, 16);
     backLight.position.set(5.5, 4.0, -3);
     room.add(backLight);
+
+    // The 4 birthday-present table from the city NPCs
+    this.setupPresentTable();
+  }
+
+  // ===================== NEW CITY DISTRICT =====================
+  // Music School (playable instruments), Town Hall (clerk dog + tutorial),
+  // Library (interactive story books), plus working street lamps and benches.
+
+  /** Rounded canvas sign, reused by the new civic buildings. */
+  private civicSign(text: string, bg: string, fg: string, w = 4.0): THREE.Mesh {
+    const c = document.createElement("canvas");
+    c.width = 512;
+    c.height = 128;
+    const ctx = c.getContext("2d")!;
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.roundRect(6, 6, 500, 116, 22);
+    ctx.fill();
+    ctx.fillStyle = fg;
+    let size = 58;
+    ctx.font = `bold ${size}px sans-serif`;
+    const m = ctx.measureText(text).width;
+    if (m > 470) {
+      size = Math.max(26, Math.floor((58 * 470) / m));
+      ctx.font = `bold ${size}px sans-serif`;
+    }
+    ctx.textAlign = "center";
+    ctx.fillText(text, 256, 84);
+    return new THREE.Mesh(
+      new THREE.PlaneGeometry(w, w * (128 / 512)),
+      new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c) })
+    );
+  }
+
+  /** A working street lamp: the shade lights up after sunset. */
+  private makeStreetLamp(
+    parent: THREE.Object3D,
+    x: number,
+    z: number,
+    height = 2.9,
+    warm = 0xffe6a8
+  ): THREE.Group {
+    const g = new THREE.Group();
+    const poleMat = new THREE.MeshStandardMaterial({ color: 0x334155, metalness: 0.6, roughness: 0.4 });
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.09, height, 8), poleMat);
+    pole.position.y = height / 2;
+    pole.castShadow = true;
+    g.add(pole);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.08, 0.08), poleMat);
+    arm.position.set(0.22, height - 0.06, 0);
+    g.add(arm);
+    const hood = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.22, 10), poleMat);
+    hood.position.set(0.42, height + 0.02, 0);
+    g.add(hood);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xfff7cc,
+      emissive: warm,
+      emissiveIntensity: 0.55,
+    });
+    const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 10), mat);
+    bulb.position.set(0.42, height - 0.16, 0);
+    g.add(bulb);
+    const light = new THREE.PointLight(warm, 0, 13);
+    light.position.set(0.42, height - 0.22, 0);
+    g.add(light);
+    g.position.set(x, 0, z);
+    this.streetLamps.push({ light, bulb, mat });
+    parent.add(g);
+    return g;
+  }
+
+  /** Street lamps are OFF by day and glow warmly at sunset & night. */
+  private updateLampLights() {
+    const on = this.timeOfDay !== "day";
+    const base = this.timeOfDay === "night" ? 2.8 : 1.5;
+    this.streetLamps.forEach(({ light, mat }) => {
+      light.intensity = on ? base : 0;
+      mat.emissiveIntensity = on ? 2.4 : 0.55;
+    });
+    // Boutique Row neighbours switch their windows on after sunset.
+    this.boutiqueHouseWindows.forEach((mat) => {
+      mat.emissiveIntensity = on ? 1.7 : 0.15;
+    });
+  }
+
+  /** One cosy wooden bench you can actually rest on. */
+  private addBench(
+    parent: THREE.Object3D,
+    x: number,
+    z: number,
+    r: number,
+    world: "park" | "city"
+  ): THREE.Group {
+    const bench = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0x92400e, roughness: 0.7 });
+    const legMat = new THREE.MeshStandardMaterial({ color: 0x4b5563, metalness: 0.4, roughness: 0.5 });
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.12, 0.55), mat);
+    seat.position.y = 0.46;
+    seat.castShadow = true;
+    bench.add(seat);
+    const back = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.5, 0.1), mat);
+    back.position.set(0, 0.72, -0.24);
+    back.castShadow = true;
+    bench.add(back);
+    [-0.7, 0.7].forEach((lx) => {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.46, 0.5), legMat);
+      leg.position.set(lx, 0.23, 0);
+      bench.add(leg);
+    });
+    bench.position.set(x, 0, z);
+    bench.rotation.y = r;
+    bench.userData = { type: "bench" };
+    bench.traverse((c) => (c.userData = { type: "bench" }));
+    parent.add(bench);
+    this.benches.push({ group: bench, x, z, world });
+    return bench;
+  }
+
+  /** Cosy benches dotted around the CITY so Happy can rest out on the town. */
+  private buildCityBenches() {
+    // Along the civic row, in front of the Town Hall & Library
+    this.addBench(this.cityGroup, -10.6, -20, Math.PI / 2, "city");
+    this.addBench(this.cityGroup, -10.6, -31, Math.PI / 2, "city");
+    // Outside the gym and the supermarket
+    this.addBench(this.cityGroup, -13.0, -5.4, 0, "city");
+    this.addBench(this.cityGroup, 15.5, -4.8, Math.PI, "city");
+    // By the new car park entrance
+    this.addBench(this.cityGroup, 7.4, 11.4, Math.PI / 2, "city");
+  }
+
+  /** Happy walks to a bench and rests a moment (energy + happiness). */
+  private restOnBench(b: { group: THREE.Group; x: number; z: number }) {
+    const dir = new THREE.Vector3(0, 0, 1).applyAxisAngle(new THREE.Vector3(0, 1, 0), b.group.rotation.y);
+    const spot = new THREE.Vector3(b.x, 0, b.z).addScaledVector(dir, 0.95);
+    this.walkTo(spot, () => {
+      const dx = b.x - this.dog.group.position.x;
+      const dz = b.z - this.dog.group.position.z;
+      if (Math.hypot(dx, dz) > 0.01) this.dog.group.rotation.y = Math.atan2(dx, dz);
+      this.dog.setAction("sit", 3.6);
+      sound.playSoftWoof();
+      this.spawnHeartParticles(this.dog.group.position.clone().add(new THREE.Vector3(0, 1.2, 0)));
+      if (this.onBenchRest) this.onBenchRest();
+    });
+  }
+
+  /** Knock on a Boutique Row door. On Halloween the neighbours hand out candy. */
+  private trickOrTreatAt(index: number) {
+    const door = this.boutiqueHouseDoors[index];
+    if (!door) return;
+    this.dog.setAction("bark", 1.2);
+    const p = door.mesh.getWorldPosition(new THREE.Vector3());
+    if (this.holiday !== "halloween") {
+      sound.playSoftWoof();
+      this.sayAtDoor(p, "🏠 The neighbours are home! Come back on Halloween for candy.");
+      return;
+    }
+    const first = !this.trickOrTreated.has(index);
+    this.trickOrTreated.add(index);
+    sound.playBark("high");
+    this.sayAtDoor(
+      p,
+      first
+        ? "🎃 TRICK OR TREAT! A pawful of candy drops into Happy's bucket!"
+        : "🎃 You already knocked here — the candy bowl is empty. Happy Halloween!"
+    );
+    if (this.onTrickOrTreat) this.onTrickOrTreat(door.name, first);
+  }
+
+  /** Little speech bubble floating over a porch door. */
+  private sayAtDoor(worldPos: THREE.Vector3, text: string) {
+    this.disposeSprite(this.treatBubble);
+    this.treatBubble = this.makeSpeechSprite({
+      canvasW: 640,
+      canvasH: 260,
+      bg: "rgba(255, 247, 237, 0.97)",
+      border: "#db2777",
+      lines: [
+        { text: "🏠 Boutique Row", size: 28, color: "#9d174d", bold: true },
+        { text, size: 34, color: "#111827", bold: true },
+      ],
+    });
+    this.treatBubble.position.set(worldPos.x, worldPos.y + 1.9, worldPos.z + 1.3);
+    this.cityGroup.add(this.treatBubble);
+    this.treatBubbleTimer = 7;
+  }
+
+  /** Shared interior shell (floor + walls + door + sign) for the new buildings. */
+  private buildCityInteriorShell(
+    group: THREE.Group,
+    wallColor: number,
+    trimColor: number,
+    floorTint: number,
+    nameText: string,
+    nameBg: string
+  ): { floor: THREE.Mesh; door: THREE.Mesh } {
+    const wallH = 4.6;
+    const floorCanvas = document.createElement("canvas");
+    floorCanvas.width = 256;
+    floorCanvas.height = 256;
+    const fctx = floorCanvas.getContext("2d")!;
+    fctx.fillStyle = `#${floorTint.toString(16).padStart(6, "0")}`;
+    fctx.fillRect(0, 0, 256, 256);
+    for (let i = 0; i < 10; i++) {
+      fctx.fillStyle = i % 2 === 0 ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.06)";
+      fctx.fillRect(0, i * 26, 256, 24);
+      fctx.fillStyle = "rgba(0,0,0,0.14)";
+      fctx.fillRect(0, i * 26 + 24, 256, 2);
+    }
+    const floorTex = new THREE.CanvasTexture(floorCanvas);
+    floorTex.wrapS = THREE.RepeatWrapping;
+    floorTex.wrapT = THREE.RepeatWrapping;
+    floorTex.repeat.set(6, 4);
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(20, 14),
+      new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.9 })
+    );
+    floor.geometry.rotateX(-Math.PI / 2);
+    floor.position.y = 0.01;
+    floor.receiveShadow = true;
+    floor.userData = { type: "civic_floor" };
+    group.add(floor);
+
+    const wallMat = new THREE.MeshStandardMaterial({ color: wallColor, roughness: 0.9 });
+    const trimMat = new THREE.MeshStandardMaterial({ color: trimColor, roughness: 0.8 });
+    const north = new THREE.Mesh(new THREE.BoxGeometry(20, wallH, 0.3), wallMat);
+    north.position.set(0, wallH / 2, -7);
+    group.add(north);
+    const west = new THREE.Mesh(new THREE.BoxGeometry(0.3, wallH, 14), wallMat);
+    west.position.set(-10, wallH / 2, 0);
+    group.add(west);
+    const east = new THREE.Mesh(new THREE.BoxGeometry(0.3, wallH, 14), wallMat);
+    east.position.set(10, wallH / 2, 0);
+    group.add(east);
+    [-5.725, 5.725].forEach((x) => {
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(8.55, wallH, 0.3), wallMat);
+      seg.position.set(x, wallH / 2, 7);
+      group.add(seg);
+    });
+    const header = new THREE.Mesh(new THREE.BoxGeometry(2.9, 0.9, 0.3), wallMat);
+    header.position.set(0, wallH - 0.45, 7);
+    group.add(header);
+    [[0, -6.86, 20], [-9.86, 0, 14], [9.86, 0, 14]].forEach(([px, pz, len]) => {
+      const strip = new THREE.Mesh(
+        new THREE.BoxGeometry(px === 0 ? len : 0.22, 0.7, px === 0 ? 0.22 : len),
+        trimMat
+      );
+      strip.position.set(px, 0.35, pz);
+      group.add(strip);
+    });
+    const ceiling = new THREE.Mesh(
+      new THREE.PlaneGeometry(20.4, 14.4),
+      new THREE.MeshStandardMaterial({ color: 0xf7f2ea, roughness: 0.95 })
+    );
+    ceiling.geometry.rotateX(Math.PI / 2);
+    ceiling.position.y = wallH;
+    group.add(ceiling);
+
+    // Exit door (glass) on the south wall + EXIT sign
+    const door = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.4, 2.5),
+      new THREE.MeshStandardMaterial({
+        color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85, side: THREE.DoubleSide,
+      })
+    );
+    door.position.set(0, 1.28, 7);
+    door.userData = { type: "civic_exit" };
+    group.add(door);
+    const exitSign = this.civicSign("🚪 EXIT", "#16a34a", "#ffffff", 1.2);
+    exitSign.position.set(0, 3.05, 6.84);
+    group.add(exitSign);
+    // Name plate high on the back wall
+    const nameSign = this.civicSign(nameText, nameBg, "#ffffff", 4.8);
+    nameSign.position.set(0, 3.5, -6.82);
+    group.add(nameSign);
+
+    // Warm ceiling lights
+    [-5, 0, 5].forEach((x) => {
+      const l = new THREE.PointLight(0xfff1d6, 1.0, 17);
+      l.position.set(x, wallH - 0.4, 1.5);
+      group.add(l);
+    });
+    return { floor, door };
+  }
+
+  private setupCivicDistrict() {
+    this.buildMusicSchoolExterior();
+    this.buildMusicSchoolInterior();
+    this.buildTownHallExterior();
+    this.buildTownHallInterior();
+    this.buildLibraryExterior();
+    this.buildLibraryInterior();
+
+    // Street lamps lining the civic row (west side of the street)
+    [
+      [-13.6, -20], [-13.6, -31], [-13.6, -8], [-13.6, 8],
+      [-8.0, 14], [-9.0, -16],
+    ].forEach(([x, z]) => this.makeStreetLamp(this.cityGroup, x, z));
+
+    // Cosy interactive benches dotted around the city
+    this.buildCityBenches();
+
+    this.updateLampLights();
+  }
+
+  // ---------- MUSIC SCHOOL ----------
+  private buildMusicSchoolExterior() {
+    const g = new THREE.Group();
+    const w = 9;
+    const h = 5.0;
+    const d = 9;
+    const cream = 0xfdf0d5;
+    const wood = 0xb5793a;
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(w, h, d),
+      new THREE.MeshStandardMaterial({ color: cream, roughness: 0.85 })
+    );
+    body.position.y = h / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const skirt = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.2, 0.6, d + 0.2),
+      new THREE.MeshStandardMaterial({ color: wood, roughness: 0.8 })
+    );
+    skirt.position.y = 0.3;
+    g.add(skirt);
+    const roof = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.6, 0.3, d + 0.6),
+      new THREE.MeshStandardMaterial({ color: 0x7c4a24, roughness: 0.8 })
+    );
+    roof.position.y = h + 0.15;
+    g.add(roof);
+    // Giant glowing music notes on the roof
+    const noteMat = new THREE.MeshStandardMaterial({
+      color: 0x7c3aed,
+      emissive: 0x7c3aed,
+      emissiveIntensity: 0.6,
+      roughness: 0.5,
+    });
+    [
+      [-1.4, 0.6], [0, 0], [1.4, 0.5],
+    ].forEach(([nx, ny]) => {
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 12), noteMat);
+      head.scale.set(1, 0.75, 1);
+      head.position.set(nx, h + 0.7 + ny, 1.4);
+      g.add(head);
+      const stem = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.1, 0.08), noteMat);
+      stem.position.set(nx + 0.28, h + 1.25 + ny, 1.4);
+      g.add(stem);
+    });
+    const sign = this.civicSign("🎵 MUSIC SCHOOL", "#7c3aed", "#ffffff", 4.4);
+    sign.position.set(w / 2 + 0.06, h - 0.85, 0);
+    sign.rotation.y = Math.PI / 2;
+    g.add(sign);
+    const doorMat = new THREE.MeshStandardMaterial({
+      color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85,
+    });
+    [-0.75, 0.75].forEach((dz) => {
+      const door = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 2.5), doorMat);
+      door.position.set(w / 2 + 0.02, 1.3, dz);
+      door.rotation.y = Math.PI / 2;
+      g.add(door);
+    });
+    [-3.0, 3.0].forEach((dz) => {
+      const win = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.5), doorMat);
+      win.position.set(w / 2 + 0.02, 2.3, dz);
+      win.rotation.y = Math.PI / 2;
+      g.add(win);
+      const frame = new THREE.Mesh(
+        new THREE.BoxGeometry(0.08, 1.75, 2.05),
+        new THREE.MeshStandardMaterial({ color: wood, roughness: 0.7 })
+      );
+      frame.position.set(w / 2 - 0.01, 2.3, dz);
+      g.add(frame);
+    });
+    g.position.set(-18, 0, 11);
+    g.userData = { type: "musicschool" };
+    g.traverse((c) => (c.userData = { type: "musicschool" }));
+    this.musicSchoolGroup = g;
+    this.cityGroup.add(g);
+  }
+
+  private buildMusicSchoolInterior() {
+    const room = this.musicSchoolInteriorGroup;
+    const shell = this.buildCityInteriorShell(
+      room,
+      0xd9c6e8,
+      0x7c3aed,
+      0x8a6f52,
+      "🎵 MUSIC SCHOOL",
+      "#7c3aed"
+    );
+    this.musicSchoolFloorMesh = shell.floor;
+    this.musicSchoolDoorMesh = shell.door;
+
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.6 });
+    const blackMat = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.4 });
+    const whiteMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.5 });
+    const brassMat = new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.8, roughness: 0.3 });
+
+    // Grand piano
+    const piano = new THREE.Group();
+    const pBody = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.0, 3.0), blackMat);
+    pBody.position.y = 0.9;
+    pBody.castShadow = true;
+    piano.add(pBody);
+    const pLid = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.08, 3.0), blackMat);
+    pLid.position.set(0.15, 1.75, 0);
+    pLid.rotation.z = -0.35;
+    piano.add(pLid);
+    const keys = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.1, 1.7), whiteMat);
+    keys.position.set(0.8, 1.0, 0.4);
+    piano.add(keys);
+    for (let i = 0; i < 8; i++) {
+      const bk = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.12, 0.15), blackMat);
+      bk.position.set(0.84, 1.06, -0.28 + i * 0.2);
+      piano.add(bk);
+    }
+    piano.position.set(-5.5, 0, -2);
+    piano.rotation.y = Math.PI / 2;
+    piano.userData = { type: "instrument" };
+    room.add(piano);
+    this.instruments.push({ kind: "piano", label: "Grand Piano", mesh: piano });
+
+    // Drum kit
+    const drums = new THREE.Group();
+    const kick = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.5, 0.5, 0.6, 16),
+      new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.5 })
+    );
+    kick.rotation.z = Math.PI / 2;
+    kick.position.y = 0.5;
+    kick.castShadow = true;
+    drums.add(kick);
+    const snare = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.32, 0.28, 14), whiteMat);
+    snare.position.set(0.55, 0.72, 0.4);
+    drums.add(snare);
+    [
+      [-0.2, 1.05, -0.3, 0.28], [0.15, 1.1, -0.45, 0.24],
+    ].forEach(([x, y, z, r]) => {
+      const tom = new THREE.Mesh(
+        new THREE.CylinderGeometry(r, r, 0.24, 12),
+        new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.5 })
+      );
+      tom.position.set(x, y, z);
+      drums.add(tom);
+    });
+    [
+      [-0.75, 1.3, -0.6], [0.85, 1.35, -0.5],
+    ].forEach(([x, y, z]) => {
+      const cym = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.05, 16), brassMat);
+      cym.position.set(x, y, z);
+      drums.add(cym);
+      const stand = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.3, 6), blackMat);
+      stand.position.set(x, y - 0.65, z);
+      drums.add(stand);
+    });
+    drums.position.set(4.5, 0, -3);
+    drums.userData = { type: "instrument" };
+    room.add(drums);
+    this.instruments.push({ kind: "drum", label: "Drum Kit", mesh: drums });
+
+    // Guitar on a stand
+    const guitar = new THREE.Group();
+    const gBody = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.42, 0.42, 0.14, 18),
+      new THREE.MeshStandardMaterial({ color: 0xb45309, roughness: 0.5 })
+    );
+    gBody.rotation.x = Math.PI / 2;
+    gBody.position.y = 0.55;
+    guitar.add(gBody);
+    const gNeck = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.3, 0.08), blackMat);
+    gNeck.position.y = 1.4;
+    guitar.add(gNeck);
+    const gHead = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.22, 0.1), woodMat);
+    gHead.position.y = 2.05;
+    guitar.add(gHead);
+    guitar.position.set(0, 0, -5.2);
+    guitar.userData = { type: "instrument" };
+    room.add(guitar);
+    this.instruments.push({ kind: "guitar", label: "Guitar", mesh: guitar });
+
+    // Xylophone on a little table
+    const xylo = new THREE.Group();
+    const xTop = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.12, 0.9), woodMat);
+    xTop.position.y = 0.8;
+    xylo.add(xTop);
+    [-0.9, 0.9].forEach((x) => {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.8, 0.12), woodMat);
+      leg.position.set(x, 0.4, 0);
+      xylo.add(leg);
+    });
+    [0xf43f5e, 0xfb923c, 0xfacc15, 0x4ade80, 0x38bdf8, 0x818cf8, 0xa855f7, 0xf472b6].forEach(
+      (color, i) => {
+        const bar = new THREE.Mesh(
+          new THREE.BoxGeometry(0.13, 0.07, 0.72 - i * 0.03),
+          new THREE.MeshStandardMaterial({ color, roughness: 0.4 })
+        );
+        bar.position.set(-0.77 + i * 0.22, 0.9, 0);
+        xylo.add(bar);
+      }
+    );
+    xylo.position.set(6, 0, 2.5);
+    xylo.userData = { type: "instrument" };
+    room.add(xylo);
+    this.instruments.push({ kind: "xylophone", label: "Xylophone", mesh: xylo });
+
+    // Flute on a stand
+    const flute = new THREE.Group();
+    const fStand = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.0, 0.3), woodMat);
+    fStand.position.y = 0.5;
+    flute.add(fStand);
+    const fBody = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.6, 10), brassMat);
+    fBody.rotation.z = Math.PI / 2;
+    fBody.position.y = 1.05;
+    flute.add(fBody);
+    flute.position.set(-1.5, 0, 3);
+    flute.userData = { type: "instrument" };
+    room.add(flute);
+    this.instruments.push({ kind: "flute", label: "Flute", mesh: flute });
+  }
+
+  private triggerInstrument(
+    instrument: { kind: "piano" | "guitar" | "drum" | "xylophone" | "flute"; label: string; mesh: THREE.Object3D },
+    worldPos: THREE.Vector3
+  ) {
+    sound.playInstrument(instrument.kind);
+    this.spawnInstrumentNotes(worldPos);
+    if (this.onInstrumentPlayed) this.onInstrumentPlayed(instrument.label);
+  }
+
+  /** Golden music notes floating up from a played instrument. */
+  private spawnInstrumentNotes(center: THREE.Vector3) {
+    const chars = ["🎵", "🎶", "🎼", "🎵"];
+    for (let i = 0; i < 7; i++) {
+      const sprite = new THREE.Sprite(
+        new THREE.SpriteMaterial({
+          map: this.emojiTexture(chars[i % chars.length]),
+          transparent: true,
+          depthTest: false,
+        })
+      );
+      sprite.scale.set(0.7, 0.7, 1);
+      sprite.position.copy(center).add(
+        new THREE.Vector3(
+          (Math.random() - 0.5) * 1.6,
+          0.4 + Math.random() * 0.9,
+          (Math.random() - 0.5) * 1.6
+        )
+      );
+      sprite.renderOrder = 998;
+      this.scene.add(sprite);
+      this.noteSprites.push({
+        sprite,
+        vy: 1.1 + Math.random() * 1.1,
+        life: 1.7,
+        spin: (Math.random() - 0.5) * 2,
+      });
+    }
+  }
+
+  private updateNoteSprites(delta: number) {
+    for (let i = this.noteSprites.length - 1; i >= 0; i--) {
+      const n = this.noteSprites[i];
+      n.life -= delta;
+      n.sprite.position.y += n.vy * delta;
+      n.sprite.position.x += Math.sin(n.life * 4) * 0.4 * delta;
+      (n.sprite.material as THREE.SpriteMaterial).opacity = Math.max(0, Math.min(1, n.life));
+      if (n.life <= 0) {
+        (n.sprite.material as THREE.SpriteMaterial).dispose();
+        this.scene.remove(n.sprite);
+        this.noteSprites.splice(i, 1);
+      }
+    }
+  }
+
+  // ---------- TOWN HALL ----------
+  private buildTownHallExterior() {
+    const g = new THREE.Group();
+    const w = 10;
+    const h = 6.0;
+    const d = 9;
+    const stoneMat = new THREE.MeshStandardMaterial({ color: 0xece5d5, roughness: 0.9 });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), stoneMat);
+    body.position.y = h / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const base = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.4, 0.6, d + 0.4),
+      new THREE.MeshStandardMaterial({ color: 0xcfc6b0, roughness: 0.9 })
+    );
+    base.position.y = 0.3;
+    g.add(base);
+    const cornice = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.5, 0.5, d + 0.5),
+      new THREE.MeshStandardMaterial({ color: 0xdcd3bd, roughness: 0.9 })
+    );
+    cornice.position.y = h + 0.25;
+    g.add(cornice);
+    // Columns on the east face
+    const colMat = new THREE.MeshStandardMaterial({ color: 0xf6f1e4, roughness: 0.85 });
+    [-3.2, -1.1, 1.1, 3.2].forEach((dz) => {
+      const col = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.34, h - 0.6, 14), colMat);
+      col.position.set(w / 2 + 0.35, (h - 0.6) / 2 + 0.5, dz);
+      col.castShadow = true;
+      g.add(col);
+      const capS = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.2, 0.72), colMat);
+      capS.position.set(w / 2 + 0.35, 0.5, dz);
+      g.add(capS);
+      const capT = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.2, 0.72), colMat);
+      capT.position.set(w / 2 + 0.35, h - 0.15, dz);
+      g.add(capT);
+    });
+    // Gable ROOF: the same triangle profile, but now extruded all the way
+    // from the front facade to the back of the building (a real roof, not a
+    // flat billboard). Ridge runs east→west, so the triangle reads on the
+    // street side and the roof stretches to the back.
+    const pedShape = new THREE.Shape();
+    pedShape.moveTo(-4.6, 0);
+    pedShape.lineTo(4.6, 0);
+    pedShape.lineTo(0, 2.1);
+    pedShape.closePath();
+    const roofGeom = new THREE.ExtrudeGeometry(pedShape, { depth: w + 1.4, bevelEnabled: false });
+    const roofMat = new THREE.MeshStandardMaterial({ color: 0xcdc2a6, roughness: 0.92 });
+    const ped = new THREE.Mesh(roofGeom, roofMat);
+    ped.rotation.y = -Math.PI / 2; // local depth now runs toward the back
+    ped.position.set(w / 2 + 0.7, h + 0.45, 0);
+    ped.castShadow = true;
+    ped.receiveShadow = true;
+    g.add(ped);
+    // Flag pole + flag on the roof ridge
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.05, 3.2, 8),
+      new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7, roughness: 0.3 })
+    );
+    pole.position.set(-1.6, h + 2.1 + 1.5, -1.6);
+    g.add(pole);
+    const flag = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.4, 0.9),
+      new THREE.MeshStandardMaterial({ color: 0xc0392b, side: THREE.DoubleSide, roughness: 0.7 })
+    );
+    flag.position.set(-0.9, h + 2.1 + 2.5, -1.6);
+    g.add(flag);
+    // Name sign + glass doors on the east face
+    const sign = this.civicSign("🏛️ TOWN HALL", "#6b4b2a", "#ffffff", 4.8);
+    sign.position.set(w / 2 + 0.95, h - 0.6, 0);
+    sign.rotation.y = Math.PI / 2;
+    g.add(sign);
+    const doorMat = new THREE.MeshStandardMaterial({
+      color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85,
+    });
+    [-0.72, 0.72].forEach((dz) => {
+      const door = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 2.6), doorMat);
+      door.position.set(w / 2 + 0.02, 1.35, dz);
+      door.rotation.y = Math.PI / 2;
+      g.add(door);
+    });
+    // Entrance steps
+    [0, 1].forEach((i) => {
+      const step = new THREE.Mesh(
+        new THREE.BoxGeometry(4.4 - i * 0.6, 0.18, 1.2 - i * 0.4),
+        new THREE.MeshStandardMaterial({ color: 0xd8cfb8, roughness: 0.9 })
+      );
+      step.position.set(w / 2 + 0.7 + i * 0.45, 0.09 + i * 0.18, 0);
+      g.add(step);
+    });
+    g.position.set(-16, 0, -20);
+    g.userData = { type: "townhall" };
+    g.traverse((c) => (c.userData = { type: "townhall" }));
+    this.townHallGroup = g;
+    this.cityGroup.add(g);
+  }
+
+  private buildTownHallInterior() {
+    const room = this.townHallInteriorGroup;
+    const shell = this.buildCityInteriorShell(
+      room,
+      0xe6dcc4,
+      0x8a6a3b,
+      0xb08a5a,
+      "🏛️ TOWN HALL",
+      "#6b4b2a"
+    );
+    this.townHallFloorMesh = shell.floor;
+    this.townHallDoorMesh = shell.door;
+
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x7c4a24, roughness: 0.6 });
+    const deskMat = new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.6 });
+
+    // Clerk's desk at the north end
+    const desk = new THREE.Group();
+    const dtop = new THREE.Mesh(new THREE.BoxGeometry(6.0, 0.2, 1.8), deskMat);
+    dtop.position.y = 1.0;
+    dtop.castShadow = true;
+    desk.add(dtop);
+    const dfront = new THREE.Mesh(new THREE.BoxGeometry(6.0, 1.0, 0.2), deskMat);
+    dfront.position.set(0, 0.5, 0.9);
+    desk.add(dfront);
+    [-2.85, 2.85].forEach((x) => {
+      const side = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.0, 1.8), deskMat);
+      side.position.set(x, 0.5, 0);
+      desk.add(side);
+    });
+    const paper = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.6, 0.8),
+      new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.9 })
+    );
+    paper.rotation.x = -Math.PI / 2;
+    paper.position.set(-1.6, 1.12, 0.1);
+    desk.add(paper);
+    const stamp = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.09, 0.09, 0.22, 10),
+      new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.5 })
+    );
+    stamp.position.set(1.6, 1.2, 0.1);
+    desk.add(stamp);
+    desk.position.set(0, 0, -4.6);
+    desk.userData = { type: "townhall_desk" };
+    room.add(desk);
+
+    // Town crest on the back wall
+    const crest = this.civicSign("🐾 CITY OF HAPPY", "#7c4a03", "#fdf6e3", 4.2);
+    crest.position.set(0, 3.4, -6.82);
+    room.add(crest);
+
+    // Waiting benches facing the desk
+    [-3.4, 3.4].forEach((x) => {
+      const bench = new THREE.Group();
+      const seat = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.14, 0.5), woodMat);
+      seat.position.y = 0.5;
+      bench.add(seat);
+      const back = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.5, 0.1), woodMat);
+      back.position.set(0, 0.8, -0.22);
+      bench.add(back);
+      [-1.0, 1.0].forEach((lx) => {
+        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.4), woodMat);
+        leg.position.set(lx, 0.25, 0);
+        bench.add(leg);
+      });
+      bench.position.set(x, 0, 1.6);
+      bench.userData = { type: "townhall_bench" };
+      room.add(bench);
+    });
+
+    // Bruno the clerk dog, sitting behind the desk
+    this.clerkDog = new Dog3D("husky", "#1d4ed8");
+    this.clerkDog.group.position.set(0, 0, -5.9);
+    this.clerkDog.group.rotation.y = 0; // faces south toward the visitor
+    this.clerkDog.setAction("idle");
+    this.clerkDog.group.userData = { type: "clerk" };
+    room.add(this.clerkDog.group);
+  }
+
+  /** Tap the clerk dog (or his desk) for the grand game tutorial. */
+  private talkToClerk() {
+    if (this.clerkDog) this.clerkDog.setAction("bark", 1.4);
+    sound.playBark("normal");
+    this.clerkSay(
+      "Woof! Welcome to the Town Hall! Let me give you the grand tour of Happy's world!"
+    );
+    if (this.onClerkTalked) this.onClerkTalked();
+  }
+
+  public clerkSay(text: string) {
+    this.disposeSprite(this.clerkBubble);
+    this.clerkBubble = this.makeSpeechSprite({
+      canvasW: 640,
+      canvasH: 300,
+      lines: [
+        { text: "Bruno the Clerk 🐾", size: 26, color: "#6b4b2a", bold: true },
+        { text, size: 34, color: "#111827", bold: true },
+      ],
+    });
+    this.clerkBubble.position.set(0, 2.9, -5.9);
+    this.townHallInteriorGroup.add(this.clerkBubble);
+    this.clerkBubbleTimer = 9;
+  }
+
+  // ---------- LIBRARY ----------
+  private buildLibraryExterior() {
+    const g = new THREE.Group();
+    const w = 9;
+    const h = 4.8;
+    const d = 8;
+    const brick = 0xa4593b;
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(w, h, d),
+      new THREE.MeshStandardMaterial({ color: brick, roughness: 0.92 })
+    );
+    body.position.y = h / 2;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    g.add(body);
+    const trimMat = new THREE.MeshStandardMaterial({ color: 0xf3e3c8, roughness: 0.8 });
+    [[-w / 2, -d / 2], [w / 2, -d / 2], [-w / 2, d / 2], [w / 2, d / 2]].forEach(([px, pz]) => {
+      const t = new THREE.Mesh(new THREE.BoxGeometry(0.32, h, 0.32), trimMat);
+      t.position.set(px, h / 2, pz);
+      g.add(t);
+    });
+    const roof = new THREE.Mesh(
+      new THREE.BoxGeometry(w + 0.5, 0.3, d + 0.5),
+      new THREE.MeshStandardMaterial({ color: 0x5c3a24, roughness: 0.85 })
+    );
+    roof.position.y = h + 0.15;
+    g.add(roof);
+    // Giant open book on the roof
+    const bookGroup = new THREE.Group();
+    const cover = new THREE.Mesh(
+      new THREE.BoxGeometry(2.4, 0.4, 1.6),
+      new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.6 })
+    );
+    cover.position.y = 0.2;
+    bookGroup.add(cover);
+    const pages = new THREE.Mesh(
+      new THREE.BoxGeometry(2.1, 0.2, 1.4),
+      new THREE.MeshStandardMaterial({ color: 0xfef9c3, roughness: 0.7 })
+    );
+    pages.position.y = 0.45;
+    bookGroup.add(pages);
+    bookGroup.position.set(0, h + 0.4, 0.4);
+    g.add(bookGroup);
+    const sign = this.civicSign("📚 LIBRARY", "#1d4ed8", "#ffffff", 4.2);
+    sign.position.set(w / 2 + 0.06, h - 0.75, 0);
+    sign.rotation.y = Math.PI / 2;
+    g.add(sign);
+    const doorMat = new THREE.MeshStandardMaterial({
+      color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85,
+    });
+    [-0.75, 0.75].forEach((dz) => {
+      const door = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 2.4), doorMat);
+      door.position.set(w / 2 + 0.02, 1.25, dz);
+      door.rotation.y = Math.PI / 2;
+      g.add(door);
+    });
+    [-2.9, 2.9].forEach((dz) => {
+      const win = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 1.5), doorMat);
+      win.position.set(w / 2 + 0.02, 2.4, dz);
+      win.rotation.y = Math.PI / 2;
+      g.add(win);
+    });
+    g.position.set(-16, 0, -31);
+    g.userData = { type: "library" };
+    g.traverse((c) => (c.userData = { type: "library" }));
+    this.libraryGroup = g;
+    this.cityGroup.add(g);
+  }
+
+  private buildLibraryInterior() {
+    const room = this.libraryInteriorGroup;
+    const shell = this.buildCityInteriorShell(
+      room,
+      0xe8d7b8,
+      0x8a5a2b,
+      0x9c6b3f,
+      "📚 LIBRARY",
+      "#1d4ed8"
+    );
+    this.libraryFloorMesh = shell.floor;
+    this.libraryDoorMesh = shell.door;
+
+    const shelfMat = new THREE.MeshStandardMaterial({ color: 0x7c4a24, roughness: 0.7 });
+    const bookColors = [0xef4444, 0xf59e0b, 0x10b981, 0x3b82f6, 0x8b5cf6, 0xec4899, 0x14b8a6, 0x6366f1];
+    const makeShelf = (x: number, z: number, ry: number, len: number) => {
+      const shelf = new THREE.Group();
+      const back = new THREE.Mesh(new THREE.BoxGeometry(len, 3.2, 0.3), shelfMat);
+      back.position.y = 1.6;
+      shelf.add(back);
+      for (let r = 0; r < 3; r++) {
+        const board = new THREE.Mesh(new THREE.BoxGeometry(len, 0.1, 0.5), shelfMat);
+        board.position.set(0, 0.7 + r * 0.9, 0.12);
+        shelf.add(board);
+        const n = Math.floor(len / 0.22);
+        for (let i = 0; i < n; i++) {
+          const bh = 0.5 + Math.random() * 0.22;
+          const book = new THREE.Mesh(
+            new THREE.BoxGeometry(0.16, bh, 0.34),
+            new THREE.MeshStandardMaterial({ color: bookColors[(i + r) % bookColors.length], roughness: 0.7 })
+          );
+          book.position.set(-len / 2 + 0.15 + i * 0.22, 0.75 + r * 0.9 + bh / 2, 0.14);
+          shelf.add(book);
+        }
+      }
+      shelf.position.set(x, 0, z);
+      shelf.rotation.y = ry;
+      room.add(shelf);
+    };
+    makeShelf(0, -6.55, 0, 8);
+    makeShelf(-9.6, -1, Math.PI / 2, 8);
+    makeShelf(9.6, -1, -Math.PI / 2, 8);
+
+    // Reading table in the middle
+    const table = new THREE.Group();
+    const ttop = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 0.15, 20), shelfMat);
+    ttop.position.y = 0.9;
+    ttop.castShadow = true;
+    table.add(ttop);
+    const tleg = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.24, 0.9, 12), shelfMat);
+    tleg.position.y = 0.45;
+    table.add(tleg);
+    table.position.set(0, 0, 0.5);
+    room.add(table);
+
+    // Glowing featured books that open a story when tapped
+    const bookSpots: { x: number; y: number; z: number; c: number; ry: number }[] = [
+      { x: 0, y: 1.05, z: 1.0, c: 0xef4444, ry: 0.4 },
+      { x: -8.75, y: 1.6, z: -1, c: 0x3b82f6, ry: 0 },
+      { x: 8.75, y: 1.6, z: -1, c: 0x10b981, ry: 0 },
+      { x: -2.2, y: 1.65, z: -6.1, c: 0xf59e0b, ry: 0 },
+      { x: 2.2, y: 1.65, z: -6.1, c: 0x8b5cf6, ry: 0 },
+    ];
+    bookSpots.forEach((s) => {
+      const glow = new THREE.Mesh(
+        new THREE.BoxGeometry(0.42, 0.66, 0.5),
+        new THREE.MeshStandardMaterial({ color: s.c, emissive: s.c, emissiveIntensity: 0.85, roughness: 0.4 })
+      );
+      glow.position.set(s.x, s.y, s.z);
+      glow.rotation.y = s.ry;
+      glow.castShadow = true;
+      glow.userData = { type: "library_book" };
+      room.add(glow);
+      this.libraryGlowBooks.push(glow);
+    });
+
+    // Cozy fairy lights
+    [-6, 0, 6].forEach((x) => {
+      const l = new THREE.PointLight(0xffd9a0, 0.9, 15);
+      l.position.set(x, 3.6, 0);
+      room.add(l);
+      this.libraryFairyLights.push(l);
+    });
+  }
+
+  /** Tap a glowing book: Happy reads a fresh story (React opens the book). */
+  private openLibraryBook() {
+    sound.playButtonTap();
+    if (this.onBookPicked) this.onBookPicked();
+  }
+
+  // ---------- Enter / exit the new buildings ----------
+  private hideForInterior() {
+    this.hideAllRooms();
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    // Stand Happy near the middle of the room: with the follow-camera that
+    // keeps the shot inside the walls (and framing the back-wall props).
+    this.dog.group.position.set(0, 0, -0.5);
+    this.dog.group.rotation.y = Math.PI;
+    this.dog.setAction("idle");
+    this.spherical.set(7.0, 1.3, 0);
+    this.cameraTarget.set(0, 1.2, -0.5);
+    this.updateCameraPosition();
+    sound.playSoftWoof();
+  }
+
+  private exitToCity(posX: number, posZ: number) {
+    this.viewMode = "city";
+    this.hideAllRooms();
+    this.cityGroup.visible = true;
+    this.dog.group.position.set(posX, 0, posZ);
+    this.dog.group.rotation.y = -Math.PI / 2; // faces the building from outside
+    this.dog.setAction("idle");
+    this.walkTarget = null;
+    this.walkTargetMarker.visible = false;
+    this.spherical.set(9.5, Math.PI / 3.1, 0.5);
+    this.cameraTarget.set(posX + 1.5, 1.0, posZ);
+    this.updateCameraPosition();
+    sound.playButtonTap();
+  }
+
+  private updateCivicDistrict(delta: number) {
+    if (this.clerkBubbleTimer > 0) {
+      this.clerkBubbleTimer -= delta;
+      if (this.clerkBubbleTimer <= 0) {
+        this.disposeSprite(this.clerkBubble);
+        this.clerkBubble = null;
+      }
+    }
+    if (this.treatBubbleTimer > 0) {
+      this.treatBubbleTimer -= delta;
+      if (this.treatBubbleTimer <= 0) {
+        this.disposeSprite(this.treatBubble);
+        this.treatBubble = null;
+      }
+    }
+    // Gentle lamp flicker after dark
+    if (this.timeOfDay !== "day") {
+      this.lampFlickerT += delta;
+      const flick = 1 + Math.sin(this.lampFlickerT * 9) * 0.04 + Math.sin(this.lampFlickerT * 23) * 0.02;
+      const base = this.timeOfDay === "night" ? 2.8 : 1.5;
+      this.streetLamps.forEach(({ light }) => (light.intensity = base * flick));
+    }
+    // Gently pulse the library's featured books so they read as interactive
+    const pulse = 0.7 + Math.sin(this.lampFlickerT * 2) * 0.25;
+    this.libraryGlowBooks.forEach((b) => {
+      const mat = (b as THREE.Mesh).material as THREE.MeshStandardMaterial;
+      if (mat) mat.emissiveIntensity = pulse;
+    });
+  }
+
+  public enterMusicSchool() {
+    this.viewMode = "musicschool";
+    this.houseRoom = "living";
+    this.hideForInterior();
+    this.musicSchoolInteriorGroup.visible = true;
+  }
+
+  public exitMusicSchool() {
+    if (this.viewMode !== "musicschool") return;
+    this.exitToCity(-12.4, 11);
+    if (this.onMusicSchoolExited) this.onMusicSchoolExited();
+  }
+
+  public enterTownHall() {
+    this.viewMode = "townhall";
+    this.houseRoom = "living";
+    this.hideForInterior();
+    this.townHallInteriorGroup.visible = true;
+    if (this.clerkDog) this.clerkDog.setAction("idle");
+  }
+
+  public exitTownHall() {
+    if (this.viewMode !== "townhall") return;
+    this.exitToCity(-9.6, -20);
+    if (this.onTownHallExited) this.onTownHallExited();
+  }
+
+  public enterLibrary() {
+    this.viewMode = "library";
+    this.houseRoom = "living";
+    this.hideForInterior();
+    this.libraryInteriorGroup.visible = true;
+  }
+
+  public exitLibrary() {
+    if (this.viewMode !== "library") return;
+    this.exitToCity(-10.2, -31);
+    if (this.onLibraryExited) this.onLibraryExited();
   }
 
   /** Clicking the shop dog (or his counter) makes him greet you. */
@@ -6759,13 +10403,17 @@ export class ParkScene {
     this.houseRoom = "living";
     this.hideAllRooms();
     this.cakeStoreInteriorGroup.visible = true;
+    this.presentCamLock = false;
     this.walkTarget = null;
     this.walkTargetMarker.visible = false;
-    this.dog.group.position.set(0, 0, 5.6);
+    // Stand Happy inside the shop (not against the south wall) and offset to
+    // the right, so the follow-camera has room to sit behind him and the cake
+    // counter stays visible instead of being blocked by the dog.
+    this.dog.group.position.set(2.3, 0, 1.9);
     this.dog.group.rotation.y = Math.PI; // faces the counter
     this.dog.setAction("idle");
-    this.spherical.set(7.4, Math.PI / 3.2, 0);
-    this.cameraTarget.set(0, 0.9, 0.2);
+    this.spherical.set(6.6, Math.PI / 3.35, 0);
+    this.cameraTarget.set(0, 1.1, 0.2);
     this.updateCameraPosition();
     sound.playSoftWoof();
     // On a birthday the chef dog greets you with the big news right away
@@ -6778,6 +10426,7 @@ export class ParkScene {
   /** Step back out of the Cake Store into the city. */
   public exitCakeStore() {
     if (this.viewMode !== "cakestore") return;
+    this.presentCamLock = false;
     this.viewMode = "city";
     this.hideAllRooms();
     this.cityGroup.visible = true;
@@ -7052,6 +10701,12 @@ export class ParkScene {
     }
 
     this.parkGroup.add(this.holidayDecorGroup);
+
+    // Boutique Row neighbours dress their porches for Halloween too
+    this.boutiqueHousePumpkins.forEach((pumpkin) => {
+      pumpkin.visible = holiday === "halloween";
+    });
+    this.trickOrTreated.clear();
   }
 
   private makeUsFlagTexture(): THREE.CanvasTexture {
@@ -7659,10 +11314,23 @@ export class ParkScene {
           return;
         }
       }
-      // B. Trees are now pure scenery — they can no longer be chopped down
-      // (neither here in the overworld nor anywhere else; hidden park trees
-      // can never be hit from the city/galaxy since this block is now
-      // scoped to the overworld only).
+      // B. Choppable park trees (needs the Lumberjack Axe from the Tool Store).
+      // Scoped to park mode, so hidden trees can never be felled elsewhere.
+      const treeHits = raycaster.intersectObjects(
+        this.treeGroups.filter((_, i) => this.treeData[i]?.alive),
+        true
+      );
+      if (treeHits.length > 0) {
+        let o: THREE.Object3D | null = treeHits[0].object;
+        while (o) {
+          const tid = (o.userData as { treeId?: string }).treeId;
+          if (tid) {
+            this.chopTree(tid);
+            return;
+          }
+          o = o.parent;
+        }
+      }
       // C. The tabletop games table — checked FIRST: it sits just in front of
       // the dog house, so its roof would otherwise swallow the tap.
       const tableHits = raycaster.intersectObject(this.tabletopTableGroup, true);
@@ -7692,6 +11360,14 @@ export class ParkScene {
         this.mpMachinePulse = 1;
         if (this.onMultiplayerMachineClicked) this.onMultiplayerMachineClicked();
         return;
+      }
+
+      // C4. Park benches — walk over and have a rest on them
+      for (const b of this.benches) {
+        if (b.world === "park" && raycaster.intersectObject(b.group, true).length > 0) {
+          this.restOnBench(b);
+          return;
+        }
       }
 
       // D. Check Ground Lawn Click -> Walk to spot!
@@ -7789,6 +11465,65 @@ export class ParkScene {
         this.startCarRideHome();
         return;
       }
+      // The new civic buildings: Music School, Town Hall & Library
+      if (raycaster.intersectObject(this.musicSchoolGroup, true).length > 0) {
+        if (this.onMusicSchoolClicked) this.onMusicSchoolClicked();
+        return;
+      }
+      if (raycaster.intersectObject(this.townHallGroup, true).length > 0) {
+        if (this.onTownHallClicked) this.onTownHallClicked();
+        return;
+      }
+      if (raycaster.intersectObject(this.libraryGroup, true).length > 0) {
+        if (this.onLibraryClicked) this.onLibraryClicked();
+        return;
+      }
+      // The new Boutique Row shops
+      if (raycaster.intersectObject(this.clothingStoreGroup, true).length > 0) {
+        if (this.onClothingStoreClicked) this.onClothingStoreClicked();
+        return;
+      }
+      if (raycaster.intersectObject(this.toolStoreGroup, true).length > 0) {
+        if (this.onToolStoreClicked) this.onToolStoreClicked();
+        return;
+      }
+      // Boutique Row houses → knock for Halloween trick-or-treat
+      for (const d of this.boutiqueHouseDoors) {
+        if (raycaster.intersectObject(d.mesh, false).length > 0) {
+          this.trickOrTreatAt(d.index);
+          return;
+        }
+      }
+      // Café patio: sit at a chair, or chat with the dogs at the tables
+      for (const seat of this.cafeOutdoorSeats) {
+        if (raycaster.intersectObject(seat.group, true).length > 0) {
+          this.sitAtCafe(seat, "patio");
+          return;
+        }
+      }
+      for (let i = 0; i < this.cafeTalkDogs.length; i++) {
+        if (raycaster.intersectObject(this.cafeTalkDogs[i].model.group, true).length > 0) {
+          this.talkToCafeDog(i);
+          return;
+        }
+      }
+      // Café building → step inside
+      if (raycaster.intersectObject(this.cafeGroup, true).length > 0) {
+        if (this.onCafeClicked) this.onCafeClicked();
+        return;
+      }
+      // Airport → the big glass door is "coming soon"
+      if (raycaster.intersectObject(this.airportGroup, true).length > 0) {
+        if (this.onAirportClicked) this.onAirportClicked();
+        return;
+      }
+      // Interactive plaza benches — rest a while
+      for (const b of this.benches) {
+        if (b.world === "city" && raycaster.intersectObject(b.group, true).length > 0) {
+          this.restOnBench(b);
+          return;
+        }
+      }
       // City ground walk
       if (this.cityGroundMesh) {
         const groundHits = raycaster.intersectObject(this.cityGroundMesh, false);
@@ -7815,6 +11550,23 @@ export class ParkScene {
         this.talkToStoreDog();
         return;
       }
+      // The birthday-present table from the city NPCs
+      const tableHits = raycaster.intersectObject(this.presentTableGroup, true);
+      if (tableHits.length > 0) {
+        this.focusPresentTable();
+        for (const hit of tableHits) {
+          let o: THREE.Object3D | null = hit.object;
+          while (o) {
+            const ud = o.userData as { type?: string; presentIndex?: number };
+            if (ud.type === "present") {
+              this.openPresent(ud.presentIndex ?? -1);
+              return;
+            }
+            o = o.parent;
+          }
+        }
+        return;
+      }
       // Front door -> back out into the city
       if (this.cakeStoreDoorMesh) {
         const doorHits = raycaster.intersectObject(this.cakeStoreDoorMesh, false);
@@ -7826,6 +11578,216 @@ export class ParkScene {
       // Shop floor walk
       if (this.cakeStoreFloorMesh) {
         const floorHits = raycaster.intersectObject(this.cakeStoreFloorMesh, false);
+        if (floorHits.length > 0) {
+          this.presentCamLock = false;
+          this.walkTo(floorHits[0].point);
+          return;
+        }
+      }
+      return;
+    }
+
+    // ================= MUSIC SCHOOL interactivity =================
+    if (this.viewMode === "musicschool") {
+      const hits = raycaster.intersectObject(this.musicSchoolInteriorGroup, true);
+      for (const hit of hits) {
+        let o: THREE.Object3D | null = hit.object;
+        while (o) {
+          if ((o.userData as { type?: string }).type === "instrument") {
+            const inst = this.instruments.find((i) => i.mesh === o);
+            if (inst) {
+              this.triggerInstrument(
+                inst,
+                o.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 1.5, 0))
+              );
+            }
+            return;
+          }
+          o = o.parent;
+        }
+      }
+      if (this.musicSchoolDoorMesh) {
+        const doorHits = raycaster.intersectObject(this.musicSchoolDoorMesh, false);
+        if (doorHits.length > 0) {
+          this.exitMusicSchool();
+          return;
+        }
+      }
+      if (this.musicSchoolFloorMesh) {
+        const floorHits = raycaster.intersectObject(this.musicSchoolFloorMesh, false);
+        if (floorHits.length > 0) {
+          this.walkTo(floorHits[0].point);
+          return;
+        }
+      }
+      return;
+    }
+
+    // ================= TOWN HALL interactivity =================
+    if (this.viewMode === "townhall") {
+      if (this.clerkDog) {
+        const dogHits = raycaster.intersectObject(this.clerkDog.group, true);
+        if (dogHits.length > 0) {
+          this.talkToClerk();
+          return;
+        }
+      }
+      const hits = raycaster.intersectObject(this.townHallInteriorGroup, true);
+      for (const hit of hits) {
+        let o: THREE.Object3D | null = hit.object;
+        while (o) {
+          if ((o.userData as { type?: string }).type === "townhall_desk") {
+            this.talkToClerk();
+            return;
+          }
+          o = o.parent;
+        }
+      }
+      if (this.townHallDoorMesh) {
+        const doorHits = raycaster.intersectObject(this.townHallDoorMesh, false);
+        if (doorHits.length > 0) {
+          this.exitTownHall();
+          return;
+        }
+      }
+      if (this.townHallFloorMesh) {
+        const floorHits = raycaster.intersectObject(this.townHallFloorMesh, false);
+        if (floorHits.length > 0) {
+          this.walkTo(floorHits[0].point);
+          return;
+        }
+      }
+      return;
+    }
+
+    // ================= LIBRARY interactivity =================
+    if (this.viewMode === "library") {
+      const hits = raycaster.intersectObject(this.libraryInteriorGroup, true);
+      for (const hit of hits) {
+        let o: THREE.Object3D | null = hit.object;
+        while (o) {
+          if ((o.userData as { type?: string }).type === "library_book") {
+            this.openLibraryBook();
+            return;
+          }
+          o = o.parent;
+        }
+      }
+      if (this.libraryDoorMesh) {
+        const doorHits = raycaster.intersectObject(this.libraryDoorMesh, false);
+        if (doorHits.length > 0) {
+          this.exitLibrary();
+          return;
+        }
+      }
+      if (this.libraryFloorMesh) {
+        const floorHits = raycaster.intersectObject(this.libraryFloorMesh, false);
+        if (floorHits.length > 0) {
+          this.walkTo(floorHits[0].point);
+          return;
+        }
+      }
+      return;
+    }
+
+    // ================= CLOTHING BOUTIQUE interactivity =================
+    if (this.viewMode === "clothing") {
+      const hits = raycaster.intersectObject(this.clothingStoreInteriorGroup, true);
+      for (const hit of hits) {
+        let o: THREE.Object3D | null = hit.object;
+        while (o) {
+          const ud = o.userData as { type?: string; clothingId?: string };
+          if (ud.type === "clothing_item" && ud.clothingId) {
+            if (this.onClothingItemClicked) this.onClothingItemClicked(ud.clothingId);
+            return;
+          }
+          o = o.parent;
+        }
+      }
+      if (this.clothingStoreDoorMesh) {
+        const doorHits = raycaster.intersectObject(this.clothingStoreDoorMesh, false);
+        if (doorHits.length > 0) {
+          this.exitClothingStore();
+          return;
+        }
+      }
+      if (this.clothingStoreFloorMesh) {
+        const floorHits = raycaster.intersectObject(this.clothingStoreFloorMesh, false);
+        if (floorHits.length > 0) {
+          this.walkTo(floorHits[0].point);
+          return;
+        }
+      }
+      return;
+    }
+
+    // ================= TOOL STORE interactivity =================
+    if (this.viewMode === "toolshop") {
+      const hits = raycaster.intersectObject(this.toolStoreInteriorGroup, true);
+      for (const hit of hits) {
+        let o: THREE.Object3D | null = hit.object;
+        while (o) {
+          const ud = o.userData as { type?: string };
+          if (ud.type === "axe_display") {
+            if (this.onAxeClicked) this.onAxeClicked();
+            return;
+          }
+          if (ud.type === "chop_block") {
+            this.chopWoodpile();
+            return;
+          }
+          o = o.parent;
+        }
+      }
+      if (this.toolStoreDoorMesh) {
+        const doorHits = raycaster.intersectObject(this.toolStoreDoorMesh, false);
+        if (doorHits.length > 0) {
+          this.exitToolStore();
+          return;
+        }
+      }
+      if (this.toolStoreFloorMesh) {
+        const floorHits = raycaster.intersectObject(this.toolStoreFloorMesh, false);
+        if (floorHits.length > 0) {
+          this.walkTo(floorHits[0].point);
+          return;
+        }
+      }
+      return;
+    }
+
+    // ================= CAFE interactivity =================
+    if (this.viewMode === "cafe") {
+      // The barista (or his counter) takes your order
+      if (this.cafeBarista) {
+        const dogHits = raycaster.intersectObject(this.cafeBarista.group, true);
+        if (dogHits.length > 0) {
+          this.cafeBarista.setAction("bark", 1.2);
+          sound.playSoftWoof();
+          if (this.onCafeSit) this.onCafeSit("inside");
+          return;
+        }
+      }
+      if (raycaster.intersectObject(this.cafeCounterGroup, true).length > 0) {
+        if (this.onCafeSit) this.onCafeSit("inside");
+        return;
+      }
+      // Indoor chairs → sit and order
+      for (const seat of this.cafeIndoorSeats) {
+        if (raycaster.intersectObject(seat.group, true).length > 0) {
+          this.sitAtCafe(seat, "inside");
+          return;
+        }
+      }
+      if (this.cafeDoorMesh) {
+        const doorHits = raycaster.intersectObject(this.cafeDoorMesh, false);
+        if (doorHits.length > 0) {
+          this.exitCafe();
+          return;
+        }
+      }
+      if (this.cafeFloorMesh) {
+        const floorHits = raycaster.intersectObject(this.cafeFloorMesh, false);
         if (floorHits.length > 0) {
           this.walkTo(floorHits[0].point);
           return;
@@ -7853,6 +11815,12 @@ export class ParkScene {
     if (this.activeTabletopGame) {
       this.camera.position.setFromSpherical(this.ttSpherical).add(this.TT_FOCUS);
       this.camera.lookAt(this.TT_FOCUS);
+      return;
+    }
+    if (this.presentCamLock) {
+      const t = this.presentTableGroup.position;
+      this.camera.position.set(t.x + 0.9, 2.7, t.z + 4.5);
+      this.camera.lookAt(t.x, 1.25, t.z + 0.45);
       return;
     }
     if (this.wardrobeCamLock) {
@@ -7902,7 +11870,15 @@ export class ParkScene {
    */
   private confineCameraToRoom() {
     const c = this.camera.position;
-    if (this.viewMode === "cakestore") {
+    if (
+      this.viewMode === "cakestore" ||
+      this.viewMode === "musicschool" ||
+      this.viewMode === "townhall" ||
+      this.viewMode === "library" ||
+      this.viewMode === "clothing" ||
+      this.viewMode === "toolshop" ||
+      this.viewMode === "cafe"
+    ) {
       c.x = THREE.MathUtils.clamp(c.x, -9.4, 9.4);
       c.y = THREE.MathUtils.clamp(c.y, 0.8, 4.3);
       c.z = THREE.MathUtils.clamp(c.z, -6.5, 6.5);
@@ -7970,6 +11946,8 @@ export class ParkScene {
       this.scene.fog = new THREE.FogExp2(0x0f172a, 0.025);
       this.lanternLight.intensity = 4.0;
     }
+    // Street lamps wake up at sunset and really light the street at night.
+    this.updateLampLights();
     this.applyWeatherOverlay();
   }
 
@@ -8340,6 +12318,12 @@ export class ParkScene {
     this.bathroomGroup.visible = false;
     this.cityGroup.visible = false;
     this.cakeStoreInteriorGroup.visible = false;
+    this.musicSchoolInteriorGroup.visible = false;
+    this.townHallInteriorGroup.visible = false;
+    this.libraryInteriorGroup.visible = false;
+    this.clothingStoreInteriorGroup.visible = false;
+    this.toolStoreInteriorGroup.visible = false;
+    this.cafeInteriorGroup.visible = false;
     this.galaxyGroup.visible = false;
     this.highwayGroup.visible = false;
     // The car only makes sense in the outdoor worlds
@@ -9471,12 +13455,30 @@ export class ParkScene {
       return { x: x * k, z: 0.5 + (z - 0.5) * k };
     }
     if (this.viewMode === "city") {
+      // The city is L-shaped: the main square + street, plus the new Boutique
+      // Row avenue heading east at z ≈ -39. Allow walking on both, otherwise
+      // the dog gets yanked back at z = -36.2 and can never reach the shops.
+      if (z <= -35.8) {
+        // Boutique Row (avenue + connector + shop fronts + café patio)
+        return {
+          x: THREE.MathUtils.clamp(x, -2.0, 49.0),
+          z: THREE.MathUtils.clamp(z, -43.6, -33.0),
+        };
+      }
       return {
-        x: THREE.MathUtils.clamp(x, -13.0, 25.8),
+        x: THREE.MathUtils.clamp(x, -80.0, 25.8),
         z: THREE.MathUtils.clamp(z, -36.2, 16.0),
       };
     }
-    if (this.viewMode === "cakestore") {
+    if (
+      this.viewMode === "cakestore" ||
+      this.viewMode === "musicschool" ||
+      this.viewMode === "townhall" ||
+      this.viewMode === "library" ||
+      this.viewMode === "clothing" ||
+      this.viewMode === "toolshop" ||
+      this.viewMode === "cafe"
+    ) {
       // The big rectangular shop floor inside the square building
       return {
         x: THREE.MathUtils.clamp(x, -8.8, 8.8),
@@ -9731,6 +13733,24 @@ export class ParkScene {
       // Strolling city dog NPCs (they only woof!) + birthday party beats
       this.updateCityNpcs(delta, elapsed);
       this.updateBirthday(delta, elapsed);
+      // Café patrons chatter + barista idle animation
+      this.updateCafe(delta, elapsed);
+
+      // Felled trees grow back after a while
+      this.updateTreeRespawns();
+
+      // Airport: blinking beacons + planes taking off & landing
+      this.updateAirport(delta, elapsed);
+
+      // New civic district: clerk bubble, lamp flicker, glowing library books
+      this.updateCivicDistrict(delta);
+
+      // Floating music notes above a played instrument
+      this.updateNoteSprites(delta);
+
+      // Present-table lid animations & the tool-store wood chips
+      this.updatePresentTable(delta);
+      this.updateToolStore(delta);
 
       // Supermarket glass doors sliding open / shut
       this.updateSupermarketDoors(delta);
