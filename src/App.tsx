@@ -32,6 +32,7 @@ import { AgilityMiniGame } from "./features/minigames/AgilityMiniGame";
 import { TreatCatchMiniGame } from "./features/minigames/TreatCatchMiniGame";
 import { FetchMiniGame } from "./features/minigames/FetchMiniGame";
 import { BoneRushRunner } from "./features/minigames/BoneRushRunner";
+import { CarRaceMiniGame } from "./features/minigames/CarRaceMiniGame";
 import { BoneRushStore } from "./features/minigames/BoneRushStore";
 import { PawShuffleMiniGame } from "./features/minigames/PawShuffleMiniGame";
 import { BackyardDiggerMiniGame } from "./features/minigames/BackyardDiggerMiniGame";
@@ -55,12 +56,19 @@ import { BreedJournal } from "./features/journal/BreedJournal";
 import { ScoreboardModal } from "./features/account/ScoreboardModal";
 import { getAccount, linkAccount, saveAccount } from "./features/account/AccountService";
 import { getCurrentHoliday, holidayBlurb } from "./features/seasonal/holidays";
+import { HalloweenTrickOrTreat } from "./features/seasonal/HalloweenTrickOrTreat";
+import { HalloweenCandyUnpack, type CandyLine } from "./features/seasonal/HalloweenCandyUnpack";
+import { NoticeBoardModal } from "./features/missions/NoticeBoardModal";
+import { DailyMissionsModal } from "./features/missions/DailyMissionsModal";
+import { DailyMissionsHud } from "./features/missions/DailyMissionsHud";
+import { type MissionDef } from "./features/missions/dailyMissions";
 import { BirthdaySalonModal } from "./features/birthday/BirthdaySalonModal";
 import { TutorialModal } from "./features/city/TutorialModal";
 import { getLevelInfo, levelFromXp, MAX_LEVEL } from "./features/leveling/leveling";
 import { MultiplayerManager } from "./features/multiplayer/MultiplayerManager";
 import { AVAILABLE_TREATS } from "./features/treats/treatsData";
 import { CafeMenuModal, type CafeItemDef } from "./features/cafe/CafeMenuModal";
+import { CafeServiceCutscene } from "./features/cafe/CafeServiceCutscene";
 import { CarSatNavModal, CarDestination } from "./features/car/CarSatNavModal";
 import {
   BirthdayDate,
@@ -71,6 +79,7 @@ import {
 } from "./features/birthday/birthdayData";
 import { logDayEvent, bumpLifetime, getLifetime } from "./features/journal/dayJournal";
 import { ACHIEVEMENTS, evaluateAchievements } from "./features/achievements/achievementsData";
+import { evaluateBadges, getBadge, BADGE_COIN_REWARD, BADGE_CASE } from "./features/achievements/badgeCaseData";
 import { getBoneBalance } from "./features/bonerush/boneRushData";
 import { MainMenu } from "./features/menu/MainMenu";
 import { LanguagePicker } from "./features/i18n/LanguagePicker";
@@ -361,6 +370,9 @@ export default function App() {
   // The car's dashboard sat-nav: appears after Happy walks to the car and
   // offers the two stops in the city (Supermarket lot / behind the Cake Store)
   const [showSatNav, setShowSatNav] = useState<boolean>(false);
+  // Where the dashboard sat-nav was opened from (park offers city stops;
+  // city adds 🏡 Home and lets you hop between lots).
+  const [satNavFrom, setSatNavFrom] = useState<"park" | "city">("park");
   // Multiplayer group menu (opened from the little path machine). Design-only
   // for now — no lobby server is required to browse it.
   const [showMultiplayerMenu, setShowMultiplayerMenu] = useState<boolean>(false);
@@ -371,6 +383,14 @@ export default function App() {
   const [mpGroupSize, setMpGroupSize] = useState<number>(0);
   // Café order menu (bottom sheet) + where Happy is sitting
   const [showCafeMenu, setShowCafeMenu] = useState<boolean>(false);
+  // Café "dog service" cutscene: while set, the 3D server-dog POV plays out.
+  const [cafeService, setCafeService] = useState<{ item: CafeItemDef; table: number } | null>(null);
+  // Halloween: the trick-or-treat door cutscene + the kitchen unpack cutscene.
+  const [halloweenCut, setHalloweenCut] = useState<{ houseName: string; houseIndex: number } | null>(null);
+  const [halloweenUnpack, setHalloweenUnpack] = useState<boolean>(false);
+  // Notice board (park pin wall) + the Daily Missions panel it opens.
+  const [showNoticeBoard, setShowNoticeBoard] = useState<boolean>(false);
+  const [showDailyMissions, setShowDailyMissions] = useState<boolean>(false);
   const [cafePlace, setCafePlace] = useState<"patio" | "inside">("patio");
   const [readyMeal, setReadyMeal] = useState<CookingJob | null>(() => {
     try {
@@ -593,6 +613,46 @@ export default function App() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stats.energy, stats.happiness, stats.trickProgress, stats.foundSecretCodes, achTick, holiday]);
+
+  // Badge Case: award permanent cosmetic badges when skill-tree milestones land.
+  // Derived purely from unlockedSkills, so it re-checks only when the tree grows.
+  useEffect(() => {
+    const already = stats.earnedBadges || [];
+    const newly = evaluateBadges(stats, already);
+    if (newly.length === 0) return;
+    const reward = newly.reduce((sum, id) => {
+      const b = getBadge(id);
+      return sum + (b ? BADGE_COIN_REWARD[b.rarity] : 10);
+    }, 0);
+    setStats((prev) => ({
+      ...prev,
+      earnedBadges: [...(prev.earnedBadges || []), ...newly],
+      coins: prev.coins + reward,
+    }));
+    newly.forEach((id) => {
+      const b = getBadge(id);
+      if (!b) return;
+      confetti({ particleCount: 80, spread: 80, origin: { y: 0.45 } });
+      showToast(`🏅 Badge Case: ${b.name} unlocked! (+${BADGE_COIN_REWARD[b.rarity]} Coins)`);
+      sound.playRewardFanfare();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stats.unlockedSkills]);
+
+  // Pin (or unpin) a Badge Case emblem as the trainer's showcase badge.
+  const handlePinBadge = (badgeId: string | null) => {
+    if (badgeId) {
+      const earned = new Set(stats.earnedBadges || []);
+      if (!earned.has(badgeId) || !BADGE_CASE.some((b) => b.id === badgeId)) return;
+    }
+    sound.playButtonTap();
+    setStats((prev) => ({ ...prev, pinnedBadge: badgeId }));
+    showToast(
+      badgeId
+        ? `📌 ${getBadge(badgeId)?.name ?? "Badge"} pinned to your profile!`
+        : "Badge unpinned."
+    );
+  };
 
   // Persist the Memory Album (guarded: photos can be big, drop oldest if full)
   useEffect(() => {
@@ -892,7 +952,8 @@ export default function App() {
     // Park drive-off → forest highway (side view) → city parking lot.
     // First, though: Happy walks to the car and the dashboard sat-nav pops up
     // to ask WHERE — 🛒 Supermarket or 🎂 Cake Store (park behind the shop).
-    scene.onCarSatNav = () => {
+    scene.onCarSatNav = (from) => {
+      setSatNavFrom(from);
       setShowSatNav(true);
     };
     scene.onCarRideMidway = () => {
@@ -1044,29 +1105,33 @@ export default function App() {
     };
 
     // ---- Boutique Row neighbours: Halloween trick-or-treat ----
-    scene.onTrickOrTreat = (houseName, firstVisit) => {
+    scene.onTrickOrTreat = (houseName, firstVisit, houseIndex) => {
       if (!firstVisit) {
-        showToast(`🎃 You already trick-or-treated at ${houseName} — Happy's bucket is full!`);
+        showToast(`🎃 You already trick-or-treated at ${houseName} — try another door!`);
         return;
       }
-      const candy = AVAILABLE_TREATS[Math.floor(Math.random() * AVAILABLE_TREATS.length)];
-      stampInteraction();
-      sound.playRewardFanfare();
-      confetti({ particleCount: 55, spread: 70, origin: { y: 0.65 } });
-      setStats((prev) => {
-        const nextXp = prev.xp + 15;
-        const inv = { ...prev.treatsInventory };
-        inv[candy.id] = (inv[candy.id] || 0) + 1;
-        return {
-          ...prev,
-          treatsInventory: inv,
-          coins: prev.coins + 10,
-          xp: nextXp,
-          level: levelFromXp(nextXp),
-          happiness: Math.min(100, prev.happiness + 5),
-        };
-      });
-      showToast(`🎃 Trick or treat at ${houseName}! +1 ${candy.name}, +10 coins, +15 XP`);
+      // Play the full 3D door cutscene, then the candy is handed over.
+      setHalloweenCut({ houseName, houseIndex });
+    };
+    // The kitchen counter: press it to unpack the Halloween bucket (3D cutscene).
+    scene.onKitchenCounterClicked = () => {
+      const s = statsRef.current;
+      const candy = s.halloweenCandy || {};
+      const hasCandy = Object.keys(candy).length > 0;
+      if (hasCandy && !s.halloweenUnpacked) {
+        setHalloweenUnpack(true);
+      } else if (s.halloweenUnpacked) {
+        showToast("🍬 The candy is already unpacked and stored in the pantry!");
+      } else {
+        showToast("🐾 Happy sniffs the counter… nothing to unpack yet. Go trick-or-treating on Halloween!");
+      }
+    };
+    // Restore which houses were already visited (persisted across sessions).
+    scene.setTrickOrTreatedHouses(statsRef.current.trickOrTreatedHouses || []);
+
+    // ---- Notice board ("pin wall") next to the park dog house ----
+    scene.onNoticeBoardClicked = () => {
+      setShowNoticeBoard(true);
     };
 
     // ---- Café: patio seating, interior counter, barista & menu ----
@@ -1318,7 +1383,12 @@ export default function App() {
     showTutorial ||
     showSatNav ||
     showMultiplayerMenu ||
-    showCafeMenu;
+    showCafeMenu ||
+    showNoticeBoard ||
+    showDailyMissions ||
+    !!cafeService ||
+    !!halloweenCut ||
+    halloweenUnpack;
 
   // The title screen covers the whole app until the player hits Start.
   const menuVisible = !started;
@@ -1696,11 +1766,21 @@ export default function App() {
   };
 
   // Café order: tea / coffee (25c, −25 hunger) or cake (50c, fills the bowl)
+  // Order at the café → play the 3D dog-service cutscene, then serve the order.
   const handleCafeOrder = (item: CafeItemDef) => {
     if (stats.coins < item.price) {
       showToast(`Not enough coins for ${item.name} — need ${item.price} 🪙`);
       return;
     }
+    // Pick a table number (Happy is seated at table 8).
+    const table = 8;
+    setShowCafeMenu(false);
+    setCafeService({ item, table });
+  };
+
+  /** Applies a café order once the dog-service cutscene has played out. */
+  const serveCafeOrder = (item: CafeItemDef) => {
+    setCafeService(null);
     setStats((prev) => {
       const nextXp = prev.xp + 10;
       return {
@@ -1718,7 +1798,89 @@ export default function App() {
     sound.playCrunch();
     confetti({ particleCount: 30, spread: 50, origin: { y: 0.75 } });
     showToast(`${item.emoji} ${item.name} served! −${item.hunger}% hunger, −${item.price} coins`);
-    setShowCafeMenu(false);
+  };
+
+  // ---- Halloween: finish a door cutscene (hand over candy) ----
+  const finishTrickOrTreat = (houseName: string, houseIndex: number) => {
+    setHalloweenCut(null);
+    const candy = AVAILABLE_TREATS[Math.floor(Math.random() * AVAILABLE_TREATS.length)];
+    stampInteraction();
+    sound.playRewardFanfare();
+    confetti({ particleCount: 55, spread: 70, origin: { y: 0.65 } });
+    setStats((prev) => {
+      const nextXp = prev.xp + 15;
+      const inv = { ...prev.treatsInventory };
+      inv[candy.id] = (inv[candy.id] || 0) + 1;
+      const bucket = { ...(prev.halloweenCandy || {}) };
+      bucket[candy.id] = (bucket[candy.id] || 0) + 1;
+      const houses = new Set(prev.trickOrTreatedHouses || []);
+      houses.add(houseIndex);
+      return {
+        ...prev,
+        treatsInventory: inv,
+        halloweenCandy: bucket,
+        trickOrTreatedHouses: [...houses],
+        halloweenUnpacked: false,
+        coins: prev.coins + 10,
+        xp: nextXp,
+        level: levelFromXp(nextXp),
+        happiness: Math.min(100, prev.happiness + 5),
+      };
+    });
+    showToast(`🎃 Trick or treat at ${houseName}! +1 ${candy.name}, +10 coins, +15 XP`);
+    // Once every house is done, Happy asks to unpack in the kitchen.
+    const scene = parkSceneRef.current;
+    if (scene && scene.getTrickOrTreatedCount() >= scene.getBoutiqueHouseCount()) {
+      scene.storeDogSay("That's every house! Let's go to the kitchen to unpack our stuff! 🎃");
+      showToast('🎃 Every house visited! Happy says: "Let\'s go to the kitchen to unpack our stuff!"');
+    }
+  };
+
+  // ---- Halloween: finish the kitchen unpack (store the candy in the pantry) ----
+  const finishHalloweenUnpack = () => {
+    setHalloweenUnpack(false);
+    setStats((prev) => {
+      const candy = prev.halloweenCandy || {};
+      const inv = { ...prev.treatsInventory };
+      Object.entries(candy).forEach(([id, n]) => {
+        inv[id] = (inv[id] || 0) + n;
+      });
+      return {
+        ...prev,
+        treatsInventory: inv,
+        halloweenCandy: {},
+        halloweenUnpacked: true,
+        happiness: Math.min(100, prev.happiness + 10),
+      };
+    });
+    showToast("🍬 Candy unpacked and stored in the pantry! Happy had a great Halloween.");
+  };
+
+  const halloweenCandyLines: CandyLine[] = Object.entries(stats.halloweenCandy || {}).map(
+    ([id, count]) => {
+      const t = AVAILABLE_TREATS.find((x) => x.id === id);
+      return { id, icon: t?.icon ?? "🍬", name: t?.name ?? id, count: count as number };
+    }
+  );
+
+  // Claim a completed Daily Mission → particle confetti burst + reward + toast.
+  // Shared by the HUD card and the notice-board missions panel.
+  const handleClaimMission = (mission: MissionDef, reward: { coins: number; xp: number }) => {
+    sound.playRewardFanfare();
+    // Confetti particle animation: a central pop plus two side cannons.
+    confetti({ particleCount: 90, spread: 78, startVelocity: 48, origin: { y: 0.6 } });
+    confetti({ particleCount: 45, spread: 100, angle: 60, origin: { x: 0, y: 0.7 } });
+    confetti({ particleCount: 45, spread: 100, angle: 120, origin: { x: 1, y: 0.7 } });
+    setStats((prev) => {
+      const nextXp = prev.xp + reward.xp;
+      return {
+        ...prev,
+        coins: prev.coins + reward.coins,
+        xp: nextXp,
+        level: levelFromXp(nextXp),
+      };
+    });
+    showToast(`📋 Mission complete: ${mission.title}! +${reward.coins} coins, +${reward.xp} XP`);
   };
 
   // 4. BUTTON: Train Action — opens the trick training modal
@@ -1900,19 +2062,20 @@ export default function App() {
     showToast("🎂 Party preview ended.");
   };
 
-  // ---- Car sat-nav: pick the city stop, then hit the road ----
+  // ---- Car sat-nav: pick the stop, then hit the road ----
   const handleSatNavPick = (dest: CarDestination) => {
     setShowSatNav(false);
-    playCartoonTransition(
-      dest === "cakestore"
+    const label =
+      dest === "home"
+        ? "Heading home! 🏡🚗"
+        : dest === "cakestore"
         ? "Off to the Cake Store! 🎂🚗"
         : dest === "airport"
         ? "Off to the Airport! ✈️🚗"
-        : "Off to the Supermarket! 🛒🚗",
-      () => {
-        parkSceneRef.current?.startCarRideWithDestination(dest);
-      }
-    );
+        : "Off to the Supermarket! 🛒🚗";
+    playCartoonTransition(label, () => {
+      parkSceneRef.current?.startCarRideWithDestination(dest);
+    });
   };
 
   const handleSatNavCancel = () => {
@@ -2812,6 +2975,13 @@ export default function App() {
         illnessId={stats.illness ?? null}
       />}
 
+      {/* Daily Missions HUD — today's three tasks, progress + Claim */}
+      {!photoMode && !menuVisible && (
+        <div className="absolute left-3 top-[156px] sm:top-[168px] z-30 pointer-events-none">
+          <DailyMissionsHud onClaim={handleClaimMission} />
+        </div>
+      )}
+
       {/* Canine Skill Tree Modal */}
       {showSkillTree && (
         <SkillTreeModal
@@ -2947,6 +3117,37 @@ export default function App() {
             setShowSkillTree(true);
           }}
           onClose={() => setShowTrainingModal(false)}
+        />
+      )}
+
+      {/* Active Mini-Game: Puppy Grand Prix (3D car race vs the rival, WASD) */}
+      {activeMiniGame === "carRace" && (
+        <CarRaceMiniGame
+          dogName={stats.name}
+          dogEnergy={stats.energy}
+          onClose={() => {
+            setActiveMiniGame("none");
+            setShowArcadeMenu(true);
+          }}
+          onGameComplete={(score, coinsEarned, energyUsed) => {
+            const finalCoins = Math.round(coinsEarned * (hasSkill("treasure_hunter") ? 1.5 : 1.0));
+            stampInteraction();
+            logDayEvent("miniGames", `Puppy Grand Prix: ${score} pts`);
+            if (score >= 150) {
+              bumpLifetime("wins", 1);
+              logDayEvent("wins", "Won the Puppy Grand Prix race!");
+            }
+            bumpLifetime("coinsEarned", finalCoins);
+            setStats((prev) => ({
+              ...prev,
+              coins: prev.coins + finalCoins,
+              xp: prev.xp + score,
+              energy: Math.max(0, prev.energy - energyUsed),
+              happiness: Math.min(100, prev.happiness + 18),
+            }));
+            setAchTick((t) => t + 1);
+            showToast(`🏎️ Race done! +${finalCoins} Coins, +${score} XP`);
+          }}
         />
       )}
 
@@ -3155,6 +3356,7 @@ export default function App() {
           }}
           onClose={() => setShowSettingsModal(false)}
           initialTab={settingsInitialTab}
+          onPinBadge={handlePinBadge}
         />
       )}
 
@@ -3236,7 +3438,12 @@ export default function App() {
 
       {/* Car sat-nav: the driver's seat + the two city stops (Supermarket / Cake Store) */}
       {showSatNav && !menuVisible && (
-        <CarSatNavModal onPick={handleSatNavPick} onCancel={handleSatNavCancel} />
+        <CarSatNavModal
+          from={satNavFrom}
+          parkedLot={parkSceneRef.current?.getParkedLot()}
+          onPick={handleSatNavPick}
+          onCancel={handleSatNavCancel}
+        />
       )}
 
       {/* Soup-ready reveal: pot spins, lid slides off, dish info appears */}
@@ -3380,6 +3587,55 @@ export default function App() {
         />
       )}
 
+      {/* Café: 3D dog-service cutscene (Happy waits → server-dog POV → served) */}
+      {cafeService && (
+        <CafeServiceCutscene
+          dogName={stats.name}
+          item={cafeService.item}
+          tableNumber={cafeService.table}
+          onDone={() => serveCafeOrder(cafeService.item)}
+        />
+      )}
+
+      {/* Halloween: door trick-or-treat cutscene (greet → neighbour-dog POV) */}
+      {halloweenCut && (
+        <HalloweenTrickOrTreat
+          dogName={stats.name}
+          houseName={halloweenCut.houseName}
+          onDone={() => finishTrickOrTreat(halloweenCut.houseName, halloweenCut.houseIndex)}
+        />
+      )}
+
+      {/* Halloween: kitchen counter candy-unpack cutscene */}
+      {halloweenUnpack && (
+        <HalloweenCandyUnpack
+          dogName={stats.name}
+          candies={halloweenCandyLines}
+          onDone={finishHalloweenUnpack}
+        />
+      )}
+
+      {/* Notice board (park pin wall): banner → achievements, paper → missions */}
+      {showNoticeBoard && !menuVisible && (
+        <NoticeBoardModal
+          onOpenAchievements={() => {
+            setShowNoticeBoard(false);
+            setSettingsInitialTab("achievements");
+            setShowSettingsModal(true);
+          }}
+          onOpenDailyMissions={() => setShowDailyMissions(true)}
+          onClose={() => setShowNoticeBoard(false)}
+        />
+      )}
+
+      {/* Daily Missions — five quests, claimable once complete */}
+      {showDailyMissions && !menuVisible && (
+        <DailyMissionsModal
+          onClaim={handleClaimMission}
+          onClose={() => setShowDailyMissions(false)}
+        />
+      )}
+
       {/* Town Hall: Bruno the clerk dog's game tutorial */}
       {showTutorial && (
         <TutorialModal dogName={stats.name} onClose={() => setShowTutorial(false)} />
@@ -3397,12 +3653,16 @@ export default function App() {
           showMembers={false}
           showScoreboard={false}
           onCreate={() => {
-            setMpGroupSize(4);
-            setMpMenuError("Preview: your group of 4 has its convoy parked in the park! 🚗 Real group servers go live when you host one.");
+            // No real servers yet: never spawn preview convoy cars. Happy
+            // explains it in his own voice instead.
+            setMpMenuError(
+              '🐾 Happy says: "Servers aren\'t online yet — I\'ll tell you when a group can be made!"'
+            );
           }}
           onJoin={() => {
-            setMpGroupSize(2);
-            setMpMenuError("Preview: joined a group of 2 — two convoy cars are waiting in the park! 🚗 Real servers go live when a host is online.");
+            setMpMenuError(
+              '🐾 Happy says: "Servers aren\'t online yet — I\'ll tell you when you can join a group!"'
+            );
           }}
           onCancelSearch={() => setMpMenuError(null)}
           onLeave={() => setShowMultiplayerMenu(false)}

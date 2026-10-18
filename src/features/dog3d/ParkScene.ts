@@ -111,7 +111,12 @@ export class ParkScene {
   /** Where the car is currently parked in the city (picks the way home). */
   private carParkedLot: "supermarket" | "cakestore" | "airport" = "supermarket";
   private satNavPending = false;
-  public onCarSatNav?: () => void;
+  /**
+   * Where the sat-nav was opened from. In the park it offers the three city
+   * stops; in the city it adds 🏡 Home and re-routes between the lots.
+   */
+  public carSatNavFrom: "park" | "city" = "park";
+  public onCarSatNav?: (from: "park" | "city") => void;
   public onCarRideMidway?: () => void;
   public onArrivedInCity?: () => void;
   public onCarReturnMidway?: () => void;
@@ -208,7 +213,7 @@ export class ParkScene {
   private trickOrTreated = new Set<number>();
   private treatBubble: THREE.Sprite | null = null;
   private treatBubbleTimer = 0;
-  public onTrickOrTreat?: (houseName: string, firstVisit: boolean) => void;
+  public onTrickOrTreat?: (houseName: string, firstVisit: boolean, houseIndex: number) => void;
 
   // ---- CLOTHING BOUTIQUE (3D hat mannequins — the only place to buy wearables) ----
   private clothingStoreGroup: THREE.Group = new THREE.Group();
@@ -333,6 +338,9 @@ export class ParkScene {
   private groundMesh!: THREE.Mesh;
   private skyDome!: THREE.Mesh;
   private dogHouseExteriorGroup: THREE.Group = new THREE.Group();
+  /** Free-standing notice board ("pin wall") next to the dog house. */
+  private noticeBoardGroup: THREE.Group = new THREE.Group();
+  public onNoticeBoardClicked?: () => void;
   private ballMesh!: THREE.Mesh;
   private treatMesh!: THREE.Mesh;
   private obstaclesGroup: THREE.Group = new THREE.Group();
@@ -350,6 +358,8 @@ export class ParkScene {
   private cookBeaconGroup: THREE.Group = new THREE.Group();
   private cookBeaconVisible: boolean = false;
   public onCookBeaconClicked?: () => void;
+  /** Halloween: the kitchen counter (press it to unpack the candy bucket). */
+  public onKitchenCounterClicked?: () => void;
   // Overworld tabletop (round table + chess / tic-tac-toe / four-wins packages)
   private tabletopTableGroup: THREE.Group = new THREE.Group();
   public onTableClicked?: () => void;
@@ -869,6 +879,9 @@ export class ParkScene {
     // Dog House Exterior
     this.buildDogHouse(-5, 0, -4);
 
+    // Notice board ("pin wall") standing to the LEFT of the dog house
+    this.buildNoticeBoard();
+
     // Food & Water bowls on small wooden stand
     this.buildBowls(1.8, 0, -1.2);
 
@@ -1108,6 +1121,145 @@ export class ParkScene {
     });
 
     this.parkGroup.add(house);
+  }
+
+  /**
+   * The NOTICE BOARD — a free-standing "pin wall" on the left side of the dog
+   * house. A wooden board on two posts with a little roof, a banner across the
+   * top (tap the board to reach Achievements) and pinned papers, the top one
+   * being "Daily Missions". The whole board opens the Notice Board view.
+   */
+  private buildNoticeBoard() {
+    const g = this.noticeBoardGroup;
+    g.clear();
+    // A free-standing "pin wall", set a long way out to the LEFT of the dog
+    // house (the house is at x = -5), standing on the open lawn.
+    g.position.set(-15, 0, -2);
+    g.rotation.y = 0.2;
+    g.scale.setScalar(1.4);
+
+    const wood = new THREE.MeshStandardMaterial({ color: 0x8a5a2b, roughness: 0.75 });
+    const darkWood = new THREE.MeshStandardMaterial({ color: 0x5c3a1e, roughness: 0.7 });
+
+    // Two posts
+    for (const px of [-1.0, 1.0]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.16, 2.4, 0.16), darkWood);
+      post.position.set(px, 1.2, 0);
+      post.castShadow = true;
+      g.add(post);
+    }
+    // The board face + cork inset
+    const board = new THREE.Mesh(new THREE.BoxGeometry(2.3, 1.7, 0.14), wood);
+    board.position.set(0, 1.65, 0.02);
+    board.castShadow = true;
+    board.receiveShadow = true;
+    g.add(board);
+    const cork = new THREE.Mesh(
+      new THREE.BoxGeometry(2.1, 1.5, 0.05),
+      new THREE.MeshStandardMaterial({ color: 0xd9b98a, roughness: 0.95 })
+    );
+    cork.position.set(0, 1.65, 0.1);
+    g.add(cork);
+    // Little roof cap
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.14, 0.6), darkWood);
+    cap.position.set(0, 2.62, 0.06);
+    cap.castShadow = true;
+    g.add(cap);
+    const capPeak = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.14, 0.5), darkWood);
+    capPeak.position.set(0, 2.74, 0.06);
+    g.add(capPeak);
+
+    // Helper: a pinned paper (canvas texture) laid flat on the board face
+    const makePaper = (
+      text: string,
+      sub: string,
+      w: number,
+      h: number,
+      x: number,
+      y: number,
+      rot: number,
+      bg: string,
+      accent: string
+    ) => {
+      const c = document.createElement("canvas");
+      c.width = 256;
+      c.height = Math.round((256 * h) / w);
+      const cx = c.getContext("2d")!;
+      cx.fillStyle = bg;
+      cx.fillRect(0, 0, c.width, c.height);
+      cx.strokeStyle = "rgba(0,0,0,0.12)";
+      cx.lineWidth = 3;
+      cx.strokeRect(4, 4, c.width - 8, c.height - 8);
+      cx.fillStyle = accent;
+      cx.font = `bold ${Math.round(c.height * 0.22)}px sans-serif`;
+      cx.textAlign = "center";
+      cx.fillText(text, c.width / 2, c.height * 0.34);
+      cx.fillStyle = "#4b5563";
+      cx.font = `${Math.round(c.height * 0.1)}px sans-serif`;
+      cx.fillText(sub, c.width / 2, c.height * 0.52);
+      // faint ruled lines
+      cx.strokeStyle = "rgba(0,0,0,0.08)";
+      cx.lineWidth = 2;
+      for (let i = 1; i <= 3; i++) {
+        const ly = c.height * (0.62 + i * 0.09);
+        cx.beginPath();
+        cx.moveTo(c.width * 0.14, ly);
+        cx.lineTo(c.width * 0.86, ly);
+        cx.stroke();
+      }
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(w, h),
+        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c) })
+      );
+      mesh.position.set(x, y, 0.14);
+      mesh.rotation.z = rot;
+      g.add(mesh);
+      // a little pin on top
+      const pin = new THREE.Mesh(
+        new THREE.SphereGeometry(0.045, 8, 8),
+        new THREE.MeshStandardMaterial({ color: accent })
+      );
+      pin.position.set(x, y + h / 2 - 0.06, 0.16);
+      g.add(pin);
+      return mesh;
+    };
+
+    // Two papers clipped over one another (bottom note partly hidden)
+    makePaper("PARK NOTICE", "Bark softly · clean up! 🐾", 0.9, 0.62, -0.42, 1.28, -0.06, "#fffdf5", "#386641");
+    makePaper("WALK ROTA", "Tue · Thu · Sat mornings", 0.82, 0.56, -0.36, 1.2, 0.07, "#fef9e7", "#b45309");
+    // The "Daily Missions" paper — the headline note
+    makePaper("DAILY MISSIONS", "5 quests · reset each day", 0.72, 0.86, 0.42, 1.42, 0.04, "#f0fdf4", "#166534");
+
+    // Banner across the top → Achievements
+    {
+      const c = document.createElement("canvas");
+      c.width = 512;
+      c.height = 128;
+      const cx = c.getContext("2d")!;
+      const grad = cx.createLinearGradient(0, 0, 512, 0);
+      grad.addColorStop(0, "#b45309");
+      grad.addColorStop(1, "#7c2d12");
+      cx.fillStyle = grad;
+      cx.fillRect(0, 0, 512, 128);
+      cx.fillStyle = "#fde68a";
+      cx.font = "bold 54px sans-serif";
+      cx.textAlign = "center";
+      cx.textBaseline = "middle";
+      cx.fillText("🏆 ACHIEVEMENTS", 256, 68);
+      const banner = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.9, 0.48),
+        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c) })
+      );
+      banner.position.set(0, 2.24, 0.16);
+      g.add(banner);
+    }
+
+    // Tag the whole thing as the notice board
+    g.userData = { type: "noticeboard" };
+    g.traverse((o) => {
+      o.userData = { type: "noticeboard" };
+    });
+    this.parkGroup.add(g);
   }
 
   /**
@@ -2801,10 +2953,12 @@ export class ParkScene {
       base.position.set(x, 0.45, z);
       base.castShadow = true;
       base.receiveShadow = true;
+      base.userData = { type: "kitchen_counter" };
       this.kitchenCountersGroup.add(base);
       const top = new THREE.Mesh(new THREE.BoxGeometry(w + 0.1, 0.08, d + 0.1), counterTopMat);
       top.position.set(x, 0.94, z);
       top.castShadow = true;
+      top.userData = { type: "kitchen_counter" };
       this.kitchenCountersGroup.add(top);
       // cabinet doors + knobs so it reads as a real kitchen
       const doors = Math.max(1, Math.round(w / 1.1));
@@ -4588,6 +4742,7 @@ export class ParkScene {
 
     // ---- The arcade machines (each a real playable game) ----
     const games: { id: string; title: string; body: number; glow: number }[] = [
+      { id: "carRace", title: "Puppy Grand Prix", body: 0xb91c1c, glow: 0xfde047 },
       { id: "boneRush", title: "Subway Pup: Bone Rush", body: 0x4338ca, glow: 0x22d3ee },
       { id: "pawShuffle", title: "Paw Shuffle", body: 0x9d174d, glow: 0xf472b6 },
       { id: "backyardDigger", title: "Backyard Digger", body: 0x92400e, glow: 0xfbbf24 },
@@ -4981,15 +5136,72 @@ export class ParkScene {
       // Happy's at the car: show the sat-nav and ask WHERE to.
       this.carRide = { phase: "none", midwayFired: false };
       this.satNavPending = true;
+      this.carSatNavFrom = "park";
       sound.playButtonTap();
-      if (this.onCarSatNav) this.onCarSatNav();
+      if (this.onCarSatNav) this.onCarSatNav("park");
     });
   }
 
-  /** The sat-nav destination was picked — hop in and roll out of the park. */
-  public startCarRideWithDestination(dest: "supermarket" | "cakestore" | "airport") {
-    if (this.viewMode !== "park" || !this.satNavPending) return;
+  /**
+   * In the City: click the parked car and the sat-nav opens instead of driving
+   * straight home — from here you can choose 🏡 Home or hop to another lot.
+   */
+  public startCitySatNav() {
+    if (this.viewMode !== "city" || this.carRide.phase !== "none" || this.satNavPending) return;
+    this.carRide = { phase: "hopIn", midwayFired: false };
+    const side = new THREE.Vector3(this.carGroup.position.x - 1.6, 0, this.carGroup.position.z + 1.2);
+    this.walkTo(side, () => {
+      this.carRide = { phase: "none", midwayFired: false };
+      this.satNavPending = true;
+      this.carSatNavFrom = "city";
+      sound.playButtonTap();
+      if (this.onCarSatNav) this.onCarSatNav("city");
+    });
+  }
+
+  /** Where the car is currently parked in the city (the sat-nav hides that stop). */
+  public getParkedLot(): "supermarket" | "cakestore" | "airport" {
+    return this.carParkedLot;
+  }
+
+  /**
+   * The sat-nav destination was picked. From the park it hops in and rolls
+   * out; from the city it either drives 🏡 home or re-routes to another lot.
+   */
+  public startCarRideWithDestination(dest: "supermarket" | "cakestore" | "airport" | "home") {
+    if (!this.satNavPending) return;
     this.satNavPending = false;
+
+    // 🏡 Head home from the city: reuse the cinematic homeward ride.
+    if (dest === "home") {
+      this.launchDriveHome();
+      return;
+    }
+
+    if (this.carSatNavFrom === "city") {
+      if (this.viewMode !== "city") return;
+      if (dest === this.carParkedLot) {
+        // Already parked at that lot — nothing to do.
+        sound.playButtonTap();
+        return;
+      }
+      this.carDestination = dest;
+      this.dog.group.visible = false; // hops in!
+      this.carPathIdx = 0;
+      this.carPath = [
+        ...this.cityLotExitPath(this.carParkedLot),
+        ...this.cityLotEnterPath(dest),
+      ];
+      this.carRide = { phase: "lotPullIn", midwayFired: false };
+      this.sideCam = false;
+      this.cinematicCam = true;
+      sound.playWhistle();
+      sound.playToyBounce();
+      return;
+    }
+
+    // From the park: the original ride into the city.
+    if (this.viewMode !== "park") return;
     this.carDestination = dest;
     this.dog.group.visible = false; // hops in!
     this.carRide = { phase: "driveToCity", midwayFired: false };
@@ -5003,63 +5215,122 @@ export class ParkScene {
     this.satNavPending = false;
   }
 
-  /** In the City: click the car again to drive home. */
+  /** Waypoints from a city lot back out to the street hub (3.2, 0, 10.5). */
+  private cityLotExitPath(lot: "supermarket" | "cakestore" | "airport"): THREE.Vector3[] {
+    if (lot === "cakestore") {
+      // Leave the lot behind the Cake Store: back down the lane, out along
+      // the south side of the shop, then up to the street — hugging the east
+      // lane past the plaza tree.
+      return [
+        new THREE.Vector3(17.0, 0, -33.55),
+        new THREE.Vector3(17.0, 0, -24.0),
+        new THREE.Vector3(16.0, 0, -21.6),
+        new THREE.Vector3(11.0, 0, -21.4),
+        new THREE.Vector3(5.6, 0, -21.4),
+        new THREE.Vector3(4.2, 0, -19.8),
+        new THREE.Vector3(4.4, 0, -16),
+        new THREE.Vector3(4.4, 0, 0),
+        new THREE.Vector3(4.35, 0, 8.6),
+        new THREE.Vector3(3.2, 0, 10.5),
+      ];
+    }
+    if (lot === "airport") {
+      // Back out of the covered bay, head north then east along the BOTTOM of
+      // the park, OUT through the terminal entrance and the music-school
+      // underpass, back to the street hub. Never along the mayor's house.
+      return [
+        new THREE.Vector3(-44, 0, -20),
+        new THREE.Vector3(-41.5, 0, -10),
+        new THREE.Vector3(-40.5, 0, 0),
+        new THREE.Vector3(-38.5, 0, 8),
+        new THREE.Vector3(-34, 0, 10.6),
+        new THREE.Vector3(-29, 0, 11),
+        new THREE.Vector3(-24, 0, 11),
+        new THREE.Vector3(-16, 0, 11),
+        new THREE.Vector3(-8, 0, 11),
+        new THREE.Vector3(0.5, 0, 10.8),
+        new THREE.Vector3(3.2, 0, 10.5),
+      ];
+    }
+    // Supermarket: back out of the spot, down the lane, onto the street.
+    return [
+      new THREE.Vector3(8.0, 0, 1.05),
+      new THREE.Vector3(8.0, 0, 6.4),
+      new THREE.Vector3(7.8, 0, 7.9),
+      new THREE.Vector3(5.0, 0, 8.8),
+      new THREE.Vector3(3.2, 0, 10.5),
+    ];
+  }
+
+  /** Waypoints from the street hub (3.2, 0, 10.5) into a city lot. */
+  private cityLotEnterPath(lot: "supermarket" | "cakestore" | "airport"): THREE.Vector3[] {
+    if (lot === "cakestore") {
+      return [
+        new THREE.Vector3(3.2, 0, 10.5),
+        new THREE.Vector3(4.35, 0, 8.6),
+        new THREE.Vector3(4.4, 0, 2),
+        new THREE.Vector3(4.4, 0, -10),
+        new THREE.Vector3(4.2, 0, -16),
+        new THREE.Vector3(4.0, 0, -19.2),
+        new THREE.Vector3(6.0, 0, -21.2),
+        new THREE.Vector3(12.0, 0, -21.4),
+        new THREE.Vector3(16.2, 0, -21.6),
+        new THREE.Vector3(17.0, 0, -24.5),
+        new THREE.Vector3(17.0, 0, -29.5),
+        new THREE.Vector3(17.0, 0, -33.55),
+        new THREE.Vector3(21.2, 0, -33.55),
+      ];
+    }
+    if (lot === "airport") {
+      // Head west along the BOTTOM of the park, through the music-school
+      // UNDERPASS, through the terminal entrance and down to the covered bay.
+      return [
+        new THREE.Vector3(3.2, 0, 10.5),
+        new THREE.Vector3(0.5, 0, 10.8),
+        new THREE.Vector3(-8, 0, 11),
+        new THREE.Vector3(-16, 0, 11),
+        new THREE.Vector3(-24, 0, 11),
+        new THREE.Vector3(-29, 0, 11),
+        new THREE.Vector3(-34, 0, 10.6),
+        new THREE.Vector3(-38.5, 0, 8),
+        new THREE.Vector3(-40.5, 0, 0),
+        new THREE.Vector3(-41.5, 0, -10),
+        new THREE.Vector3(-44, 0, -20),
+      ];
+    }
+    return [
+      new THREE.Vector3(3.2, 0, 10.5),
+      new THREE.Vector3(3.4, 0, 9.2),
+      new THREE.Vector3(5.6, 0, 8.2),
+      new THREE.Vector3(8.0, 0, 7.4),
+      new THREE.Vector3(8.0, 0, 5.6),
+      new THREE.Vector3(8.0, 0, 3.9),
+      new THREE.Vector3(8.0, 0, 2.2),
+      new THREE.Vector3(8.0, 0, 1.05),
+      new THREE.Vector3(12.2, 0, 1.05),
+    ];
+  }
+
+  /** Build the homeward car path from the current lot and roll out. */
+  private launchDriveHome() {
+    this.dog.group.visible = false; // hops in!
+    this.carPath = [
+      ...this.cityLotExitPath(this.carParkedLot),
+      new THREE.Vector3(3, 0, 16),
+      new THREE.Vector3(3, 0, 26),
+    ];
+    this.carPathIdx = 0;
+    this.carRide = { phase: "driveHome", midwayFired: false };
+    this.sideCam = true;
+    sound.playWhistle();
+  }
+
+  /** In the City: click the car and the sat-nav opens to choose where to go. */
   public startCarRideHome() {
     if (this.viewMode !== "city" || this.carRide.phase !== "none") return;
     this.carRide = { phase: "hopIn", midwayFired: false };
     const side = new THREE.Vector3(this.carGroup.position.x - 1.6, 0, this.carGroup.position.z + 1.2);
-    this.walkTo(side, () => {
-      this.dog.group.visible = false;
-      if (this.carParkedLot === "cakestore") {
-        // Leave the lot behind the Cake Store: back down the lane, out along
-        // the south side of the shop, then home down the street — again
-        // hugging the east lane past the plaza tree.
-        this.carPath = [
-          new THREE.Vector3(17.0, 0, -33.55),
-          new THREE.Vector3(17.0, 0, -24.0),
-          new THREE.Vector3(16.0, 0, -21.6),
-          new THREE.Vector3(11.0, 0, -21.4),
-          new THREE.Vector3(5.6, 0, -21.4),
-          new THREE.Vector3(4.2, 0, -19.8),
-          new THREE.Vector3(4.4, 0, -16),
-          new THREE.Vector3(4.4, 0, 0),
-          new THREE.Vector3(4.35, 0, 8.6),
-          new THREE.Vector3(3.2, 0, 11),
-          new THREE.Vector3(3, 0, 16),
-          new THREE.Vector3(3, 0, 26),
-        ];
-      } else if (this.carParkedLot === "airport") {
-        // Back out of the covered bay, out to the airport road, then east to
-        // the street and south home through the forest.
-        this.carPath = [
-          new THREE.Vector3(-44, 0, -12),
-          new THREE.Vector3(-40, 0, -5),
-          new THREE.Vector3(-34, 0, 0),
-          new THREE.Vector3(-26, 0, 1),
-          new THREE.Vector3(-16, 0, 1),
-          new THREE.Vector3(-6, 0, 1),
-          new THREE.Vector3(2.4, 0, 1.8),
-          new THREE.Vector3(3.4, 0, 6),
-          new THREE.Vector3(3, 0, 16),
-          new THREE.Vector3(3, 0, 26),
-        ];
-      } else {
-        // Back out of the spot, down the lane, onto the street and south home
-        this.carPath = [
-          new THREE.Vector3(8.0, 0, 1.05),
-          new THREE.Vector3(8.0, 0, 6.4),
-          new THREE.Vector3(7.8, 0, 7.9),
-          new THREE.Vector3(5.0, 0, 8.8),
-          new THREE.Vector3(3.2, 0, 10.5),
-          new THREE.Vector3(3, 0, 16),
-          new THREE.Vector3(3, 0, 26),
-        ];
-      }
-      this.carPathIdx = 0;
-      this.carRide.phase = "driveHome";
-      this.sideCam = true;
-      sound.playWhistle();
-    });
+    this.walkTo(side, () => this.launchDriveHome());
   }
 
   /** Called (behind the cartoon black screen) to land the car in the City. */
@@ -5228,15 +5499,15 @@ export class ParkScene {
       // airport car park and nose into a bay under the roof.
       this.carPath = [
         new THREE.Vector3(3, 0, 11),
-        new THREE.Vector3(3.4, 0, 9.2),
-        new THREE.Vector3(3.6, 0, 4),
-        new THREE.Vector3(2.4, 0, 1.6),
-        new THREE.Vector3(-6, 0, 1),
-        new THREE.Vector3(-16, 0, 1),
-        new THREE.Vector3(-26, 0, 1),
-        new THREE.Vector3(-34, 0, 0),
-        new THREE.Vector3(-40, 0, -6),
-        new THREE.Vector3(-44, 0, -13),
+        new THREE.Vector3(0.5, 0, 10.8),
+        new THREE.Vector3(-8, 0, 11),
+        new THREE.Vector3(-16, 0, 11),
+        new THREE.Vector3(-24, 0, 11),
+        new THREE.Vector3(-29, 0, 11),
+        new THREE.Vector3(-34, 0, 10.6),
+        new THREE.Vector3(-38.5, 0, 8),
+        new THREE.Vector3(-40.5, 0, 0),
+        new THREE.Vector3(-41.5, 0, -10),
         new THREE.Vector3(-44, 0, -20),
       ];
     } else {
@@ -5307,6 +5578,10 @@ export class ParkScene {
       if (this.moveCarAlongPath(delta, 8)) {
         this.carRide = { phase: "none", midwayFired: false };
         this.sideCam = false;
+        // CRITICAL: clear the cinematic chase-cam too, or the camera stays
+        // locked on the parked car and never follows Happy again (this is the
+        // "friend doesn't follow me around the city" bug after a lot re-route).
+        this.cinematicCam = false;
         this.carGroup.rotation.y = Math.PI / 2; // nose-in, facing east
         this.dog.group.visible = true;
         this.dog.setAction("sit", 3.0);
@@ -5565,7 +5840,10 @@ export class ParkScene {
         park.add(fl);
       }
     });
-    [[-19.0, -4.5], [-12.5, 5]].forEach(([x, z], i) => {
+    [[-19.0, -4.5], [-12.5, 1.5]].forEach(([x, z], i) => {
+      // Keep the underpass road corridor (z≈11, west of the plaza) clear — no
+      // tree may stand in the street that runs under the music school.
+      if (z > 6 && z < 16 && x > -34 && x < 6) return;
       const tree = this.makeOneTree(0.8 + i * 0.06, i % 2 === 0);
       tree.position.set(x, 0, z);
       park.add(tree);
@@ -7412,30 +7690,67 @@ export class ParkScene {
     tarmac.userData = { type: "city_floor" };
     g.add(tarmac);
 
-    // ---- Access road from the city park / fountain out to the airport ----
-    const road = new THREE.Mesh(new THREE.PlaneGeometry(30, 5.5), darkAsphalt);
-    road.geometry.rotateX(-Math.PI / 2);
-    road.position.set(-25, 0.02, 1);
-    road.userData = { type: "city_floor" };
-    g.add(road);
-    for (let i = 0; i < 6; i++) {
+    // ---- Access road from the city, running along the BOTTOM of the park
+    // (due west) straight through the MUSIC SCHOOL UNDERPASS and into the
+    // terminal entrance — it never runs along the mayor's house. ----
+    const mainRoad = new THREE.Mesh(new THREE.PlaneGeometry(38, 5.4), darkAsphalt);
+    mainRoad.geometry.rotateX(-Math.PI / 2);
+    mainRoad.position.set(-14, 0.02, 11); // x -33 .. 5
+    mainRoad.userData = { type: "city_floor" };
+    g.add(mainRoad);
+    // Inside the airport: from the entrance south to the covered car park
+    const parkRoad = new THREE.Mesh(new THREE.PlaneGeometry(5.4, 38), darkAsphalt);
+    parkRoad.geometry.rotateX(-Math.PI / 2);
+    parkRoad.position.set(-40.5, 0.02, -5); // z -24 .. 14
+    parkRoad.userData = { type: "city_floor" };
+    g.add(parkRoad);
+    for (let i = 0; i < 8; i++) {
       const dash = new THREE.Mesh(new THREE.PlaneGeometry(2.2, 0.18), yellow);
       dash.geometry.rotateX(-Math.PI / 2);
-      dash.position.set(-13 - i * 4.6, 0.03, 1);
+      dash.position.set(1 - i * 4.4, 0.03, 11);
+      g.add(dash);
+    }
+    for (let i = 0; i < 7; i++) {
+      const dash = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 2.2), yellow);
+      dash.geometry.rotateX(-Math.PI / 2);
+      dash.position.set(-40.5, 0.03, 10 - i * 4.4);
       g.add(dash);
     }
 
-    // ---- Long terminal wall (east edge, facing the city) with ONE big door ----
+    // ---- Long terminal wall (east edge, facing the city) with the big
+    // passenger door AND a road entrance for the underpass road ----
     const wallH = 6.4;
     const wallLen = 40;
     const wallMat = new THREE.MeshStandardMaterial({ color: 0xe7ecf2, roughness: 0.85 });
     const trimMat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.6 });
-    const wall = new THREE.Mesh(new THREE.BoxGeometry(0.8, wallH, wallLen), wallMat);
-    wall.position.set(-30.4, wallH / 2, -4);
-    wall.castShadow = true;
-    wall.receiveShadow = true;
-    wall.userData = { type: "airport_wall" };
-    g.add(wall);
+    // The wall is split so the underpass road has a real entrance gap at z≈11
+    const entranceZ = 11;
+    const gapHalf = 2.8;
+    const segNorthLen = entranceZ - gapHalf - -24; // from -24 to 8.2
+    const northSeg = new THREE.Mesh(new THREE.BoxGeometry(0.8, wallH, segNorthLen), wallMat);
+    northSeg.position.set(-30.4, wallH / 2, -24 + segNorthLen / 2);
+    northSeg.castShadow = true;
+    northSeg.receiveShadow = true;
+    northSeg.userData = { type: "airport_wall" };
+    g.add(northSeg);
+    const segSouthLen = 16 - (entranceZ + gapHalf); // from 13.8 to 16
+    const southSeg = new THREE.Mesh(new THREE.BoxGeometry(0.8, wallH, segSouthLen), wallMat);
+    southSeg.position.set(-30.4, wallH / 2, entranceZ + gapHalf + segSouthLen / 2);
+    southSeg.castShadow = true;
+    southSeg.receiveShadow = true;
+    southSeg.userData = { type: "airport_wall" };
+    g.add(southSeg);
+    // Lintel over the road entrance + an ENTRANCE sign
+    const entranceHeader = new THREE.Mesh(
+      new THREE.BoxGeometry(0.9, 1.6, gapHalf * 2 + 0.6),
+      trimMat
+    );
+    entranceHeader.position.set(-30.4, wallH - 0.8, entranceZ);
+    g.add(entranceHeader);
+    const entranceSign = this.civicSign("🚗 TERMINAL ENTRANCE", "#1d4ed8", "#ffffff", 4.4);
+    entranceSign.position.set(-29.9, wallH + 0.4, entranceZ);
+    entranceSign.rotation.y = Math.PI / 2;
+    g.add(entranceSign);
     // Blue ribbon trim along the top
     const ribbon = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.5, wallLen + 0.2), trimMat);
     ribbon.position.set(-30.4, wallH - 0.25, -4);
@@ -7449,6 +7764,7 @@ export class ParkScene {
     for (let i = 0; i < 10; i++) {
       const wz = -20 + i * 4.2;
       if (Math.abs(wz) < 3.2) continue; // leave room for the door
+      if (wz > 7.6 && wz < 14.4) continue; // leave room for the road entrance
       const win = new THREE.Mesh(
         new THREE.PlaneGeometry(1.4, 1.1),
         new THREE.MeshStandardMaterial({ color: 0xbfe6f5, roughness: 0.1, metalness: 0.5 })
@@ -9478,9 +9794,24 @@ export class ParkScene {
     });
   }
 
+  /** How many Boutique Row houses can be trick-or-treated. */
+  public getBoutiqueHouseCount(): number {
+    return this.boutiqueHouseDoors.length;
+  }
+
+  /** How many houses have been knocked at this session. */
+  public getTrickOrTreatedCount(): number {
+    return this.trickOrTreated.size;
+  }
+
+  /** Restore which houses were already trick-or-treated (persisted in stats). */
+  public setTrickOrTreatedHouses(indices: number[]) {
+    this.trickOrTreated.clear();
+    indices.forEach((i) => this.trickOrTreated.add(i));
+  }
+
   /** Knock on a Boutique Row door. On Halloween the neighbours hand out candy. */
-  private trickOrTreatAt(index: number) {
-    const door = this.boutiqueHouseDoors[index];
+  private trickOrTreatAt(index: number) {    const door = this.boutiqueHouseDoors[index];
     if (!door) return;
     this.dog.setAction("bark", 1.2);
     const p = door.mesh.getWorldPosition(new THREE.Vector3());
@@ -9498,7 +9829,7 @@ export class ParkScene {
         ? "🎃 TRICK OR TREAT! A pawful of candy drops into Happy's bucket!"
         : "🎃 You already knocked here — the candy bowl is empty. Happy Halloween!"
     );
-    if (this.onTrickOrTreat) this.onTrickOrTreat(door.name, first);
+    if (this.onTrickOrTreat) this.onTrickOrTreat(door.name, first, index);
   }
 
   /** Little speech bubble floating over a porch door. */
@@ -9645,20 +9976,65 @@ export class ParkScene {
     const d = 9;
     const cream = 0xfdf0d5;
     const wood = 0xb5793a;
-    const body = new THREE.Mesh(
-      new THREE.BoxGeometry(w, h, d),
-      new THREE.MeshStandardMaterial({ color: cream, roughness: 0.85 })
-    );
-    body.position.y = h / 2;
-    body.castShadow = true;
-    body.receiveShadow = true;
-    g.add(body);
-    const skirt = new THREE.Mesh(
-      new THREE.BoxGeometry(w + 0.2, 0.6, d + 0.2),
-      new THREE.MeshStandardMaterial({ color: wood, roughness: 0.8 })
-    );
-    skirt.position.y = 0.3;
-    g.add(skirt);
+    // The music school is built as an UNDERPASS: the airport road runs
+    // straight beneath it through an arched tunnel. The school sits on two
+    // solid wings with a bridging upper floor over the road.
+    const tunnelHalf = 2.9; // half-width (in local z) of the tunnel opening
+    const tunnelH = 3.6; // clear height beneath the building
+    const wingD = d / 2 - tunnelHalf; // depth of each solid wing
+    const wallMat = new THREE.MeshStandardMaterial({ color: cream, roughness: 0.85 });
+    for (const s2 of [1, -1]) {
+      const wing = new THREE.Mesh(new THREE.BoxGeometry(w, h, wingD), wallMat);
+      wing.position.set(0, h / 2, s2 * (d / 2 - wingD / 2));
+      wing.castShadow = true;
+      wing.receiveShadow = true;
+      g.add(wing);
+      const skirt = new THREE.Mesh(
+        new THREE.BoxGeometry(w + 0.2, 0.6, wingD),
+        new THREE.MeshStandardMaterial({ color: wood, roughness: 0.8 })
+      );
+      skirt.position.set(0, 0.3, s2 * (d / 2 - wingD / 2));
+      g.add(skirt);
+    }
+    // Bridging upper floor over the tunnel
+    const upper = new THREE.Mesh(new THREE.BoxGeometry(w, h - tunnelH, d), wallMat);
+    upper.position.set(0, tunnelH + (h - tunnelH) / 2, 0);
+    upper.castShadow = true;
+    upper.receiveShadow = true;
+    g.add(upper);
+    // Dark tunnel lining (side walls + ceiling) so it reads as an underpass
+    const liningMat = new THREE.MeshStandardMaterial({ color: 0x3a3730, roughness: 0.95 });
+    for (const s2 of [1, -1]) {
+      const side = new THREE.Mesh(new THREE.BoxGeometry(w + 0.1, tunnelH, 0.12), liningMat);
+      side.position.set(0, tunnelH / 2, s2 * (tunnelHalf - 0.06));
+      g.add(side);
+    }
+    const tCeil = new THREE.Mesh(new THREE.BoxGeometry(w + 0.1, 0.14, tunnelHalf * 2), liningMat);
+    tCeil.position.set(0, tunnelH - 0.07, 0);
+    g.add(tCeil);
+    // Portal frames on both faces so the road entrance reads clearly
+    const portalMat = new THREE.MeshStandardMaterial({ color: 0x9a6b2f, roughness: 0.6 });
+    for (const side of [1, -1]) {
+      const px = side * (w / 2 + 0.08);
+      const lintel = new THREE.Mesh(
+        new THREE.BoxGeometry(0.28, 0.55, tunnelHalf * 2 + 0.6),
+        portalMat
+      );
+      lintel.position.set(px, tunnelH + 0.27, 0);
+      g.add(lintel);
+      for (const s2 of [1, -1]) {
+        const post = new THREE.Mesh(
+          new THREE.BoxGeometry(0.28, tunnelH + 0.55, 0.42),
+          portalMat
+        );
+        post.position.set(px, (tunnelH + 0.55) / 2, s2 * (tunnelHalf + 0.08));
+        g.add(post);
+      }
+    }
+    const underSign = this.civicSign("🚗 UNDERPASS", "#1d4ed8", "#ffffff", 3.2);
+    underSign.position.set(w / 2 + 0.35, tunnelH + 1.0, 0);
+    underSign.rotation.y = Math.PI / 2;
+    g.add(underSign);
     const roof = new THREE.Mesh(
       new THREE.BoxGeometry(w + 0.6, 0.3, d + 0.6),
       new THREE.MeshStandardMaterial({ color: 0x7c4a24, roughness: 0.8 })
@@ -9683,29 +10059,31 @@ export class ParkScene {
       stem.position.set(nx + 0.28, h + 1.25 + ny, 1.4);
       g.add(stem);
     });
+    // Doors, windows & sign now face NORTH (toward the park), clear of the
+    // tunnel — so nothing sits in the underpass.
     const sign = this.civicSign("🎵 MUSIC SCHOOL", "#7c3aed", "#ffffff", 4.4);
-    sign.position.set(w / 2 + 0.06, h - 0.85, 0);
-    sign.rotation.y = Math.PI / 2;
+    sign.position.set(0, h - 0.85, -(d / 2 + 0.06));
+    sign.rotation.y = Math.PI;
     g.add(sign);
     const doorMat = new THREE.MeshStandardMaterial({
       color: 0xbfe6f5, roughness: 0.08, metalness: 0.5, transparent: true, opacity: 0.85,
     });
-    [-0.75, 0.75].forEach((dz) => {
+    [-1.0, 1.0].forEach((dx) => {
       const door = new THREE.Mesh(new THREE.PlaneGeometry(1.3, 2.5), doorMat);
-      door.position.set(w / 2 + 0.02, 1.3, dz);
-      door.rotation.y = Math.PI / 2;
+      door.position.set(dx, 1.3, -(d / 2 + 0.02));
+      door.rotation.y = Math.PI;
       g.add(door);
     });
-    [-3.0, 3.0].forEach((dz) => {
+    [-3.2, 3.2].forEach((dx) => {
       const win = new THREE.Mesh(new THREE.PlaneGeometry(1.8, 1.5), doorMat);
-      win.position.set(w / 2 + 0.02, 2.3, dz);
-      win.rotation.y = Math.PI / 2;
+      win.position.set(dx, 2.3, -(d / 2 + 0.02));
+      win.rotation.y = Math.PI;
       g.add(win);
       const frame = new THREE.Mesh(
-        new THREE.BoxGeometry(0.08, 1.75, 2.05),
+        new THREE.BoxGeometry(2.05, 1.75, 0.08),
         new THREE.MeshStandardMaterial({ color: wood, roughness: 0.7 })
       );
-      frame.position.set(w / 2 - 0.01, 2.3, dz);
+      frame.position.set(dx, 2.3, -(d / 2 - 0.01));
       g.add(frame);
     });
     g.position.set(-18, 0, 11);
@@ -11216,6 +11594,18 @@ export class ParkScene {
           return;
         }
 
+        // Kitchen counter → Halloween candy unpack (Happy walks up and tips
+        // his bucket out). Any other day it's just a cosy counter clink.
+        const counterHits = raycaster.intersectObject(this.kitchenCountersGroup, true);
+        if (counterHits.length > 0) {
+          if (this.onKitchenCounterClicked) {
+            this.onKitchenCounterClicked();
+          } else {
+            sound.playButtonTap();
+          }
+          return;
+        }
+
         // (the back-to-hallway exit is a black doorway, handled generically above)
 
         // Kitchen floor walk
@@ -11338,6 +11728,15 @@ export class ParkScene {
         if (this.onTableClicked) this.onTableClicked();
         return;
       }
+      // C1b. Notice board ("pin wall") next to the dog house
+      if (this.noticeBoardGroup) {
+        const nbHits = raycaster.intersectObject(this.noticeBoardGroup, true);
+        if (nbHits.length > 0) {
+          sound.playButtonTap();
+          if (this.onNoticeBoardClicked) this.onNoticeBoardClicked();
+          return;
+        }
+      }
       // C2. Check Doghouse Exterior Click -> Enter house!
       if (this.dogHouseExteriorGroup) {
         const houseHits = raycaster.intersectObject(this.dogHouseExteriorGroup, true);
@@ -11459,10 +11858,10 @@ export class ParkScene {
           return;
         }
       }
-      // The car -> drive back home
+      // The car -> open the sat-nav to choose 🏡 Home or another lot
       const carHits = raycaster.intersectObject(this.carGroup, true);
       if (carHits.length > 0) {
-        this.startCarRideHome();
+        this.startCitySatNav();
         return;
       }
       // The new civic buildings: Music School, Town Hall & Library

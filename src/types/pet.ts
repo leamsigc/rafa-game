@@ -108,8 +108,18 @@ export interface PetStats {
   openedPresents?: number[];
   /** Unlocked achievement badge ids. */
   unlockedAchievements?: string[];
+  /** Badge Case: permanent cosmetic badges earned from skill-tree milestones. */
+  earnedBadges?: string[];
+  /** Badge Case: the single badge pinned as the trainer's showcase emblem. */
+  pinnedBadge?: string | null;
   /** Secret chat codes discovered (exact code ids). */
   foundSecretCodes?: string[];
+  /** Halloween: candy collected trick-or-treating, keyed by treat id → count. */
+  halloweenCandy?: Record<string, number>;
+  /** Halloween: indices of Boutique Row houses already knocked at. */
+  trickOrTreatedHouses?: number[];
+  /** Halloween: true once the bucket has been unpacked on the kitchen counter. */
+  halloweenUnpacked?: boolean;
   /** Google-linked trainer account (name shown on the online scoreboard). */
   linkedAccount?: LinkedAccount;
   /** Bone Rush runner save: banked bones + unlocked/equipped cosmetics. */
@@ -222,7 +232,8 @@ export type MiniGameType =
   | "backyardDigger"
   | "supermarket"
   | "gym"
-  | "boneRush";
+  | "boneRush"
+  | "carRace";
 
 export interface MiniGameScore {
   game: MiniGameType;

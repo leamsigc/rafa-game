@@ -8,8 +8,14 @@ export interface ArcadeGameEntry {
   blurb: string;
 }
 
-/** The five cabinets in the Galaxy Arcade, in ring order. */
+/** The cabinets in the Galaxy Arcade, in ring order. */
 export const ARCADE_GAMES: ArcadeGameEntry[] = [
+  {
+    id: "carRace",
+    title: "Puppy Grand Prix",
+    emoji: "🏎️",
+    blurb: "Out-drive the rival car over 3 laps. WASD to steer!",
+  },
   {
     id: "boneRush",
     title: "Subway Pup: Bone Rush",

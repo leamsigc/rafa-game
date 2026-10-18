@@ -41,6 +41,7 @@ import { TimeOfDay, WeatherType } from "../dog3d/ParkScene";
 import { WeatherWidget } from "./WeatherWidget";
 import dogAvatar from "../../assets/images/dog_avatar_1788547305164.jpg";
 import { SKILL_NODES } from "../skills/skillTreeData";
+import { getBadge } from "../achievements/badgeCaseData";
 import { getIllness, healthBandColor } from "../health/healthData";
 
 interface PetActionButtonsProps {
@@ -165,6 +166,7 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
   illnessId = null,
 }) => {
   const unlockedSet = new Set(stats.unlockedSkills || []);
+  const pinnedBadge = stats.pinnedBadge ? getBadge(stats.pinnedBadge) : undefined;
   const isHouse = viewMode === "house";
   const isCity = viewMode === "city";
   const isArcade = viewMode === "arcade";
@@ -252,6 +254,15 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
                 <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-900 border border-amber-300">
                   {roomLabel}
                 </span>
+                {pinnedBadge && (
+                  <span
+                    title={`Showcase badge: ${pinnedBadge.name} — ${pinnedBadge.description}`}
+                    className="text-[10px] font-black px-2 py-0.5 rounded-full bg-[#386641]/10 text-[#386641] border border-[#386641]/20 flex items-center gap-0.5 shrink-0"
+                  >
+                    <span>{pinnedBadge.icon}</span>
+                    <span className="hidden sm:inline truncate max-w-[92px]">{pinnedBadge.name}</span>
+                  </span>
+                )}
               </div>
               <div className="mt-1 flex items-center gap-1.5">
                 {streakDays >= 2 && (
@@ -871,7 +882,7 @@ export const PetActionButtons: React.FC<PetActionButtonsProps> = ({
                     <Gamepad2 className="w-4 h-4" />
                   </div>
                   <span className="text-xs font-black text-white">Arcade</span>
-                  <span className="text-[9px] font-bold text-purple-200 -mt-0.5">5 Games</span>
+                  <span className="text-[9px] font-bold text-purple-200 -mt-0.5">6 Games</span>
                 </button>
                 <button
                   id="house-bottom-cozy-button"

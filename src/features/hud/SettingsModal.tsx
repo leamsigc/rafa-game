@@ -22,6 +22,8 @@ import { DogBreed, HolidayId, LinkedAccount, PetStats } from "../../types/pet";
 import { TimeOfDay } from "../dog3d/ParkScene";
 import { AudioSettings, sound } from "../../utils/audio";
 import { ACHIEVEMENTS } from "../achievements/achievementsData";
+import { BADGE_CASE } from "../achievements/badgeCaseData";
+import { BadgeCase } from "../achievements/BadgeCase";
 import { getLifetime } from "../journal/dayJournal";
 import { getLevelInfo, MAX_LEVEL } from "../leveling/leveling";
 import dogAvatar from "../../assets/images/dog_avatar_1788547305164.jpg";
@@ -47,6 +49,8 @@ interface SettingsModalProps {
   onOpenScoreboard: () => void;
   onClose: () => void;
   initialTab?: SettingsTab;
+  /** Pin (or clear) a permanent Badge Case emblem as the showcase badge. */
+  onPinBadge: (badgeId: string | null) => void;
 }
 
 const BREEDS: { id: DogBreed; name: string; icon: string; desc: string }[] = [
@@ -85,10 +89,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onOpenScoreboard,
   onClose,
   initialTab = "audio",
+  onPinBadge,
 }) => {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+  const [achievementsSubTab, setAchievementsSubTab] = useState<"milestones" | "badgeCase">(
+    "badgeCase"
+  );
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => sound.getSettings());
   const unlockedSet = new Set(stats.unlockedAchievements || []);
+  const earnedBadges = stats.earnedBadges || [];
+  const earnedBadgeSet = new Set(earnedBadges);
+  const badgeCount = BADGE_CASE.filter((b) => earnedBadgeSet.has(b.id)).length;
   const levelInfo = getLevelInfo(stats.xp);
 
   const handleMasterVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -648,20 +659,59 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </div>
             </div>
           )}
-          {/* TAB 4: ACHIEVEMENTS & BADGES */}
+          {/* TAB 4: ACHIEVEMENTS HALL OF FAME & BADGE CASE */}
           {activeTab === "achievements" && (
             <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-black uppercase tracking-wider text-[#386641]">
-                  🏅 Milestone Badges ({unlockedSet.size}/{ACHIEVEMENTS.length})
-                </h4>
+              {/* Hall of Fame title + Breed Journal shortcut */}
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-sm font-black text-[#386641] flex items-center gap-1.5">
+                    🏆 Achievements Hall of Fame
+                  </h4>
+                  <p className="text-[10px] font-bold text-[#386641]/60">
+                    Badges for skill-tree milestones &amp; feats across your whole adventure
+                  </p>
+                </div>
                 <button
                   onClick={() => { sound.playButtonTap(); onOpenBreedJournal(); }}
-                  className="px-3 py-1.5 rounded-xl bg-[#386641] hover:bg-[#2c5234] text-[#F2E8CF] font-black text-[11px] flex items-center gap-1.5 cursor-pointer active:scale-95 transition-transform"
+                  className="px-3 py-1.5 rounded-xl bg-[#386641] hover:bg-[#2c5234] text-[#F2E8CF] font-black text-[11px] flex items-center gap-1.5 cursor-pointer active:scale-95 transition-transform shrink-0"
                 >
                   <BookOpen className="w-3.5 h-3.5" /> Breed Journal
                 </button>
               </div>
+
+              {/* Hall of Fame sub-tabs: Badge Case vs Milestone Badges */}
+              <div className="flex items-center gap-1.5 bg-white/50 border border-[#386641]/12 rounded-2xl p-1">
+                <button
+                  onClick={() => { sound.playButtonTap(); setAchievementsSubTab("badgeCase"); }}
+                  className={`flex-1 px-3 py-2 rounded-xl text-[11px] font-black transition-all cursor-pointer ${
+                    achievementsSubTab === "badgeCase"
+                      ? "bg-[#386641] text-[#F2E8CF] shadow-xs"
+                      : "text-[#386641]/70 hover:bg-white"
+                  }`}
+                >
+                  🏅 Badge Case ({badgeCount}/{BADGE_CASE.length})
+                </button>
+                <button
+                  onClick={() => { sound.playButtonTap(); setAchievementsSubTab("milestones"); }}
+                  className={`flex-1 px-3 py-2 rounded-xl text-[11px] font-black transition-all cursor-pointer ${
+                    achievementsSubTab === "milestones"
+                      ? "bg-[#386641] text-[#F2E8CF] shadow-xs"
+                      : "text-[#386641]/70 hover:bg-white"
+                  }`}
+                >
+                  🏆 Milestone Badges ({unlockedSet.size}/{ACHIEVEMENTS.length})
+                </button>
+              </div>
+
+              {achievementsSubTab === "badgeCase" ? (
+                <BadgeCase
+                  stats={stats}
+                  earned={earnedBadges}
+                  pinned={stats.pinnedBadge ?? null}
+                  onPin={onPinBadge}
+                />
+              ) : (
               <div className="grid grid-cols-2 gap-2.5">
                 {ACHIEVEMENTS.map((a) => {
                   const unlocked = unlockedSet.has(a.id);
@@ -712,6 +762,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   );
                 })}
               </div>
+              )}
             </div>
           )}
 
